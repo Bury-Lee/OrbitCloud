@@ -1,0 +1,17 @@
+# 依赖产物(不提交)
+node_modules/
+dist/
+
+# vue-tsc build 残留
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# 本地环境
+*.local
+.env.local
+.env.*.local
+
+# 日志与临时文件
+*.log
+.DS_Store

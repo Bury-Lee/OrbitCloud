@@ -1,0 +1,11 @@
+services:
+  orbitcloud:
+    image: golang:1.25
+    container_name: orbitcloud
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "go build -o /orbitcloud . && /orbitcloud -initConfig && /orbitcloud"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

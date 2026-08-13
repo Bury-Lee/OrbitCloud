@@ -1,0 +1,265 @@
+# ============================================================
+#  OrbitCloud - 默认配置文件
+#  (config/default.yaml, 编译期 embed 进二进制)
+#
+#  说明:
+#  · 本文件为开箱即用的默认配置, 覆盖全部可配置项;
+#  · 运行 `orbitcloud -initConfig` 可用本内置配置强制覆盖工作目录 ./config.yaml
+#    (若 ./config.yaml 不存在, 启动时也会自动生成);
+#  · 配置仅从工作目录 ./config.yaml 读取;
+#  · 不做缺省值兜底——配置缺失/非法即启动报错。
+#
+#  ★ 生产必改项:
+#    - jwt.secret → 建议环境变量 ORBITCLOUD_JWT_SECRET
+#    - storage.access_key / secret_key → 建议环境变量 ORBITCLOUD_S3_ACCESS_KEY / ORBITCLOUD_S3_SECRET_KEY
+#    - database.dsn → 生产切 postgres, 建议环境变量 ORBITCLOUD_DB_DSN
+#    - nodes[].endpoint → 各存储节点的真实 S3 端点
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. 应用基础
+# ------------------------------------------------------------
+app:
+  # 应用名称
+  # 类型: string | 必填
+  name: orbitcloud
+
+  # 版本号(与 --version 输出一致)
+  # 类型: string | 可选 | 默认: 0.1.0
+  version: 1.0.0
+
+  # 运行环境
+  # 类型: string | 可选 | 默认: dev | 取值: dev | test | prod
+  environment: dev
+
+  # 时区
+  # 类型: string | 可选 | 默认: Asia/Shanghai
+  timezone: Asia/Shanghai
+
+# ------------------------------------------------------------
+# 2. HTTP 服务
+# ------------------------------------------------------------
+server:
+  # 监听地址(0.0.0.0 = 所有网卡; 生产按需收窄)
+  host: "0.0.0.0"
+
+  # 监听端口
+  port: 8080
+
+  # 读超时(分钟; 0 = 不限)
+  read_timeout: 1
+
+  # 写超时(分钟; 0 = 不限; 下载为流式返回, 建议保持 0)
+  write_timeout: 0
+
+  # 空闲超时(分钟; 0 = 不限)
+  idle_timeout: 0
+
+  # 最大请求头大小(字节)
+  max_header_bytes: 1048576
+
+  # 运行模式
+  # 取值: debug | release | test
+  mode: debug
+
+# ------------------------------------------------------------
+# 3. 认证(JWT)
+# ------------------------------------------------------------
+jwt:
+  # JWT 签名密钥(必填; 下面为开发用示例值, 生产必须更换,
+  # 建议环境变量 ORBITCLOUD_JWT_SECRET 注入)
+  secret: "orbitcloud-dev-secret-please-change"
+
+  # 访问令牌有效期(分钟)
+  expire_minutes: 720
+
+  # 签发者(Verify 时校验 issuer)
+  issuer: orbitcloud
+
+  # 签名算法
+  algorithm: HS256
+
+# 刷新令牌配置(与 jwt 分离; secret 留空时由访问密钥派生)
+refresh_jwt:
+  # 刷新令牌有效期(分钟; 默认 10080 = 7 天)
+  expire_minutes: 10080
+
+  # 签发者(可选, 默认同 jwt.issuer)
+  issuer: orbitcloud
+
+# ------------------------------------------------------------
+# 4. 存储引擎(对象存储后端 + 分片/副本参数)
+# ------------------------------------------------------------
+storage:
+  # 存储提供商标识
+  # 取值: minio | rustfs | s3 | oss | cos | obs
+  provider: rustfs
+
+  # 服务端点地址(单存储端点; 多节点场景可留空, 由 nodes[].endpoint 逐节点指定)
+  endpoint: "http://127.0.0.1:9000"
+
+  # 访问密钥(S3 Access Key; RustFS 默认 rustfsadmin, 生产必改,
+  # 建议环境变量 ORBITCLOUD_S3_ACCESS_KEY 注入)
+  access_key: "rustfsadmin"
+
+  # 访问密钥 Secret(RustFS 默认 rustfsadmin, 生产必改,
+  # 建议环境变量 ORBITCLOUD_S3_SECRET_KEY 注入)
+  secret_key: "rustfsadmin"
+
+  # 区域
+  region: us-east-1
+
+  # 是否启用 SSL(端点协议切换 http/https)
+  use_ssl: false
+
+  # 请求超时(秒)
+  timeout: 30
+
+  # 最大重试次数
+  max_retries: 3
+
+  # —— 分片/副本参数 ——
+  # 分片大小(MB): 文件按此大小切分并分发到不同节点
+  # 建议范围 1 ~ 64; 过大则并行度低, 过小则元数据膨胀
+  chunk_size: 5
+
+  # 最小副本数: 每个分片至少保存的副本数量, 副本落在不同节点
+  min_replicas: 2
+
+  # 默认存储驱动(可被 nodes[].driver 逐节点覆盖)
+  # 取值: s3    - 分片以 S3 对象存入对象存储(生产推荐)
+  #       local - 分片直接写本地目录(开发/单机测试, 无需对象存储)
+  # ★ 本机未启动对象存储时, 把 driver 改为 local 即可跑通全流程
+  driver: s3
+
+  # 副本修复扫描周期: 周期性检查副本数不足的分片并触发重建
+  repair_interval: 30s
+
+  # 副本修复并发上限: 防止多节点同时故障时产生"修复风暴"
+  repair_concurrency: 4
+
+# ------------------------------------------------------------
+# 5. 健康检查(节点可用性)
+# ------------------------------------------------------------
+health:
+  # 节点探测周期
+  check_interval: 5s
+
+  # 连续失败 N 次后将该节点标记为 inactive(自动剔除, 不再分配新写入)
+  fail_threshold: 3
+
+# ------------------------------------------------------------
+# 6. agilePool 协程池(全局并发控制)
+# ------------------------------------------------------------
+pool:
+  # 最大工作协程数: 所有并行任务的并发上限
+  max_workers: 64
+
+  # 任务队列容量: 超出后提交方阻塞等待
+  queue_size: 1024
+
+# ------------------------------------------------------------
+# 7. 存储节点列表
+# 注: 全局凭据/驱动取自 storage 段, 节点可逐项覆盖(留空 = 继承 storage)
+# ------------------------------------------------------------
+nodes:
+  - id: node1                # 节点 ID: 唯一
+    driver: s3               # 可选, 覆盖 storage.driver(s3 | local)
+    path: orbitcloud-node1   # s3 驱动: bucket 名; local 驱动: 本地目录路径
+    endpoint: http://127.0.0.1:9000   # s3 驱动必填: 该节点 S3 端点
+    access_key: ""           # 可选, 覆盖全局 storage.access_key(留空继承)
+    secret_key: ""           # 可选, 覆盖全局 storage.secret_key(留空继承)
+    max_space: 0             # 容量配额(GB); 0 表示不限
+    enabled: true            # 可选, 默认 true; false = 启动时不注册该节点
+
+  # 多节点扩展示例(取消注释即可):
+  # - id: node2
+  #   path: orbitcloud-node2
+  #   endpoint: http://192.168.1.12:9000
+  #   max_space: 100
+  # - id: node3
+  #   path: orbitcloud-node3
+  #   endpoint: http://192.168.1.13:9000
+  #   max_space: 100
+
+# ------------------------------------------------------------
+# 8. 数据库(元数据; GORM 自动建表, 无需手写迁移 SQL)
+#    读写分离: database.sources 写库列表 + database.replicas 读库列表
+#    - sources 必填(≥1), 首个为主库(建表/审计); 多写库需库间主主复制
+#    - replicas 可选; 非空时读操作走读库(负载均衡)
+#    - sqlite 仅限开发(单写库、无读库)
+# ------------------------------------------------------------
+database:
+  # 默认数据库类型(列表项未指定时继承)
+  # 取值: sqlite | postgres
+  source: sqlite
+
+  # 字符集
+  charset: "utf8mb4"
+
+  # GORM 日志级别
+  # 取值: silent | error | warn | info
+  log_level: warn
+
+  # 主库连接池(仅 sources[0] 生效)
+  max_idle_conns: 5
+  max_open_conns: 20
+
+  # 写库列表(必填 ≥1; 首个为主库)
+  # 每个连接项可用 dsn 或 host/port/username/password/database 拼装(dsn 优先)
+  # sqlite  : dsn = 数据库文件路径, 如 "orbitcloud.db"(自动创建)
+  # postgres: dsn = 连接串, 如 "postgres://user:pass@localhost:5432/orbitcloud?sslmode=disable"
+  #           ★生产建议环境变量 ORBITCLOUD_DB_DSN 注入★
+  sources:
+    - dsn: "orbitcloud.db"
+      # max_idle_conns: 5    # 项级覆盖(0 = 继承 database 级)
+      # max_open_conns: 20
+
+  # 读库列表(可选; sqlite 不支持读写分离, 配置了会报错)
+  # 说明: 读操作在多个读库间负载均衡; 数据库数量 = 1(无读库)时读写同库
+  # replicas:
+  #   - dsn: "postgres://user:pass@10.0.0.2:5432/orbitcloud?sslmode=disable"
+  #     max_idle_conns: 5
+  #     max_open_conns: 20
+  #   - dsn: "postgres://...@10.0.0.3:5432/orbitcloud?..."  # 可配多个读库做负载均衡
+
+# ------------------------------------------------------------
+# 9. 日志
+# ------------------------------------------------------------
+log:
+  # 日志级别
+  # 取值: debug | info | warn | error
+  level: info
+
+  # 输出格式
+  # 取值: json | text; 生产建议 json(便于采集解析)
+  format: text
+
+  # 日志输出配置; 留空 = 输出到 stdout(默认)
+  #
+  # 非空时启用文件轮转, 按日期建子文件夹, 文件名取 时-分-秒:
+  #   {目录}/{YYYY-MM-DD}/{前缀}-{HH-MM-SS}.log
+  #
+  # 写法一: output_path 指向目录, 前缀固定为 orbitcloud
+  #   output_path: "./logs"
+  #   → ./logs/2026-08-05/orbitcloud-14-30-05.log
+  #
+  # 写法二: output_path 带文件名, 目录取父目录、前缀取文件名(去扩展名)
+  #   output_path: "./logs/app.log"
+  #   → ./logs/2026-08-05/app-14-30-05.log
+  #
+  # 切换规则: 单文件超过 max_size(KB, >0 时)或跨天自动切换新文件
+  output_path: "./logs/"
+
+  # 日志文件最大大小; 单文件超过后自动切换新文件(文件名按 时-分-秒)
+  # 单位: KB | 默认: 0(不按大小切换, 仅按日期切换)
+  max_size: 0
+  # max_size: 10240   # 例: 单文件 10MB 后切换
+
+  # 日志入库的最低级别; 留空表示不入库(量大会膨胀, 谨慎开启)
+  # 取值: debug | info | warn | error | ""(不入库)
+  db_level: ""
+  # db_level: info
+
+  # 日志表保留天数; 超过后由定时任务分批清理
+  retention_days: 30
