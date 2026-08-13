@@ -1,0 +1,21 @@
+# ============================================================
+#  .dockerignore —— 仓库根构建上下文过滤
+#  build context 为仓库根, 排除与镜像无关的大文件/目录
+#
+#  ★注意: log/ 是 orbitcloud/log 源码包目录, 绝不能排除;
+#          仅排除日志输出目录 logs/ 与 *.log 文件
+#  ★规则: /xxx/ 前缀限定只匹配构建上下文根目录, 避免误伤 vendor/ 下同名目录
+# ============================================================
+
+.git
+.gitignore
+/data/
+/logs/
+/*.log
+orbitcloud.exe
+orbitcloud-linux
+orbitcloud
+orbitcloud.db
+/.orbitcloud/
+frontend/node_modules
+frontend/dist

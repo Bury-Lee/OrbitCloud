@@ -1,0 +1,20 @@
+# 编译产物
+orbitcloud.exe
+orbitcloud-linux
+orbitcloud
+/build/dist/
+
+# 运行时生成(启动后由程序自动创建)
+/config.yaml
+orbitcloud.db
+.orbitcloud/
+data/
+logs/
+*.log
+
+# Go 依赖(vendor 目录由 go.mod/go.sum 管理,不提交)
+vendor/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
