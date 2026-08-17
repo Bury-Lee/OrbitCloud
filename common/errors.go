@@ -24,6 +24,8 @@ var (
 	// ErrRangeNotSatisfiable Range 请求头非法/区间越界 → 416
 	// (断点续传/随机读;响应体带 Content-Range: bytes */size,见 api/stream.go)
 	ErrRangeNotSatisfiable = errors.New("range not satisfiable")
+	// ErrTooManyRequests 请求准入池/背压拒绝 → 503
+	ErrTooManyRequests = errors.New("too many requests")
 )
 
 // HTTPStatus 哨兵错误 → HTTP 状态码映射(未匹配 → 500)。
@@ -44,6 +46,8 @@ func HTTPStatus(err error) int {
 		return http.StatusRequestEntityTooLarge // 413
 	case errors.Is(err, ErrRangeNotSatisfiable):
 		return http.StatusRequestedRangeNotSatisfiable // 416
+	case errors.Is(err, ErrTooManyRequests):
+		return http.StatusServiceUnavailable // 503
 	default:
 		return http.StatusInternalServerError // 500
 	}

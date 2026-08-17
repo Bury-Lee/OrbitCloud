@@ -61,7 +61,11 @@ func main() {
 	}
 	core.Storage = storage
 
-	core.Pool = appinit.InitPool(cfg)
+	// 初始化三个池(顺序无关):
+	core.Pool = appinit.InitPool(cfg)                          // 后台任务池(Delete/Copy 任务)
+	core.ExecPool = appinit.InitExecPool(cfg)                  // 非流式 API 执行池
+	core.StreamExecPool = appinit.InitStreamExecPool(cfg)      // 流式 API 执行池
+	core.StreamingPool = appinit.InitAdmissionPool(cfg)        // 流式准入池(AdmissionPool)
 	log.Infof("orbitcloud core initialized (version %s, env %s)", cfg.App.Version, cfg.App.Environment)
 
 	// 2. 执行命令行指令(flag.Run):需 DB 已就绪,故放在初始化之后;
@@ -113,8 +117,15 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Errorf("main: http shutdown: %v", err)
 	}
+	// 关闭各池
 	if core.Pool != nil {
 		core.Pool.Close()
+	}
+	if core.ExecPool != nil {
+		core.ExecPool.Close()
+	}
+	if core.StreamExecPool != nil {
+		core.StreamExecPool.Close()
 	}
 	if sqlDB, err := core.DB.DB(); err == nil {
 		_ = sqlDB.Close()

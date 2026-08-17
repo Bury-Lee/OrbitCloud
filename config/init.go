@@ -50,7 +50,7 @@ func (d Database) InitDB(lg logger.Interface) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// 2. 打开连接(TranslateError: true 是 isUniqueViolation 依赖的关键配置)
+	// 2. 打开连接(TranslateError: true 是 isUniqueViolation 依赖的关键)
 	db, err := gorm.Open(dialector, &gorm.Config{
 		TranslateError: true,
 		Logger:         lg,
@@ -232,6 +232,32 @@ func (c Config) InitConfig() (*Config, error) {
 		if strings.EqualFold(n.Driver, "s3") && strings.TrimSpace(n.Endpoint) == "" {
 			return nil, fmt.Errorf("config: nodes[%d].endpoint is required when driver is s3", i)
 		}
+	}
+
+	// request_pool 校验
+	rp := c.RequestPool
+	if rp.MaxConcurrent <= 0 {
+		return nil, errors.New("config: request_pool.max_concurrent must be > 0")
+	}
+	if rp.StreamingMax <= 0 {
+		return nil, errors.New("config: request_pool.streaming_max must be > 0")
+	}
+	switch rp.Mode {
+	case RequestPoolModeBlock, RequestPoolModeReject:
+		// ok
+	case "":
+		rp.Mode = RequestPoolModeBlock // 默认 block
+	default:
+		return nil, fmt.Errorf("config: request_pool.mode must be %q or %q, got %q",
+			RequestPoolModeBlock, RequestPoolModeReject, rp.Mode)
+	}
+
+	// exec_pool 校验
+	if c.ExecPool.MaxWorkers <= 0 {
+		return nil, errors.New("config: exec_pool.max_workers must be > 0")
+	}
+	if c.ExecPool.StreamWorkers <= 0 {
+		return nil, errors.New("config: exec_pool.stream_workers must be > 0")
 	}
 
 	return &c, nil

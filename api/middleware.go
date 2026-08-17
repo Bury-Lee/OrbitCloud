@@ -1,15 +1,18 @@
-﻿// middleware.go 鉴权/管理员/请求日志中间件。
+﻿// middleware.go 鉴权/管理员/请求日志/执行池中间件。
 package api
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
+	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/common"
+	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/server"
 )
@@ -128,5 +131,33 @@ func RequestLogMiddleware(c *gin.Context) {
 
 	log.Debug(logBuilder.String())
 
+	c.Next()
+}
+
+// ExecPoolMiddleware 执行池中间件:将剩余 handler 链提交到 core.ExecPool 执行。
+//   - 池有界队列满时 SubmitCtx 阻塞 → 背压自然传导至 HTTP Server → 客户端。
+//   - 流式接口(下载/预览/流媒体/批量下载)不用此中间件,改用 StreamingPoolMiddleware。
+func ExecPoolMiddleware(c *gin.Context) {
+	done := make(chan struct{}, 1)
+	core.ExecPool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+		c.Next()
+		close(done)
+		return nil
+	}))
+	<-done
+}
+
+// StreamingPoolMiddleware 流式请求准入中间件(下载/预览/流媒体/批量下载)。
+// 使用 core.StreamingPool(AdmissionPool) 做准入令牌控制,handler 在原地执行。
+// 满时按配置 block(阻塞)或 reject(503),与执行池隔离防止慢流挤占短请求。
+func StreamingPoolMiddleware(c *gin.Context) {
+	if err := core.StreamingPool.Acquire(c.Request.Context()); err != nil {
+		if errors.Is(err, core.ErrTooManyRequests) {
+			common.Error(c, 503, "server busy, try again later")
+		}
+		c.Abort()
+		return
+	}
+	defer core.StreamingPool.Release()
 	c.Next()
 }
