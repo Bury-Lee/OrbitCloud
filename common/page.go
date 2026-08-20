@@ -131,7 +131,7 @@ func Paginate[T any](db *gorm.DB, opt *Option, result *[]T) (*PaginatedResult[T]
 		var vals []any
 		for _, field := range opt.KeyList {
 			conds = append(conds, field+" LIKE ?")
-			vals = append(vals, "%"+opt.Key+"%")
+			vals = append(vals, opt.Key+"%")
 		}
 		query = query.Where("("+strings.Join(conds, " OR ")+")", vals...)
 	}

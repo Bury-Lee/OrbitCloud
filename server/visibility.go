@@ -1,7 +1,7 @@
 ﻿// visibility.go —— 条目级可见性(用户组 ACL)。
 //
 // File/Folder.VisibleToGroups 存"可见组 ID"的 JSON 数组(如 "[1,5]"):
-// 空串 = 不限制(按桶级权限可见);非空 = 仅创建者 / 管理员(权限 <= 1)/
+// 空串 = 不限制(按桶级权限可见);非空 = 仅管理员(权限 <= 1)/
 // 可见组内成员可访问。组为纯白名单参考,无权限等级概念。
 //
 // 权限判定已迁至 api/perm.go;本文件保留可见性写路径可行性(条目/组存在)
@@ -72,9 +72,6 @@ func checkItemAccessTree(ctx context.Context, user *model.User, groups *[]uint, 
 	if strings.TrimSpace(visibleToGroups) == "" {
 		return nil // 空 = 不限制
 	}
-	if uploadedBy == user.ID {
-		return nil
-	}
 	if user.PermissionLevel <= 1 {
 		return nil
 	}
@@ -112,7 +109,7 @@ func ParseVisibleGroups(s string) ([]uint, error) {
 }
 
 // ItemVisibleRule 条目级可见性纯判定(单一实现,api/server 共用):
-// 空 visibleToGroups 不限制;非空时仅创建者 / 管理员(权限<=1)/ 可见组内成员可访问,
+// 空 visibleToGroups 不限制;非空时仅管理员(权限<=1)/ 可见组内成员可访问,
 // 解析失败或空数组 → ErrForbidden(数据异常拒绝访问)。
 // user 与 userGroups 由调用方加载,本函数不查库。
 func ItemVisibleRule(userID uint, visibleToGroups string, uploadedBy uint, user *model.User, userGroups []uint) error {
@@ -125,9 +122,6 @@ func ItemVisibleRule(userID uint, visibleToGroups string, uploadedBy uint, user 
 	}
 	if len(groupIDs) == 0 {
 		return ErrForbidden
-	}
-	if uploadedBy == userID {
-		return nil
 	}
 	if user == nil || user.PermissionLevel <= 1 {
 		if user == nil {
@@ -277,13 +271,12 @@ func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (strin
 			groupClause = fmt.Sprintf(" OR EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s))", placeholders)
 		}
 	}
-	// 参数顺序:uploaded_by, 组 ID 列表...
-	args := make([]any, 0, 1+len(userGroupIDs))
-	args = append(args, user.ID)
+	// 参数顺序:组 ID 列表...
+	args := make([]any, 0, len(userGroupIDs))
 	for _, gid := range userGroupIDs {
 		args = append(args, gid)
 	}
-	sql := "(visible_to_groups = '' OR visible_to_groups IS NULL OR uploaded_by = ?" + groupClause + ")"
+	sql := "(visible_to_groups = '' OR visible_to_groups IS NULL" + groupClause + ")"
 	return sql, args
 }
 

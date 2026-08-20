@@ -24,6 +24,8 @@ func FileRouter(authed *gin.RouterGroup) {
 	authed.POST("/buckets/:id/files", AuthMiddleware, App.File.UploadFile)
 	authed.POST("/buckets/:id/files/batch", AuthMiddleware, App.File.UploadFiles)
 	authed.GET("/buckets/:id/files", AuthMiddleware, App.File.ListFiles)
+	authed.GET("/buckets/:id/files/search", AuthMiddleware, App.File.FileSearch)
+	authed.GET("/buckets/:id/dirs/search", AuthMiddleware, App.File.FolderSearch)
 	authed.GET("/buckets/:id/files/:fid", AuthMiddleware, App.File.GetFileMeta)
 	authed.GET("/buckets/:id/dirs/:fid", AuthMiddleware, App.File.GetFolderMeta)
 	authed.POST("/buckets/:id/files/:fid/copy", AuthMiddleware, App.File.CopyFile)

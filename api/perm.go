@@ -57,7 +57,7 @@ func ensurePermUser(ctx context.Context, userID uint, user **model.User) (*model
 }
 
 // permItemAccessWith 条目级可见性判定(带用户/组成员懒加载缓存):
-// 空可见组不限制;上传者本人或管理员(权限<=1)可见;其余按 server.ItemVisibleRule 判定。
+// 空可见组不限制;管理员(权限<=1)可见;其余按 server.ItemVisibleRule 判定。
 func permItemAccessWith(ctx context.Context, userID uint, user **model.User, groups *[]uint, visibleToGroups string, uploadedBy uint) error {
 	if strings.TrimSpace(visibleToGroups) == "" {
 		return nil // 空 = 不限制
@@ -65,9 +65,6 @@ func permItemAccessWith(ctx context.Context, userID uint, user **model.User, gro
 	u, err := ensurePermUser(ctx, userID, user)
 	if err != nil {
 		return err
-	}
-	if uploadedBy == userID {
-		return nil
 	}
 	if u.PermissionLevel <= 1 {
 		return nil // 管理员可见一切(含受限条目)
