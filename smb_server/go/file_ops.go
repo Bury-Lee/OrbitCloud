@@ -1,4 +1,4 @@
-// file_ops.go —— 文件操作 RPC:open/read/write/list/unlink/rename/stat。
+﻿// file_ops.go —— 文件操作 RPC:open/read/write/list/unlink/rename/stat。
 //
 // 对应可行性报告 §3.1(文件操作可替换,核心目标):
 //   - 把 SMB 操作翻译为对 OrbitCloud 后端的调用(复用 model + server 层 +
@@ -10,6 +10,12 @@
 //   - list_dir:查 files / folders 表;unlink / rename:复用
 //     server/file_delete.go、server/file_copy_move.go 的包级函数;
 //   - stat / set_times / truncate:查/改文件记录。
+//
+// 设计点 8(流式约束):SMB 层与 HTTP 层同属 API 层,统一调用 server 层——
+//   - 控制面(路径/意图/句柄/元数据等参数):JSON 序列化,帧协议承载;
+//   - 数据面(文件数据):尽量走 io.Reader 流式管道,不整文件进内存;
+//     Read 内部用 GetRange 的 io.ReadCloser + io.CopyN 流式搬出;
+//     Write 把帧数据包成 io.Reader 交 server 层上传逻辑(与 HTTP 同一路径)。
 //
 // 对象键约定:对象 key = 文件记录主键 ID 字符串;桶名 = utils.BucketEncoder(桶ID);
 // 桶根 = 虚拟根(FolderID=0,无根实例行)。
@@ -23,7 +29,8 @@ import (
 	"orbitcloud/core"
 )
 
-// FileOpsService 文件操作服务:实现全部文件类 RPC 的落库/落对象逻辑。
+// FileOpsService 文件操作服务:实现全部文件类操作的落库/落对象逻辑。
+// 由 gateway.go 的 OperateHandler 实现转发调用(操作码见 types.go)。
 type FileOpsService struct {
 	// st 对象存储抽象(core.Storage 单例:Put/Get/GetRange/Delete)。
 	st core.ObjectStorage
@@ -36,19 +43,6 @@ type FileOpsService struct {
 // 返回值:文件操作服务实例。
 func NewFileOpsService(st core.ObjectStorage, handles *HandleRegistry) *FileOpsService {
 	return &FileOpsService{st: st, handles: handles}
-}
-
-// Handle 统一分发文件类请求(由 gateway.dispatch 调用)。
-// 伪代码步骤:
-//
-//	1. switch msgType → 对应方法(Open/Read/Write/Flush/Stat/SetTimes/
-//	   Truncate/ListDir/Close/Unlink/Rename);
-//	2. 解码 body → 业务调用 → 编码响应 body;
-//	3. 业务哨兵错误映射 ErrCode* 返回(由 dispatch 包装为 ErrorEnvelope)。
-func (f *FileOpsService) Handle(msgType uint16, body []byte) (uint16, []byte, error) {
-	_ = msgType
-	_ = body
-	return MSG_ERR_RESP, nil, errNotImplemented
 }
 
 // remoteHandle 远程句柄:一次 SMB CREATE 对应的全部状态。
@@ -83,45 +77,47 @@ type remoteHandle struct {
 	mu sync.Mutex
 }
 
-// Open 打开/创建文件或目录(MSG_FILE_OPEN)。
+// Open 打开/创建文件或目录(CodeFileOpen)。
 // 参数:ctx 上下文;req 打开请求(路径/读写/意图);share 所属共享(桶上下文)。
 // 返回值:打开结果(句柄 ID 等);哨兵错误按 ErrCode* 语义。
 // 伪代码步骤:
 //
-//	1. 解析路径:req.Path 首组件为目录名(可能空 = 桶根),其余沿 folders 表
-//	   parent_id 链解析(resolveSharePath);任一祖先 Isable=false → NotFound;
-//	   逐段 mkdir(伪代码:调 server 层建目录接口,遵循 mkdir -p 语义);
-//	2. 目录分支(req.Directory):
-//	   - 目标已存在且是文件 → ErrCodeIsDirectory;
-//	   - 目标不存在:仅 intent ∈ {create, open_or_create} 允许新建目录,
-//	     否则 ErrCodeNotFound;
-//	3. 文件分支:
-//	   - intent 翻译:open→仅打开;create→仅新建(已存在 ErrCodeExists);
-//	     open_or_create→存在打开否则新建;overwrite_or_create→清空或新建;
-//	     truncate→打开并截断(不存在 ErrCodeNotFound);
-//	   - 写 intent 需校验共享/条目写权限(复用 server 层 ACL 判定),
-//	     无权限 → ErrCodeAccessDenied;
-//	4. 成功:构造 remoteHandle(记录 bucketID/folderID/fileID/objectKey),
-//	   写 intent 时初始化 WriteBackCache,handleRegistry.Alloc 登记;
-//	5. 返回 OpenResponse{HandleID, IsDir, EndOfFile, Exists}。
-func (f *FileOpsService) Open(ctx context.Context, req *OpenRequest, share ShareInfo) (*OpenResponse, error) {
+//  1. 解析路径:req.Path 首组件为目录名(可能空 = 桶根),其余沿 folders 表
+//     parent_id 链解析(resolveSharePath);任一祖先 Isable=false → NotFound;
+//     逐段 mkdir(伪代码:调 server 层建目录接口,遵循 mkdir -p 语义);
+//  2. 目录分支(req.Directory):
+//     - 目标已存在且是文件 → ErrCodeIsDirectory;
+//     - 目标不存在:仅 intent ∈ {create, open_or_create} 允许新建目录,
+//     否则 ErrCodeNotFound;
+//  3. 文件分支:
+//     - intent 翻译:open→仅打开;create→仅新建(已存在 ErrCodeExists);
+//     open_or_create→存在打开否则新建;overwrite_or_create→清空或新建;
+//     truncate→打开并截断(不存在 ErrCodeNotFound);
+//     - 写 intent 需校验共享/条目写权限(复用 server 层 ACL 判定),
+//     无权限 → ErrCodeAccessDenied;
+//  4. 成功:构造 remoteHandle(记录 bucketID/folderID/fileID/objectKey),
+//     写 intent 时初始化 WriteBackCache,handleRegistry.Alloc 登记;
+//  5. 返回 OpenResult{HandleID, IsDir, EndOfFile, Exists}。
+func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareInfo) (*OpenResult, error) {
 	_ = ctx
-	_ = req
+	_ = args
 	_ = share
 	return nil, errNotImplemented
 }
 
-// Read 按偏移读(MSG_FILE_READ)。
+// Read 按偏移读(CodeFileRead;数据面流式,设计点 8)。
 // 参数:ctx 上下文;handleID 远程句柄 ID;offset 起始偏移;length 期望长度。
 // 返回值:实际读到的字节(≤ length;0 = EOF);错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle = handles.Get(handleID);nil → ErrCodeNotFound;
-//	2. 目录句柄 → ErrCodeIsDirectory;
-//	3. 读路径:优先命中写回缓存(段合并视图,见 WriteBackCache.ReadRange);
-//	   未覆盖区间 → core.Storage.GetRange(ctx, bucket, key, start, end)
-//	   (对象不存在 → 视为零填充,返回空);
-//	4. 合并返回;更新 lastActive。
+//  1. handle = handles.Get(handleID);nil → ErrCodeNotFound;
+//  2. 目录句柄 → ErrCodeIsDirectory;
+//  3. 读路径(数据面走 io.Reader 流式,不整文件进内存):
+//     - 优先命中写回缓存(段合并视图,见 WriteBackCache.ReadRange);
+//     - 未覆盖区间 → core.Storage.GetRange(ctx, bucket, key, start, end)
+//     得到 io.ReadCloser,用 io.CopyN 流式复制到响应缓冲
+//     (对象不存在 → 视为零填充,返回空);
+//  4. 合并返回;更新 lastActive。
 func (f *FileOpsService) Read(ctx context.Context, handleID uint64, offset uint64, length uint32) ([]byte, error) {
 	_ = ctx
 	_ = handleID
@@ -130,16 +126,19 @@ func (f *FileOpsService) Read(ctx context.Context, handleID uint64, offset uint6
 	return nil, errNotImplemented
 }
 
-// Write 按偏移写(MSG_FILE_WRITE;S3 随机写约束见 WriteBackCache)。
+// Write 按偏移写(CodeFileWrite;S3 随机写约束见 WriteBackCache;
+// 数据面流式,设计点 8)。
 // 参数:ctx 上下文;handleID 远程句柄 ID;offset 写入偏移;data 待写数据。
 // 返回值:实际写入字节数(通常 = len(data));错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle = handles.Get(handleID);nil → ErrCodeNotFound;目录 → ErrCodeIsDirectory;
-//	2. 校验共享写权限(ShareInfo.Mode == "readonly" → ErrCodeAccessDenied);
-//	3. writeCache.ApplyWrite(offset, data) —— 内存段缓存,合并相邻/重叠段;
-//	4. 缓存超阈值(如 4 MiB)→ 立即触发 FlushToStorage(防内存无限增长);
-//	5. 返回 len(data);更新 lastActive 与 size。
+//  1. handle = handles.Get(handleID);nil → ErrCodeNotFound;目录 → ErrCodeIsDirectory;
+//  2. 校验共享写权限(ShareInfo.Mode == "readonly" → ErrCodeAccessDenied);
+//  3. 数据面流式:把帧数据包成 io.Reader(bytes.NewReader(data)),交给
+//     server 层上传/写入逻辑(与 HTTP 上传共用同一路径),落写回缓存:
+//     writeCache.ApplyWrite(offset, data) —— 内存段缓存,合并相邻/重叠段;
+//  4. 缓存超阈值(如 4 MiB)→ 立即触发 FlushToStorage(防内存无限增长);
+//  5. 返回 len(data);更新 lastActive 与 size。
 func (f *FileOpsService) Write(ctx context.Context, handleID uint64, offset uint64, data []byte) (uint32, error) {
 	_ = ctx
 	_ = handleID
@@ -148,59 +147,59 @@ func (f *FileOpsService) Write(ctx context.Context, handleID uint64, offset uint
 	return 0, errNotImplemented
 }
 
-// Flush 冲刷写回缓存(SMB FLUSH;MSG_FILE_FLUSH)。
+// Flush 冲刷写回缓存(SMB FLUSH;CodeFileFlush)。
 // 参数:ctx 上下文;handleID 远程句柄 ID。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle 校验同 Write;
-//	2. writeCache.FlushToStorage(ctx, f.st, bucket, objectKey, 原大小);
-//	3. 成功后更新 files 表 FileSize/UpdatedAt(与对象一致)。
+//  1. handle 校验同 Write;
+//  2. writeCache.FlushToStorage(ctx, f.st, bucket, objectKey, 原大小);
+//  3. 成功后更新 files 表 FileSize/UpdatedAt(与对象一致)。
 func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 	_ = ctx
 	_ = handleID
 	return errNotImplemented
 }
 
-// Stat 查询元信息(MSG_FILE_STAT)。
+// Stat 查询元信息(CodeFileStat)。
 // 参数:ctx 上下文;handleID 远程句柄 ID。
 // 返回值:FileInfo(字段与 Rust 侧一一对应);错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle 校验;
-//	2. 查 files / folders 记录(名称、大小、时间戳),FILETIME 换算
-//	   (UTC 时间戳 → 1601 起 100ns 刻度);
-//	3. 目录:size=0,is_directory=true;文件:size=FileSize(叠加未冲刷的
-//	   写回缓存增量);
-//	4. 组装 FileInfo 返回。
+//  1. handle 校验;
+//  2. 查 files / folders 记录(名称、大小、时间戳),FILETIME 换算
+//     (UTC 时间戳 → 1601 起 100ns 刻度);
+//  3. 目录:size=0,is_directory=true;文件:size=FileSize(叠加未冲刷的
+//     写回缓存增量);
+//  4. 组装 FileInfo 返回。
 func (f *FileOpsService) Stat(ctx context.Context, handleID uint64) (*FileInfo, error) {
 	_ = ctx
 	_ = handleID
 	return nil, errNotImplemented
 }
 
-// SetTimes 设置时间戳(MSG_FILE_SET_TIMES;nil 字段 = 不改)。
+// SetTimes 设置时间戳(CodeFileSetTimes;nil 字段 = 不改)。
 // 参数:ctx 上下文;req 设置请求。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle 校验;
-//	2. 更新 files / folders 记录对应时间列(FILETIME → UTC);
-//	3. 写回缓存中的对象时间戳在 Flush 时一并体现。
-func (f *FileOpsService) SetTimes(ctx context.Context, req *SetTimesRequest) error {
+//  1. handle 校验;
+//  2. 更新 files / folders 记录对应时间列(FILETIME → UTC);
+//  3. 写回缓存中的对象时间戳在 Flush 时一并体现。
+func (f *FileOpsService) SetTimes(ctx context.Context, args *SetTimesArgs) error {
 	_ = ctx
-	_ = req
+	_ = args
 	return errNotImplemented
 }
 
-// Truncate 截断/扩展到指定长度(MSG_FILE_TRUNCATE)。
+// Truncate 截断/扩展到指定长度(CodeFileTruncate)。
 // 参数:ctx 上下文;handleID 远程句柄 ID;length 目标长度。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle 校验;目录 → ErrCodeIsDirectory;
-//	2. 更新 files 表 FileSize = length;
-//	3. 写回缓存标记 truncate 点(Flush 时把对象裁剪/零填充到 length)。
+//  1. handle 校验;目录 → ErrCodeIsDirectory;
+//  2. 更新 files 表 FileSize = length;
+//  3. 写回缓存标记 truncate 点(Flush 时把对象裁剪/零填充到 length)。
 func (f *FileOpsService) Truncate(ctx context.Context, handleID uint64, length uint64) error {
 	_ = ctx
 	_ = handleID
@@ -208,15 +207,15 @@ func (f *FileOpsService) Truncate(ctx context.Context, handleID uint64, length u
 	return errNotImplemented
 }
 
-// ListDir 列目录(MSG_FILE_LIST_DIR)。
+// ListDir 列目录(CodeFileListDir)。
 // 参数:ctx 上下文;handleID 目录句柄 ID;pattern 通配符(可忽略,由 SMB 层过滤)。
 // 返回值:目录条目列表;错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle 校验;非目录 → ErrCodeNotADir;
-//	2. 查 files + folders 表(bucket_id = 桶, folder_id = 句柄目录);
-//	   过滤:Isable=false 的目录、可见性 ACL(复用 server.visibility 谓词);
-//	3. 组装 FileInfo 列表(名称/大小/FILETIME/IsDirectory)。
+//  1. handle 校验;非目录 → ErrCodeNotADir;
+//  2. 查 files + folders 表(bucket_id = 桶, folder_id = 句柄目录);
+//     过滤:Isable=false 的目录、可见性 ACL(复用 server.visibility 谓词);
+//  3. 组装 FileInfo 列表(名称/大小/FILETIME/IsDirectory)。
 func (f *FileOpsService) ListDir(ctx context.Context, handleID uint64, pattern string) ([]FileInfo, error) {
 	_ = ctx
 	_ = handleID
@@ -224,47 +223,47 @@ func (f *FileOpsService) ListDir(ctx context.Context, handleID uint64, pattern s
 	return nil, errNotImplemented
 }
 
-// Close 关闭句柄(MSG_FILE_CLOSE)。
+// Close 关闭句柄(CodeFileClose)。
 // 参数:ctx 上下文;handleID 远程句柄 ID。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. handle = handles.Get;存在则 handles.Delete(防 ID 复用);
-//	2. 若有写回缓存 → FlushToStorage(整体上传,失败返回错误但句柄已注销);
-//	3. deleteOnClose → 走 unlink 逻辑;
-//	4. 释放资源(缓存清零)。
+//  1. handle = handles.Get;存在则 handles.Delete(防 ID 复用);
+//  2. 若有写回缓存 → FlushToStorage(整体上传,失败返回错误但句柄已注销);
+//  3. deleteOnClose → 走 unlink 逻辑;
+//  4. 释放资源(缓存清零)。
 func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 	_ = ctx
 	_ = handleID
 	return errNotImplemented
 }
 
-// Unlink 删除路径(MSG_FILE_UNLINK;目录须为空)。
+// Unlink 删除路径(CodeFileUnlink;目录须为空)。
 // 参数:ctx 上下文;path SMB 相对路径。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. 路径解析同 Open(resolveSharePath),不存在 → ErrCodeNotFound;
-//	2. 文件:复用 server/file_delete.go 删除逻辑(删记录 + core.Storage.Delete);
-//	   目录:仅允许空目录(非空 → ErrCodeNotEmpty);
-//	   注:OrbitCloud 目录删除为后台任务,此处 SMB 语义要求同步空目录删除,
-//	   伪代码阶段约定:空目录走同步删,非空目录返回 NotEmpty(由 SMB 层提示)。
+//  1. 路径解析同 Open(resolveSharePath),不存在 → ErrCodeNotFound;
+//  2. 文件:复用 server/file_delete.go 删除逻辑(删记录 + core.Storage.Delete);
+//     目录:仅允许空目录(非空 → ErrCodeNotEmpty);
+//     注:OrbitCloud 目录删除为后台任务,此处 SMB 语义要求同步空目录删除,
+//     伪代码阶段约定:空目录走同步删,非空目录返回 NotEmpty(由 SMB 层提示)。
 func (f *FileOpsService) Unlink(ctx context.Context, path string) error {
 	_ = ctx
 	_ = path
 	return errNotImplemented
 }
 
-// Rename 重命名/移动(MSG_FILE_RENAME;目标已存在必须拒绝)。
+// Rename 重命名/移动(CodeFileRename;目标已存在必须拒绝)。
 // 参数:ctx 上下文;fromPath 源路径;toPath 目标路径(须同桶)。
 // 返回值:错误按哨兵语义。
 // 伪代码步骤:
 //
-//	1. 解析 from / to(bucketID 不一致 → ErrCodeIO);
-//	2. 目标已存在 → ErrCodeExists;
-//	3. 复用 server/file_copy_move.go 的移动/重命名逻辑(文件与文件夹);
-//	4. 写回缓存若引用旧路径:句柄内的 folderID/fileID 不变(按 ID 定位),
-//	   无需迁移。
+//  1. 解析 from / to(bucketID 不一致 → ErrCodeIO);
+//  2. 目标已存在 → ErrCodeExists;
+//  3. 复用 server/file_copy_move.go 的移动/重命名逻辑(文件与文件夹);
+//  4. 写回缓存若引用旧路径:句柄内的 folderID/fileID 不变(按 ID 定位),
+//     无需迁移。
 func (f *FileOpsService) Rename(ctx context.Context, fromPath, toPath string) error {
 	_ = ctx
 	_ = fromPath
@@ -287,11 +286,11 @@ func (f *FileOpsService) CloseAllByConn(connID uint64) {
 //
 // 伪代码步骤:
 //
-//	1. 首组件为根下第一级,逐段沿 folders 表(parent_id 链)查找:
-//	   任一段缺失 → 记录"缺口位置"(供 mkdir -p 与 intent 判定);
-//	2. 末级名查 files 表(folder_id = 已解析目录, name_lower 匹配);
-//	3. 目录与文件同名冲突 → 报错(Exists/IsDirectory 语义由调用方定);
-//	4. 返回解析结果。
+//  1. 首组件为根下第一级,逐段沿 folders 表(parent_id 链)查找:
+//     任一段缺失 → 记录"缺口位置"(供 mkdir -p 与 intent 判定);
+//  2. 末级名查 files 表(folder_id = 已解析目录, name_lower 匹配);
+//  3. 目录与文件同名冲突 → 报错(Exists/IsDirectory 语义由调用方定);
+//  4. 返回解析结果。
 func (f *FileOpsService) resolveSharePath(share ShareInfo, smbPath string) (folderID, fileID uint, isDir bool, err error) {
 	_ = share
 	_ = smbPath
@@ -327,9 +326,9 @@ func NewWriteBackCache() *WriteBackCache {
 // 返回值:当前缓存总量(供调用方判断是否提前 Flush)。
 // 伪代码步骤:
 //
-//	1. 与段表现有段求并集:重叠/相邻段合并,完全被覆盖的旧段丢弃;
-//	2. 写满 maxSize → 返回触发阈值标志(调用方 Flush);
-//	3. dirty = true。
+//  1. 与段表现有段求并集:重叠/相邻段合并,完全被覆盖的旧段丢弃;
+//  2. 写满 maxSize → 返回触发阈值标志(调用方 Flush);
+//  3. dirty = true。
 func (c *WriteBackCache) ApplyWrite(offset int64, data []byte) int64 {
 	_ = offset
 	_ = data
@@ -351,13 +350,13 @@ func (c *WriteBackCache) ReadRange(offset, length int64) []byte {
 // 返回值:错误。
 // 伪代码步骤:
 //
-//	1. dirty=false 直接返回;
-//	2. 构造"最终对象"字节流:
-//	   - 起始段 = 原对象全量(Get),若无法整体读取则按段读取未覆盖区间
-//	     (GetRange 逐段拼装,避免整对象拉取);
-//	   - 依次把缓存段覆盖到对应偏移(truncate 标记:不足零填充/超出裁剪);
-//	3. core.Storage.Put(ctx, bucket, key, 拼装流, 总长度) 整体上传;
-//	4. 成功 → 清空段表,dirty=false;失败 → 保留段表(重试可续)。
+//  1. dirty=false 直接返回;
+//  2. 构造"最终对象"字节流:
+//     - 起始段 = 原对象全量(Get),若无法整体读取则按段读取未覆盖区间
+//     (GetRange 逐段拼装,避免整对象拉取);
+//     - 依次把缓存段覆盖到对应偏移(truncate 标记:不足零填充/超出裁剪);
+//  3. core.Storage.Put(ctx, bucket, key, 拼装流, 总长度) 整体上传;
+//  4. 成功 → 清空段表,dirty=false;失败 → 保留段表(重试可续)。
 func (c *WriteBackCache) FlushToStorage(ctx context.Context, st core.ObjectStorage, bucket, key string, baseSize int64) error {
 	_ = ctx
 	_ = st

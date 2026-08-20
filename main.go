@@ -96,6 +96,21 @@ func main() {
 		}
 	}()
 
+	// 3.5 双服务之二:SMB 网关服务(设计点 8,与本文件第 3 步的 HTTP 服务并行,
+	// 同属 API 层,统一调用 server 层包级函数;真实现接入点,接线见
+	// smb_server/go/wire.go):
+	//   1) 请求池:core.NewAdmissionPool(cfg.SmbGateway.MaxConcurrent,
+	//      cfg.SmbGateway.ChannelBuffer, core.AdmissionModeReject)(设计点 6);
+	//   2) auth := smbgateway.NewAuthService(core.DB)
+	//      files := smbgateway.NewFileOpsService(core.Storage, registry)
+	//      gw := smbgateway.NewGateway(cfg.SmbGateway.ListenAddr, key, pool, auth, files);
+	//   3) go auth.WatchAndPush(ctx) —— 用户/NT hash/ACL 变更推送常驻;
+	//   4) go gw.Serve(ctx) —— 私有 Socket 服务,优雅停机随本函数第 5 步一并关闭。
+	//   密钥:cfg.SmbGateway.SharedKeyEnv 非空时经 smbgateway 读取并校验长度;
+	//   留空则握手后双方动态协商(接口后续实现)。
+	//   配置:设计点 7 —— 命令行 -WithConfig <json> 可直接注入 smb_gateway
+	//   配置段,跳过 config.yaml(与 Rust 侧 --WithConfig 对齐)。
+
 	// 4. 启动后台任务:删除/复制任务启动时续跑一次,并定时清理过期日志/令牌/分享
 	if err := cron.ResumeDeleteTasks(context.Background()); err != nil {
 		log.Errorf("main: resume delete tasks: %v", err)

@@ -39,17 +39,25 @@ pub struct SmbConfig {
 
 /// Go 网关配置(对应 config.yaml `gateway:` 分节)。
 ///
-/// 承载功能:定位 Go 网关并约定保活/同步节奏(帧协议见 types.rs)。
+/// 承载功能:定位 Go 网关并约定保活/同步节奏(帧协议见 types.rs);
+/// 缓冲与并发参数与 Go 侧请求池对齐(设计点 6)。
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
     /// Go 网关地址(如 "127.0.0.1:9001";对应草稿 Des 发送往地址,后端服务位置)。
     pub addr: String,
     /// 共享密钥所在环境变量名(密钥本身禁止写入 config.yaml)。
+    /// 约定:可留空(空串 = 未定义)——此时不做静态密钥校验,改为在
+    /// 握手建立连接后双方交换随机密钥(动态密钥协商),该接口后续实现;
+    /// 本次设计阶段仍按静态密钥方式下发。
     pub shared_key_env: String,
     /// 心跳间隔(秒;0 = 禁用心跳)。
     pub heartbeat_secs: u64,
     /// 与 Go 网关全量对账周期(秒;增量推送丢失时的兜底)。
     pub sync_interval_secs: u64,
+    /// 发送管道缓冲长度(设计点 6):Rust 侧帧写入先进该容量的缓冲管道,
+    /// 由 writer 任务消费写 socket;与 Go 侧请求池队列深度对齐,取值建议
+    /// 2 的幂(如 1024)。
+    pub channel_buffer: usize,
 }
 
 /// 日志配置(对应 config.yaml `log:` 分节)。

@@ -19,11 +19,11 @@
 //! ```
 //!
 //! # 启动流程(配置优先于环境变量;环境变量仅作覆盖):
-//! 1. `flag::parse_args` 处理命令行指令(-initConfig / --version / --help);
-//! 2. `flag::load_config("./config.yaml")` 读取配置(缺失落盘内置默认);
-//! 3. `flag::load_shared_key` 从环境变量取共享密钥;
-//! 4. 环境变量覆盖:`GW_ADDR` / `SMB_LISTEN` / `RUST_LOG`(可覆盖配置项);
-//! 5. 连接 Go 网关 → 构建 SMB 服务器 → 启动同步任务 → serve。
+//! 1. 先处理命令行指令:打印帮助、打印版本号,或把内置默认配置落盘后退出;
+//! 2. 从工作目录读取并校验配置文件,缺失时自动落盘内置默认配置;
+//! 3. 从环境变量读取共享密钥并校验长度;
+//! 4. 个别参数允许用环境变量覆盖配置值;
+//! 5. 依次完成:连接 Go 网关、构建 SMB 服务器、启动同步任务、进入服务循环。
 
 // 协议帧契约类型与常量(与 Go 侧 types.go 镜像)在真实现阶段被消费;
 // 设计阶段暂未引用属预期,用 expect 声明:一旦真实现接入,此 lint 自动失效。
@@ -34,6 +34,7 @@
 
 mod core;
 mod flag;
+mod registry;
 mod remote_backend;
 mod sync;
 mod types;
@@ -41,39 +42,42 @@ mod types;
 /// 程序入口(tokio 异步运行器)。
 ///
 /// 启动流程(伪代码分步注释,真实现按序落地):
-/// 1. flag::parse_args(命令行指令:--help / --version / -initConfig);
-/// 2. flag::load_config(DEFAULT_CONFIG_PATH) 读取并校验配置
-///    (缺失 → 落盘内置默认;非法 → 启动即终止);
-/// 3. flag::load_shared_key(config.gateway.shared_key_env)
-///    (未设置/长度 <16 → 启动即终止,遵循"配置缺失即报错"铁律);
-/// 4. 环境变量覆盖:GW_ADDR / SMB_LISTEN / RUST_LOG 可覆盖对应配置项;
-/// 5. 连接 Go 网关:GatewayClient::connect(config.gateway.addr, shared_key,
-///    client_id)—— 握手失败:重试退避(1s/5s/30s 封顶),持续至成功;
-/// 6. 构建 SMB 服务器:
-///    - 初始共享为空(全部共享由动态配置注册);
-///    - builder = SmbServer::builder()
-///        .listen(config.smb.listen).netbios_name(config.smb.netbios_name);
-///    - server = builder.build()?;handle = server.config_handle();
-/// 7. 启动同步任务:tokio::spawn(sync_loop(conn, handle,
-///    config.gateway.sync_interval_secs))—— 全量快照建共享 + 常驻增量推送;
-/// 8. server.bind().await + server.serve().await(accept 循环,阻塞);
-/// 9. 信号中断(SIGINT/SIGTERM)→ server.shutdown() → 优雅退出。
+/// 1. 处理命令行指令:没有参数时正常启动;--help 打印帮助;--version
+///    打印版本号;-initConfig 把内置默认配置落盘后退出;
+/// 2. 读取并校验配置文件:缺失时先落盘内置默认配置再读;内容非法或
+///    必填项缺失直接终止启动,不做缺省值兜底;
+/// 3. 读取共享密钥:从环境变量取,未设置或长度不足 16 字节直接终止启动;
+/// 4. 允许个别参数被环境变量覆盖(网关地址、监听地址、日志级别);
+/// 5. 连接 Go 网关:用配置的地址和共享密钥完成握手,失败按退避节奏
+///    重试(1 秒、5 秒、30 秒封顶),直到建立连接;
+/// 6. 构建 SMB 服务器:监听配置的地址,初始不注册任何共享,
+///    用户与共享全部由同步任务动态注册;
+/// 7. 启动同步任务:先向网关拉取全量快照建好用户与共享,随后持续
+///    接收增量变更推送,并定期全量对账兜底;
+/// 8. 绑定监听端口并进入服务循环,持续接受 SMB 客户端连接;
+/// 9. 收到退出信号时优雅关闭:停止接收新连接、冲刷写回缓存后退出。
 ///
 /// 返回值:退出时错误(如绑定失败)。
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ---- 1. 命令行指令(伪代码:flag::parse_args(&std::env::args().collect())) ----
-    // 指令处理路径返回 None 时直接 return Ok(())(--help/--version/-initConfig)。
+    // ---- 1. 命令行指令 ----
+    // 伪代码:收集启动参数逐条判断——
+    //   - 没有参数:继续正常启动流程;
+    //   - 出现 --help 或 --version:打印对应信息后直接退出;
+    //   - 出现 -initConfig:把内置默认配置写入配置文件后退出。
 
-    // ---- 2. 配置读取与校验(伪代码:let config = flag::load_config(flag::DEFAULT_CONFIG_PATH) ?) ----
-    // 伪代码阶段占位:不读取配置文件,启动链路见本函数上方文档注释;
-    // 真实现按注释接入 flag::load_config / flag::validate / flag::load_shared_key。
+    // ---- 2. 配置读取与校验 ----
+    // 伪代码:从工作目录读取配置文件——
+    //   - 文件不存在:把内置默认配置写进去,再继续读;
+    //   - 内容解析失败或必填项缺失:报错并终止启动,不做缺省兜底;
+    //   - 解析成功:得到本次启动用的配置,进入下一步。
+    // 伪代码阶段占位:暂不读取配置文件,直接进入下一步。
 
-    // ---- 3. 日志初始化(伪代码:按 config.log.level / log.output,RUST_LOG 覆盖) ----
+    // ---- 3. 日志初始化(伪代码:按配置的日志级别与输出目录初始化,RUST_LOG 可覆盖) ----
     // 构建 tracing 订阅器:把所有 tracing 宏(info!/warn!/error!)的输出
     // 定向到 stdout + 时间戳/级别/模块等格式化字段(类比 Go 侧 log 轮转封装)。
     // 伪代码阶段:级别用默认 "info,smb_server=debug"(smb_server 库模块开 debug);
-    // 真实现改为按 config.log.level 拼接,并按 config.log.output 落地日志文件。
+    // 真实现改为按配置的日志级别拼接,并按配置的输出目录落地日志文件。
     tracing_subscriber::fmt() // 订阅器工厂:返回 fmt 格式化构建器
         .with_env_filter(
             // 配置过滤规则:控制哪些模块打印哪个级别
@@ -83,17 +87,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init(); // 注册为全局订阅器:此后 tracing 宏生效(幂等,重复调用忽略)
 
-    // ---- 4~8. 共享密钥 / 连接网关 / 构建服务器 / 同步任务 / serve ----
-    // 伪代码(见上方文档注释第 4~9 步,按序真实现):
-    //   let shared_key = flag::load_shared_key(&config.gateway.shared_key_env)?;
-    //   let conn = GatewayClient::connect(&config.gateway.addr, shared_key, hostname()).await?;
-    //   let server = SmbServer::builder()
-    //       .listen(config.smb.listen.parse()?).netbios_name(&config.smb.netbios_name)
-    //       .build()?;
-    //   let handle = server.config_handle();
-    //   tokio::spawn(sync_loop(conn.clone(), handle,
-    //       Duration::from_secs(config.gateway.sync_interval_secs)));
-    //   server.bind().await?; server.serve().await?;
+    // ---- 4~8. 共享密钥 / 连接网关 / 构建服务器 / 同步任务 / 服务循环 ----
+    // 伪代码(自然语言,真实现按此落地):
+    // 4. 取共享密钥:配置了环境变量名就从环境变量读并校验长度,
+    //    未配置则留空,等握手后双方交换随机密钥(动态协商);
+    // 5. 连接 Go 网关:用配置的地址、共享密钥和管道缓冲长度
+    //    (gateway.channel_buffer)完成握手,失败按退避节奏重试
+    //    (1 秒、5 秒、30 秒封顶),直到成功;
+    // 6. 构建 SMB 服务器:监听配置的地址,初始不注册任何共享,
+    //    用户与共享全部由同步任务动态注册;
+    // 7. 启动同步任务:先拉取全量快照建立用户与共享,随后持续接收
+    //    增量变更推送,并定期全量对账兜底;
+    // 8. 绑定监听端口并进入服务循环,持续接受 SMB 客户端连接,
+    //    直到收到退出信号,优雅关闭(见上方文档注释第 9 步)。
 
     // 伪代码设计阶段占位:启动链路未实现,静默正常退出(不 panic、无报错)。
     Ok(())

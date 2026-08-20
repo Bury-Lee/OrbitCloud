@@ -4,12 +4,16 @@
 //   - 监听私有 TCP 端口,接受 Rust 网关的出站连接(仅允许配置的共享密钥连接);
 //   - 帧编解码(见 types.go 帧协议)、请求-响应分发、序列号管理;
 //   - 心跳保活与超时回收;句柄表(远程句柄 ID 分配与过期回收);
+//   - 请求背压(设计点 6):读循环只负责收帧,业务处理投协程池
+//     (core.AdmissionPool,队列深度 = 配置 channel_buffer);
 //   - 优雅停机:先停 accept,再逐连接发 Shutdown 通知并等待收尾。
 //
-// 连接模型:
+// 连接模型(设计点 6/8):
 //
 //	Gateway(1) ── conn(每连接 1 协程:读循环)
-//	                 │  handleConn:握手 → 循环 readFrame → dispatch → writeFrame
+//	                 │  读帧 → 入请求池(限并发+排队,池满回 ERR 背压)
+//	                 │       → 协程处理(JSON 控制面 + io.Reader 流式数据面)
+//	                 │       → 写响应
 //	                 └  心跳由独立 goroutine 定期写 HEARTBEAT
 package smbgateway
 
@@ -27,6 +31,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"orbitcloud/core"
 )
 
 // Gateway 网关服务端:持有监听地址、共享密钥与各业务服务实例。
@@ -42,6 +48,10 @@ type Gateway struct {
 	files *FileOpsService
 	// handles 远程句柄表(句柄 ID 分配与生命周期管理)。
 	handles *HandleRegistry
+	// pool 请求准入池(设计点 6):限并发 + 排队缓冲(队列深度 = 配置
+	// channel_buffer,与 Rust 侧管道缓冲对齐);池满按 reject 模式回
+	// ErrTooManyRequests,由 dispatch 转成 ERR 帧背压。
+	pool *core.AdmissionPool
 
 	// mu 保护 conns 连接注册表。
 	mu    sync.Mutex
@@ -60,19 +70,22 @@ type Gateway struct {
 // NewGateway 构造网关实例。
 // 参数:
 //
-//	listenAddr 监听地址;
-//	sharedKey  共享密钥(两侧预置,≥ 16 字节);
-//	auth       动态认证服务;
-//	files      文件操作服务。
+//	listenAddr     监听地址;
+//	sharedKey      共享密钥(两侧预置,≥ 16 字节);
+//	pool           请求准入池(设计点 6:由 main 用 channel_buffer/max_concurrent
+//	               构造,如 core.NewAdmissionPool(64, 1024, core.AdmissionModeReject));
+//	auth           动态认证服务;
+//	files          文件操作服务。
 //
 // 返回值:初始化完成的网关(未开始监听)。
-func NewGateway(listenAddr string, sharedKey []byte, auth *AuthService, files *FileOpsService) *Gateway {
+func NewGateway(listenAddr string, sharedKey []byte, pool *core.AdmissionPool, auth *AuthService, files *FileOpsService) *Gateway {
 	return &Gateway{
 		listenAddr:  listenAddr,
 		sharedKey:   sharedKey,
 		auth:        auth,
 		files:       files,
 		handles:     NewHandleRegistry(),
+		pool:        pool,
 		conns:       make(map[net.Conn]struct{}),
 		idleTimeout: 90 * time.Second,
 	}
@@ -116,7 +129,10 @@ func (g *Gateway) handleConn(ctx context.Context, conn net.Conn) error {
 //	   HelloResponse{OK:false} 并断开;
 //	3. 生成 ServerNonce(16 字节随机),回 HelloResponse{OK:true, serverNonce};
 //	4. 等待客户端回送验证帧(客户端用 ServerNonce 计算摘要回发;
-//	   超时 10s 断开)——双向认证完成。
+//	   超时 10s 断开)——双向认证完成;
+//	5. 密钥协商(shared_key_env 未定义时):本侧生成随机密钥,在验证帧
+//	   交换后与客户端互相下发并更新为会话密钥(后续实现,见 Rust 侧
+//	   GatewayConfig.shared_key_env 注释)。
 //
 // 返回值:nil 表示握手成功;错误表示鉴权失败/超时(连接将被关闭)。
 func (g *Gateway) handshake(conn net.Conn) error {
@@ -156,15 +172,21 @@ func (g *Gateway) writeFrame(conn net.Conn, hdr FrameHeader, body []byte) error 
 }
 
 // dispatch 按消息类型分发请求,返回响应帧类型与响应 body。
+// 设计点 6:本函数在协程池内执行(handleConn 读帧后先
+// pool.Acquire 再投协程调用,池满 reject → 回 ERR 背压帧,读循环不阻塞)。
+// 控制面统一走 MSG_OPERATE(总操作 JSON,单次反序列化,见 types.go)。
 // 伪代码步骤:
 //
 //	1. switch hdr.MsgType:
-//	   - MSG_AUTH_QUERY_USER   → g.auth.QueryUser → AuthQueryUserResponse
-//	   - MSG_AUTH_QUERY_ACL    → g.auth.QuerySharesForUser → AuthQueryAclResponse
-//	   - MSG_AUTH_SYNC_SNAPSHOT→ g.auth.Snapshot → SyncSnapshotResponse
-//	   - MSG_FILE_*            → g.files.Handle(见 file_ops.go)
-//	   - 未知类型 → ErrorEnvelope{ErrCodeNotImpl}
-//	2. 业务错误统一映射为 MSG_ERR_RESP + ErrorEnvelope(哨兵 code);
+//	   - MSG_OPERATE → 本函数核心路径:
+//	     a. 拆 body:[4B jsonLen BE] + 总操作 JSON + [流数据段];
+//	     b. 一次 json.Unmarshal → OperateRequest;
+//	     c. 调 req.Route(ctx, g, stream)(Gateway 实现 OperateHandler,
+//	        内部按 Code 路由到 auth / files 业务服务);
+//	     d. 序列化 OperateResponse(+ Read 的流数据段)→ 响应 body;
+//	   - MSG_HEARTBEAT → 空响应(或回读);
+//	   - 未知类型 → MSG_ERR_RESP + ErrorEnvelope{ErrCodeNotImpl};
+//	2. 业务错误进 OperateResponse.Err(哨兵 code),不抛 Go error;
 //	3. 所有响应帧带 FlagResponse,seq = 请求 seq。
 //
 // 返回值:respType 响应消息类型;respBody 响应消息体;err 网络级错误。
@@ -172,6 +194,125 @@ func (g *Gateway) dispatch(hdr FrameHeader, body []byte) (uint16, []byte, error)
 	_ = hdr
 	_ = body
 	return MSG_ERR_RESP, nil, errNotImplemented
+}
+
+// handleRequest 把一帧请求投进协程池处理并回写响应(设计点 6)。
+// 参数:conn 连接;hdr 帧头;body 消息体。
+// 伪代码步骤:
+//
+//	1. pool.Acquire(ctx):并发满 + 队列满(reject 模式)→ 回
+//	   ErrorEnvelope{ErrCodeTimeout} 背压帧,不阻塞读循环;
+//	2. 协程内调用 dispatch(hdr, body) 得到响应帧类型与 body;
+//	3. pool.Release() 释放令牌;
+//	4. writeFrame 回写响应(seq 原样带回)。
+func (g *Gateway) handleRequest(ctx context.Context, conn net.Conn, hdr FrameHeader, body []byte) {
+	_ = ctx
+	_ = conn
+	_ = hdr
+	_ = body
+}
+
+// ============================================================================
+// OperateHandler 实现:Gateway 按操作码转发到 auth / files 业务服务
+// ============================================================================
+
+// HandleAuthQueryUser 查询用户凭据(CodeAuthQueryUser)。
+func (g *Gateway) HandleAuthQueryUser(ctx context.Context, args *AuthUserArgs) (*AuthUserResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleAuthQueryAcl 查询用户可见共享清单(CodeAuthQueryAcl)。
+func (g *Gateway) HandleAuthQueryAcl(ctx context.Context, args *AuthAclArgs) (*AuthAclResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleAuthSnapshot 全量同步快照(CodeAuthSnapshot)。
+func (g *Gateway) HandleAuthSnapshot(ctx context.Context, args *SnapshotArgs) (*SnapshotResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleFileOpen 打开/创建(CodeFileOpen)。
+func (g *Gateway) HandleFileOpen(ctx context.Context, args *OpenArgs) (*OpenResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleFileRead 按偏移读(CodeFileRead;流数据段由 dispatch 组装)。
+func (g *Gateway) HandleFileRead(ctx context.Context, args *ReadArgs) (*ReadResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleFileWrite 按偏移写(CodeFileWrite;流数据段由 dispatch 拆出)。
+func (g *Gateway) HandleFileWrite(ctx context.Context, args *WriteArgs, stream []byte) (*WriteResult, error) {
+	_ = ctx
+	_ = args
+	_ = stream
+	return nil, errNotImplemented
+}
+
+// HandleFileFlush 冲刷写回缓存(CodeFileFlush)。
+func (g *Gateway) HandleFileFlush(ctx context.Context, args *FlushArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
+}
+
+// HandleFileStat 查询元信息(CodeFileStat)。
+func (g *Gateway) HandleFileStat(ctx context.Context, args *StatArgs) (*StatResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleFileSetTimes 设置时间戳(CodeFileSetTimes)。
+func (g *Gateway) HandleFileSetTimes(ctx context.Context, args *SetTimesArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
+}
+
+// HandleFileTruncate 截断/扩展(CodeFileTruncate)。
+func (g *Gateway) HandleFileTruncate(ctx context.Context, args *TruncateArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
+}
+
+// HandleFileListDir 列目录(CodeFileListDir)。
+func (g *Gateway) HandleFileListDir(ctx context.Context, args *ListDirArgs) (*ListDirResult, error) {
+	_ = ctx
+	_ = args
+	return nil, errNotImplemented
+}
+
+// HandleFileClose 关闭句柄(CodeFileClose)。
+func (g *Gateway) HandleFileClose(ctx context.Context, args *CloseArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
+}
+
+// HandleFileUnlink 删除路径(CodeFileUnlink)。
+func (g *Gateway) HandleFileUnlink(ctx context.Context, args *UnlinkArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
+}
+
+// HandleFileRename 重命名/移动(CodeFileRename)。
+func (g *Gateway) HandleFileRename(ctx context.Context, args *RenameArgs) error {
+	_ = ctx
+	_ = args
+	return errNotImplemented
 }
 
 // nextSeq 分配下一个请求序列号(响应原样带回;0 保留给单向通知)。

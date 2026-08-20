@@ -31,10 +31,11 @@ pub const DEFAULT_CONFIG_PATH: &str = "./config.yaml";
 /// - Err(String):配置缺失/非法/校验失败(调用方启动即终止,不做兜底)。
 ///
 /// 内部逻辑(伪代码):
-/// 1. 读 path;不存在 → 把 DEFAULT_CONFIG 写入 path(落盘默认配置)后继续;
-/// 2. 反序列化:serde_yml::from_str::<Config>(内容);语法错误 → Err(带行号);
-/// 3. validate(&config) 必填校验(失败 → Err);
-/// 4. 返回 config。
+/// 1. 读取指定路径的配置文件;文件不存在时,先把内置默认配置
+///    写入该路径,再继续读取;
+/// 2. 把文件内容反序列化成配置结构,语法错误返回带行号的错误;
+/// 3. 对解析结果做必填项与合法性校验,不通过则报错;
+/// 4. 返回解析成功的配置。
 pub fn load_config(path: &str) -> Result<Config, String> {
     let _ = path;
     // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
@@ -51,11 +52,13 @@ pub fn load_config(path: &str) -> Result<Config, String> {
 /// - Err(String):缺失/非法项说明(逐项列出,便于定位)。
 ///
 /// 内部逻辑(伪代码):
-/// 1. smb.listen 非空且可解析为 SocketAddr;
-/// 2. gateway.addr 非空且可解析为 SocketAddr;
-/// 3. gateway.shared_key_env 非空(密钥长度由 load_shared_key 校验);
-/// 4. log.level ∈ {debug, info, warn, error};
-/// 5. 任一失败 → Err(拼接全部问题,一次报全)。
+/// 1. SMB 监听地址非空且能解析成有效地址;
+/// 2. 网关地址非空且能解析成有效地址;
+/// 3. 共享密钥的环境变量名允许留空(留空 = 握手后动态协商密钥);
+///    非空时由读取函数校验密钥本身;
+/// 4. 发送管道缓冲长度大于 0(设计点 6,与 Go 侧请求池队列对齐);
+/// 5. 日志级别只允许四种取值之一;
+/// 6. 以上任一不满足,把全部问题拼成一条错误返回,一次报全。
 pub fn validate(config: &Config) -> Result<(), String> {
     let _ = config;
     // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
@@ -72,9 +75,9 @@ pub fn validate(config: &Config) -> Result<(), String> {
 /// - Err(String):未设置或长度不足(启动即终止)。
 ///
 /// 内部逻辑(伪代码):
-/// 1. std::env::var(env_name);未设置 → Err("...未设置");
-/// 2. 长度 < 16 → Err("...长度须 ≥ 16 字节");
-/// 3. 返回字节。
+/// 1. 从环境变量按名字取值,未设置直接报错;
+/// 2. 取值长度不足 16 字节直接报错;
+/// 3. 返回密钥字节。
 pub fn load_shared_key(env_name: &str) -> Result<Vec<u8>, String> {
     let _ = env_name;
     // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
@@ -88,15 +91,17 @@ pub fn load_shared_key(env_name: &str) -> Result<Vec<u8>, String> {
 ///
 /// 返回值:
 /// - Ok(Option<Config>):Some(需要继续启动);None(指令已处理,正常退出,
-///   如 --version / -initConfig 落盘后退出);
+///   如 --version / --initConfig 落盘后退出);
 /// - Err(String):非法参数/指令失败。
 ///
 /// 内部逻辑(伪代码):
-/// 1. 无参数 → Ok(Some(load_config(DEFAULT_CONFIG_PATH)?));
-/// 2. "-initConfig" → 写 DEFAULT_CONFIG 到 path 后 Ok(None);
-/// 3. "--version" → 打印版本后 Ok(None);
-/// 4. "--help" / "-h" → 打印帮助后 Ok(None);
-/// 5. 未知参数 → Err("unknown flag ...")。
+/// 1. 没有任何参数:加载配置文件,返回配置继续正常启动;
+/// 2. 出现 -initConfig:把内置默认配置写入配置文件后退出,不启动;
+/// 3. 出现 --version:打印版本号后退出;
+/// 4. 出现 --help 或 -h:打印帮助后退出;
+/// 5. 出现 --WithConfig:把后面紧跟的一段 JSON 文本直接反序列化成
+///    配置注入,跳过配置文件(调试/临时启动用);
+/// 6. 其它参数一律报"未知参数"错误。
 pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     let _ = args;
     // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
