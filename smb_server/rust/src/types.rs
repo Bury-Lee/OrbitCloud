@@ -1,4 +1,4 @@
-//! ============================================================================
+﻿//! ============================================================================
 //! types.rs —— Rust 侧 SMB 网关共享类型定义(伪代码级设计)
 //! ============================================================================
 //!
@@ -62,7 +62,7 @@ pub const FLAG_HEARTBEAT: u8 = 0x04; // 心跳探测
 /// SMB 网关私有 TCP 帧头(16 字节,大端序)。
 /// 承载:协议识别(magic/version)、帧类型(flags/msg_type)、
 /// 请求-响应关联(seq)、载荷长度(body_len)。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FrameHeader {
     pub magic: u32,    // 魔数 "OCST";不匹配立即断开
     pub version: u8,   // 协议版本(当前 1)
@@ -157,7 +157,7 @@ pub const CODE_FILE_RENAME: OperateCode = 14; // 重命名/移动
 /// 校验规则(与 Go 侧 Route 一致):
 /// - code 必须在常量表中,为 0 直接拒绝;
 /// - code 对应的字段必须为 Some,其余字段必须为 None(防误填)。
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OperateRequest {
     pub code: OperateCode, // 操作码(0 = 未填写,直接拒绝)
@@ -192,7 +192,7 @@ pub struct OperateRequest {
 }
 
 /// 总响应:与请求同构,操作结果用 Option 字段承载;失败时 err 非 None。
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OperateResponse {
     pub code: OperateCode, // 回显请求操作码(校验失败时为 0)
@@ -460,6 +460,100 @@ pub struct FileInfo {
     pub file_index: u64,       // 唯一文件索引(无则 0)
 }
 
+// ============================================================================
+// 帧编解码(传输层真实现;与 Go 侧 types.go 的编解码完全一致)
+// ============================================================================
+
+/// 帧头固定长度(16 字节,大端序)。
+pub const HEADER_LEN: usize = 16;
+
+/// 把帧头编码为 16 字节大端字节串。
+///
+/// 参数:`hdr` 帧头结构(调用方填各字段)。
+/// 返回值:16 字节帧头。
+///
+/// 布局:magic(4) + version(1) + flags(1) + msg_type(2) + seq(4) + body_len(4)。
+pub fn encode_frame_header(hdr: &FrameHeader) -> [u8; HEADER_LEN] {
+    let mut buf = [0u8; HEADER_LEN];
+    buf[0..4].copy_from_slice(&hdr.magic.to_be_bytes());
+    buf[4] = hdr.version;
+    buf[5] = hdr.flags;
+    buf[6..8].copy_from_slice(&hdr.msg_type.to_be_bytes());
+    buf[8..12].copy_from_slice(&hdr.seq.to_be_bytes());
+    buf[12..16].copy_from_slice(&hdr.body_len.to_be_bytes());
+    buf
+}
+
+/// 从 16 字节大端字节串解析帧头。
+///
+/// 参数:`buf` 帧头字节(长度必须 ≥ HEADER_LEN)。
+/// 返回值:帧头结构;Err(长度不足/魔数不匹配/版本不匹配/body 超限)。
+pub fn decode_frame_header(buf: &[u8]) -> Result<FrameHeader, String> {
+    if buf.len() < HEADER_LEN {
+        return Err("frame: header too short".into());
+    }
+    let hdr = FrameHeader {
+        magic: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
+        version: buf[4],
+        flags: buf[5],
+        msg_type: u16::from_be_bytes(buf[6..8].try_into().unwrap()),
+        seq: u32::from_be_bytes(buf[8..12].try_into().unwrap()),
+        body_len: u32::from_be_bytes(buf[12..16].try_into().unwrap()),
+    };
+    // 硬契约校验:魔数与版本必须匹配,body 长度不得超过上限。
+    if hdr.magic != MAGIC {
+        return Err("frame: bad magic".into());
+    }
+    if hdr.version != VERSION {
+        return Err("frame: version mismatch".into());
+    }
+    if hdr.body_len > MAX_BODY_LEN {
+        return Err("frame: body too large".into());
+    }
+    Ok(hdr)
+}
+
+/// 组一帧(帧头 + body),并回填 body_len。
+///
+/// 参数:`mut hdr` 帧头(调用方填 flags/msg_type/seq);`body` 消息体。
+/// 返回值:完整帧字节串。
+pub fn encode_frame(mut hdr: FrameHeader, body: &[u8]) -> Vec<u8> {
+    hdr.magic = MAGIC;
+    hdr.version = VERSION;
+    hdr.body_len = body.len() as u32;
+    let mut out = encode_frame_header(&hdr).to_vec();
+    out.extend_from_slice(body);
+    out
+}
+
+/// 组装控制面 body:[4B json_len] + JSON + [流数据段]。
+///
+/// 参数:`v` 总操作/总响应 JSON 结构;`stream` 流数据段(仅 Read/Write 携带)。
+/// 返回值:body 字节串;Err(序列化失败)。
+pub fn encode_operate_body<T: serde::Serialize>(v: &T, stream: &[u8]) -> Result<Vec<u8>, String> {
+    let j = serde_json::to_vec(v).map_err(|e| format!("operate body: {e}"))?;
+    let mut out = Vec::with_capacity(4 + j.len() + stream.len());
+    out.extend_from_slice(&(j.len() as u32).to_be_bytes());
+    out.extend_from_slice(&j);
+    out.extend_from_slice(stream);
+    Ok(out)
+}
+
+/// 拆解控制面 body:解 [4B json_len] 并分离 JSON 与流数据段。
+///
+/// 参数:`body` 帧消息体(由 MSG_OPERATE/OPERATE_RESP 承载)。
+/// 返回值:(json 段, 流数据段);Err(json_len 越界 = 协议错误)。
+pub fn split_operate_body(body: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if body.len() < 4 {
+        return Err("frame: operate body too short".into());
+    }
+    let json_len = u32::from_be_bytes(body[0..4].try_into().unwrap()) as usize;
+    if json_len > body.len() - 4 {
+        return Err("frame: operate json_len overflow".into());
+    }
+    Ok((&body[4..4 + json_len], &body[4 + json_len..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +653,101 @@ mod tests {
         assert_eq!(hdr.msg_type, MSG_OPERATE);
         assert_eq!(hdr.seq, 1);
         assert_eq!(hdr.body_len, 0);
+    }
+
+    /// 帧头编解码往返一致性(大端布局与 Go 侧一致)。
+    #[test]
+    fn frame_header_round_trip() {
+        let hdr = FrameHeader {
+            magic: MAGIC,
+            version: VERSION,
+            flags: FLAG_RESPONSE,
+            msg_type: MSG_OPERATE_RESP,
+            seq: 42,
+            body_len: 1234,
+        };
+        let raw = encode_frame_header(&hdr);
+        assert_eq!(raw.len(), HEADER_LEN);
+        // 逐字节断言大端布局(magic/version/flags/msgType/seq/bodyLen)。
+        assert_eq!(&raw[0..4], &0x4F435354u32.to_be_bytes());
+        assert_eq!(raw[4], 1);
+        assert_eq!(raw[5], FLAG_RESPONSE);
+        assert_eq!(&raw[6..8], &MSG_OPERATE_RESP.to_be_bytes());
+        assert_eq!(&raw[8..12], &42u32.to_be_bytes());
+        assert_eq!(&raw[12..16], &1234u32.to_be_bytes());
+
+        let got = decode_frame_header(&raw).expect("decode ok");
+        assert_eq!(got.magic, MAGIC);
+        assert_eq!(got.seq, 42);
+        assert_eq!(got.body_len, 1234);
+    }
+
+    /// 坏魔数/版本不匹配必须报错(协议硬契约)。
+    #[test]
+    fn decode_rejects_bad_magic_and_version() {
+        let bad_magic = encode_frame_header(&FrameHeader {
+            magic: 0xDEADBEEF,
+            version: VERSION,
+            ..Default::default()
+        });
+        assert!(decode_frame_header(&bad_magic).is_err());
+
+        let bad_ver = encode_frame_header(&FrameHeader {
+            magic: MAGIC,
+            version: 99,
+            ..Default::default()
+        });
+        assert!(decode_frame_header(&bad_ver).is_err());
+    }
+
+    /// 控制面 body 布局:[4B jsonLen] + JSON + 流段(与 Go 侧一致)。
+    #[test]
+    fn operate_body_round_trip() {
+        let req = OperateRequest {
+            code: CODE_FILE_WRITE,
+            write: Some(WriteArgs {
+                handle_id: 7,
+                offset: 99,
+            }),
+            ..Default::default()
+        };
+        let stream: Vec<u8> = vec![1, 2, 3, 4];
+        let body = encode_operate_body(&req, &stream).expect("encode ok");
+        let (json_bytes, stream_out) = split_operate_body(&body).expect("split ok");
+        assert_eq!(stream_out, stream);
+        let got: OperateRequest = serde_json::from_slice(json_bytes).expect("json ok");
+        assert_eq!(got.code, CODE_FILE_WRITE);
+        assert_eq!(got.write.unwrap().handle_id, 7);
+    }
+
+    /// jsonLen 越界必须报错(硬契约)。
+    #[test]
+    fn split_operate_body_rejects_overflow() {
+        let bad: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        assert!(split_operate_body(&bad).is_err());
+    }
+
+    /// 总操作 JSON 序列化字段名与 Go 侧 json tag 一致(camelCase)。
+    #[test]
+    fn operate_request_json_keys_match_go_side() {
+        let req = OperateRequest {
+            code: CODE_FILE_OPEN,
+            open: Some(OpenArgs {
+                path: "a/b.txt".into(),
+                read: true,
+                write: false,
+                intent: "open".into(),
+                directory: false,
+                non_directory: true,
+                delete_on_close: false,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).expect("json ok");
+        // 顶层必须为 code + 驼峰操作名(与 Go 侧 OperateRequest json tag 一致)。
+        assert_eq!(json["code"], 4);
+        assert!(json.get("open").is_some(), "open 字段必须存在");
+        assert_eq!(json["open"]["nonDirectory"], true, "驼峰字段名与 Go 侧一致");
+        assert!(json.get("unlink").is_none(), "未填操作不得出现在 JSON 中");
     }
 }

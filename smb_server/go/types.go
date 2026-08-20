@@ -72,7 +72,10 @@ package smbgateway
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"reflect"
 )
 
 // 协议魔数与版本(帧头校验,两侧一致)。
@@ -275,8 +278,8 @@ type OperateHandler interface {
 	HandleAuthSnapshot(ctx context.Context, args *SnapshotArgs) (*SnapshotResult, error)
 	// HandleFileOpen 打开/创建(CodeFileOpen)。
 	HandleFileOpen(ctx context.Context, args *OpenArgs) (*OpenResult, error)
-	// HandleFileRead 按偏移读(CodeFileRead;流数据段由 gateway 组装)。
-	HandleFileRead(ctx context.Context, args *ReadArgs) (*ReadResult, error)
+	// HandleFileRead 按偏移读(CodeFileRead;返回流数据段,由 gateway 组装)。
+	HandleFileRead(ctx context.Context, args *ReadArgs) (result *ReadResult, stream []byte, err error)
 	// HandleFileWrite 按偏移写(CodeFileWrite;流数据段由 gateway 拆出)。
 	HandleFileWrite(ctx context.Context, args *WriteArgs, stream []byte) (*WriteResult, error)
 	// HandleFileFlush 冲刷写回缓存(CodeFileFlush)。
@@ -303,24 +306,221 @@ type OperateHandler interface {
 // (仅 Write 请求携带,其余为 nil)。
 // 返回值:resp 总响应 JSON(Code 回显,失败时 Err 非 nil);streamOut 流
 // 数据段(仅 Read 响应携带);err 路由/校验级错误。
-// 伪代码步骤:
+// 实现步骤:
 //
 //	1. Code 为 0 → ErrCodeBadRequest(视为根本没填写 JSON);
 //	2. 校验唯一性:Code 对应指针必须非 nil,且其余指针必须全 nil,
 //	   否则 → ErrCodeBadRequest(防误填,拒绝静默路由);
-//	3. switch Code → 调 handler 对应方法:
-//	   - CodeAuthQueryUser  → handler.HandleAuthQueryUser
-//	   - CodeAuthQueryAcl   → handler.HandleAuthQueryAcl
-//	   - CodeAuthSnapshot   → handler.HandleAuthSnapshot
-//	   - CodeFileOpen…Rename → handler 对应 HandleFile*
-//	   - 未知 Code → ErrCodeNotImpl;
+//	3. switch Code → 调 handler 对应方法;
 //	4. 业务错误 → 填 resp.Err(哨兵 code),不抛 Go error;
 //	5. 组装 resp{Code 回显, 结果指针} 返回。
 func (r *OperateRequest) Route(ctx context.Context, handler OperateHandler, stream []byte) (resp *OperateResponse, streamOut []byte, err error) {
-	_ = ctx
-	_ = handler
-	_ = stream
-	return nil, nil, errNotImplemented
+	// ---- 1. 哨兵校验:Code=0 视为根本没填写 JSON ----
+	if r.Code == CodeInvalid {
+		return errResp(ErrCodeBadRequest, "operate: code is 0 (json not filled)"), nil, nil
+	}
+
+	// ---- 1.5 已知性校验:未知操作码直接 NotImpl ----
+	switch r.Code {
+	case CodeAuthQueryUser, CodeAuthQueryAcl, CodeAuthSnapshot,
+		CodeFileOpen, CodeFileRead, CodeFileWrite, CodeFileFlush,
+		CodeFileStat, CodeFileSetTimes, CodeFileTruncate, CodeFileListDir,
+		CodeFileClose, CodeFileUnlink, CodeFileRename:
+		// 已知操作码,继续。
+	default:
+		return errResp(ErrCodeNotImpl, "operate: unknown code"), nil, nil
+	}
+
+	// ---- 2. 唯一性校验:Code 对应指针非 nil 且其余指针全 nil ----
+	// 注意:类型化 nil 指针放进 interface{} 后 != nil,必须用 reflect 判空。
+	codePtr := func(code OperateCode) any {
+		switch code {
+		case CodeAuthQueryUser:
+			return r.AuthUser
+		case CodeAuthQueryAcl:
+			return r.AuthAcl
+		case CodeAuthSnapshot:
+			return r.Snapshot
+		case CodeFileOpen:
+			return r.Open
+		case CodeFileRead:
+			return r.Read
+		case CodeFileWrite:
+			return r.Write
+		case CodeFileFlush:
+			return r.Flush
+		case CodeFileStat:
+			return r.Stat
+		case CodeFileSetTimes:
+			return r.SetTimes
+		case CodeFileTruncate:
+			return r.Truncate
+		case CodeFileListDir:
+			return r.ListDir
+		case CodeFileClose:
+			return r.Close
+		case CodeFileUnlink:
+			return r.Unlink
+		case CodeFileRename:
+			return r.Rename
+		default:
+			return nil // 已在上方已知性校验排除,不会到达
+		}
+	}
+	// 记录每个字段的"预期归属"操作码,用于反查误填。
+	fieldCodes := []struct {
+		code OperateCode
+		ptr  any
+	}{
+		{CodeAuthQueryUser, r.AuthUser}, {CodeAuthQueryAcl, r.AuthAcl},
+		{CodeAuthSnapshot, r.Snapshot}, {CodeFileOpen, r.Open},
+		{CodeFileRead, r.Read}, {CodeFileWrite, r.Write},
+		{CodeFileFlush, r.Flush}, {CodeFileStat, r.Stat},
+		{CodeFileSetTimes, r.SetTimes}, {CodeFileTruncate, r.Truncate},
+		{CodeFileListDir, r.ListDir}, {CodeFileClose, r.Close},
+		{CodeFileUnlink, r.Unlink}, {CodeFileRename, r.Rename},
+	}
+	// 本 Code 对应的指针必须非 nil。
+	if isNilPtr(codePtr(r.Code)) {
+		return errResp(ErrCodeBadRequest, "operate: args not filled for code"), nil, nil
+	}
+	// 其余指针必须全 nil(防误填)。
+	for _, fc := range fieldCodes {
+		if fc.code != r.Code && !isNilPtr(fc.ptr) {
+			return errResp(ErrCodeBadRequest, "operate: multiple args filled"), nil, nil
+		}
+	}
+
+	// ---- 3~5. switch 分发:调用 handler 对应方法并组装响应 ----
+	switch r.Code {
+	case CodeAuthQueryUser:
+		result, callErr := handler.HandleAuthQueryUser(ctx, r.AuthUser)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, AuthUser: result}, nil, nil
+
+	case CodeAuthQueryAcl:
+		result, callErr := handler.HandleAuthQueryAcl(ctx, r.AuthAcl)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, AuthAcl: result}, nil, nil
+
+	case CodeAuthSnapshot:
+		result, callErr := handler.HandleAuthSnapshot(ctx, r.Snapshot)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Snapshot: result}, nil, nil
+
+	case CodeFileOpen:
+		result, callErr := handler.HandleFileOpen(ctx, r.Open)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Open: result}, nil, nil
+
+	case CodeFileRead:
+		result, streamOut, callErr := handler.HandleFileRead(ctx, r.Read)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		_ = stream // Read 请求不携带流段
+		return &OperateResponse{Code: r.Code, Read: result}, streamOut, nil
+
+	case CodeFileWrite:
+		result, callErr := handler.HandleFileWrite(ctx, r.Write, stream)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Write: result}, nil, nil
+
+	case CodeFileFlush:
+		if callErr := handler.HandleFileFlush(ctx, r.Flush); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileStat:
+		result, callErr := handler.HandleFileStat(ctx, r.Stat)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Stat: result}, nil, nil
+
+	case CodeFileSetTimes:
+		if callErr := handler.HandleFileSetTimes(ctx, r.SetTimes); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileTruncate:
+		if callErr := handler.HandleFileTruncate(ctx, r.Truncate); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileListDir:
+		result, callErr := handler.HandleFileListDir(ctx, r.ListDir)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, ListDir: result}, nil, nil
+
+	case CodeFileClose:
+		if callErr := handler.HandleFileClose(ctx, r.Close); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileUnlink:
+		if callErr := handler.HandleFileUnlink(ctx, r.Unlink); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileRename:
+		if callErr := handler.HandleFileRename(ctx, r.Rename); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	default:
+		return errResp(ErrCodeNotImpl, "operate: unknown code"), nil, nil
+	}
+}
+
+// errResp 构造仅含错误的总响应(Code=0,Err 填充)。
+// 参数:code 哨兵错误码;msg 错误说明(仅日志)。
+// 返回值:总响应结构。
+func errResp(code uint32, msg string) *OperateResponse {
+	return &OperateResponse{Err: &ErrorEnvelope{Code: code, Message: msg}}
+}
+
+// isNilPtr 判空(兼容类型化 nil 指针装入 interface{} 的情况)。
+// 参数:v 任意接口值(可能为 nil 接口或 nil 指针)。
+// 返回值:true 表示 nil(接口 nil 或指针 nil)。
+// 背景:Go 中 (*T)(nil) 转 interface{} 后 != nil,必须经 reflect 判断。
+func isNilPtr(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
+}
+
+// wrapErrResp 把 handler 返回的 Go error 映射为哨兵错误响应。
+// 参数:code 回显操作码;err 业务错误。
+// 返回值:总响应结构(Code 回显,Err 按哨兵映射)。
+// 实现:errNotImplemented → ErrCodeNotImpl;其余包装为 ErrCodeIO。
+func wrapErrResp(code OperateCode, err error) *OperateResponse {
+	msg := err.Error()
+	c := ErrCodeIO
+	if errors.Is(err, errNotImplemented) {
+		c = ErrCodeNotImpl
+	}
+	return &OperateResponse{Code: code, Err: &ErrorEnvelope{Code: c, Message: msg}}
 }
 
 // ============================================================================
@@ -629,4 +829,94 @@ type FileInfo struct {
 	IsDirectory bool `json:"isDirectory"`
 	// FileIndex 唯一文件索引(无则 0,协议层用 FileId 替代)。
 	FileIndex uint64 `json:"fileIndex"`
+}
+
+// ============================================================================
+// 帧编解码(传输层真实现;与 Rust 侧 types.rs 的编解码完全一致)
+// ============================================================================
+
+// headerLen 帧头固定长度(16 字节,大端序)。
+const headerLen = 16
+
+// marshalFrameHeader 把帧头编码为 16 字节大端字节串。
+// 参数:hdr 帧头结构。
+// 返回值:16 字节帧头。
+// 布局:magic(4) + version(1) + flags(1) + msgType(2) + seq(4) + bodyLen(4)。
+func marshalFrameHeader(hdr FrameHeader) []byte {
+	buf := make([]byte, headerLen)
+	binary.BigEndian.PutUint32(buf[0:4], hdr.Magic)
+	buf[4] = hdr.Version
+	buf[5] = hdr.Flags
+	binary.BigEndian.PutUint16(buf[6:8], hdr.MsgType)
+	binary.BigEndian.PutUint32(buf[8:12], hdr.Seq)
+	binary.BigEndian.PutUint32(buf[12:16], hdr.BodyLen)
+	return buf
+}
+
+// unmarshalFrameHeader 从 16 字节大端字节串解析帧头。
+// 参数:buf 帧头字节(长度必须 ≥ headerLen)。
+// 返回值:帧头结构;err 长度不足或魔数/版本不匹配。
+func unmarshalFrameHeader(buf []byte) (FrameHeader, error) {
+	if len(buf) < headerLen {
+		return FrameHeader{}, errors.New("frame: header too short")
+	}
+	hdr := FrameHeader{
+		Magic:   binary.BigEndian.Uint32(buf[0:4]),
+		Version: buf[4],
+		Flags:   buf[5],
+		MsgType: binary.BigEndian.Uint16(buf[6:8]),
+		Seq:     binary.BigEndian.Uint32(buf[8:12]),
+		BodyLen: binary.BigEndian.Uint32(buf[12:16]),
+	}
+	// 硬契约校验:魔数与版本必须匹配,body 长度不得超过上限。
+	if hdr.Magic != Magic {
+		return FrameHeader{}, errors.New("frame: bad magic")
+	}
+	if hdr.Version != Version {
+		return FrameHeader{}, errors.New("frame: version mismatch")
+	}
+	if hdr.BodyLen > MaxBodyLen {
+		return FrameHeader{}, errors.New("frame: body too large")
+	}
+	return hdr, nil
+}
+
+// marshalFrame 组一帧(帧头 + body),并回填 BodyLen。
+// 参数:hdr 帧头(调用方填 Magic/Version/Flags/MsgType/Seq);body 消息体。
+// 返回值:完整帧字节串(帧头 BodyLen 已按 len(body) 回填)。
+func marshalFrame(hdr FrameHeader, body []byte) []byte {
+	hdr.Magic = Magic
+	hdr.Version = Version
+	hdr.BodyLen = uint32(len(body))
+	out := marshalFrameHeader(hdr)
+	return append(out, body...)
+}
+
+// marshalOperateBody 组装控制面 body:[4B jsonLen] + JSON + [流数据段]。
+// 参数:req 总操作 JSON 或总响应 JSON;stream 流数据段(仅 Read/Write 携带)。
+// 返回值:body 字节串;err 序列化失败。
+func marshalOperateBody(v any, stream []byte) ([]byte, error) {
+	j, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(j))
+	binary.BigEndian.PutUint32(out[0:4], uint32(len(j)))
+	copy(out[4:], j)
+	return append(out, stream...), nil
+}
+
+// splitOperateBody 拆解控制面 body:解 [4B jsonLen] 并分离 JSON 与流数据段。
+// 参数:body 帧消息体(由 MSG_OPERATE/OPERATE_RESP 承载)。
+// 返回值:jsonBytes JSON 段;stream 流数据段(可为空);err 布局非法。
+// 硬契约:jsonLen 必须 ≤ body 长度,否则判协议错误。
+func splitOperateBody(body []byte) (jsonBytes, stream []byte, err error) {
+	if len(body) < 4 {
+		return nil, nil, errors.New("frame: operate body too short")
+	}
+	jsonLen := int(binary.BigEndian.Uint32(body[0:4]))
+	if jsonLen > len(body)-4 {
+		return nil, nil, errors.New("frame: operate jsonLen overflow")
+	}
+	return body[4 : 4+jsonLen], body[4+jsonLen:], nil
 }

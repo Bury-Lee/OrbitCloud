@@ -10,8 +10,13 @@ repository = "http://localhost/Bury/OrbitCloud"
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
+hex = "0.4"
+hmac = "0.12"
 ixr-smb-server = { version = "0.5.1", default-features = false }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
