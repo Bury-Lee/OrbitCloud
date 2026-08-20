@@ -70,12 +70,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 真实现按注释接入 flag::load_config / flag::validate / flag::load_shared_key。
 
     // ---- 3. 日志初始化(伪代码:按 config.log.level / log.output,RUST_LOG 覆盖) ----
-    tracing_subscriber::fmt()
+    // 构建 tracing 订阅器:把所有 tracing 宏(info!/warn!/error!)的输出
+    // 定向到 stdout + 时间戳/级别/模块等格式化字段(类比 Go 侧 log 轮转封装)。
+    // 伪代码阶段:级别用默认 "info,smb_server=debug"(smb_server 库模块开 debug);
+    // 真实现改为按 config.log.level 拼接,并按 config.log.output 落地日志文件。
+    tracing_subscriber::fmt() // 订阅器工厂:返回 fmt 格式化构建器
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,smb_server=debug".into()),
+            // 配置过滤规则:控制哪些模块打印哪个级别
+            // 优先读 RUST_LOG 环境变量(运维注入,如 RUST_LOG=debug);
+            tracing_subscriber::EnvFilter::try_from_default_env() // 解析失败(未设置/格式非法)→ Err
+                .unwrap_or_else(|_| "info,smb_server=debug".into()), // 失败用内置默认兜底
         )
-        .init();
+        .init(); // 注册为全局订阅器:此后 tracing 宏生效(幂等,重复调用忽略)
 
     // ---- 4~8. 共享密钥 / 连接网关 / 构建服务器 / 同步任务 / serve ----
     // 伪代码(见上方文档注释第 4~9 步,按序真实现):
