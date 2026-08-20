@@ -27,7 +27,10 @@ export interface Bucket {
   DeletedAt: string | null
   Name: string
   Description: string
+  /** 访问所需最低权限(0 最高,数值越大权限越低) */
   PermissionLevel: number
+  /** 管理所需最低权限(0 = 跟随访问等级) */
+  ManagePermissionLevel: number
   OwnerID: number
   /** 容量配额(字节;0=不限) */
   Quota: number

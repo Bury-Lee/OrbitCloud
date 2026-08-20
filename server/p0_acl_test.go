@@ -90,7 +90,7 @@ func newP0TestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func mkUserP0(t *testing.T, username string, perm int8) *model.User {
+func mkUserP0(t *testing.T, username string, perm model.PermissionLevel) *model.User {
 	t.Helper()
 	u := &model.User{Username: username, Password: "x", Name: username, PermissionLevel: perm, Status: 1}
 	if err := core.DB.Create(u).Error; err != nil {
@@ -99,7 +99,7 @@ func mkUserP0(t *testing.T, username string, perm int8) *model.User {
 	return u
 }
 
-func mkBucketP0(t *testing.T, name string, perm int8, owner uint) *model.Bucket {
+func mkBucketP0(t *testing.T, name string, perm model.PermissionLevel, owner uint) *model.Bucket {
 	t.Helper()
 	b := &model.Bucket{Name: name, PermissionLevel: perm, OwnerID: owner, Status: 1}
 	if err := core.DB.Create(b).Error; err != nil {
@@ -301,7 +301,7 @@ func TestCreateDirRejectsReservedName(t *testing.T) {
 }
 
 // TestGroupWhitelistPriority 白名单优先判定语义(权限级不兜底):
-// 设置了可见组的目录 → 仅管理员(<=1)/创建者/组内成员可访问,仅满足权限级门槛
+// 设置了可见组的目录 → 仅管理员(<=1)/组内成员可访问,仅满足权限级门槛
 // (桶级)不属于可见组 → 拒绝;组 = 纯白名单参考,加入组不改变用户权限等级。
 func TestGroupWhitelistPriority(t *testing.T) {
 	db := newP0TestDB(t)
@@ -313,7 +313,7 @@ func TestGroupWhitelistPriority(t *testing.T) {
 	b := mkBucketP0(t, "b4", 9, admin.ID)
 	g := mkGroupP0(t, "g4")
 
-	// 目录设组 [g4],创建者为 admin(非 doctor,排除创建者豁免)
+	// 目录设组 [g4],非组内 doctor 应被拒绝
 	dir := mkFolderP0(t, b.ID, 0, admin.ID, "whitelisted")
 	setVisible(t, dir.ID, fmt.Sprintf("[%d]", g.ID))
 

@@ -33,6 +33,9 @@ var App AppGroup
 func Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	// 执行池中间件:将剩余 handler 链提交至 core.ExecPool 执行。
+	// 池有界队列满时 SubmitCtx 阻塞 → 自然背压。
+	r.Use(ExecPoolMiddleware)
 	// 运行模式与配置对齐
 	if core.GlobalConfig != nil {
 		gin.SetMode(core.GlobalConfig.Server.Mode)

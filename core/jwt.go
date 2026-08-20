@@ -15,13 +15,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"orbitcloud/config"
+	"orbitcloud/model"
 )
 
 // Claims 访问令牌负载。
 type Claims struct {
-	UserID          uint   `json:"uid"`
-	Username        string `json:"username"`
-	PermissionLevel int8   `json:"perm"`
+	UserID          uint                   `json:"uid"`
+	Username        string                 `json:"username"`
+	PermissionLevel model.PermissionLevel  `json:"perm"`
 	jwt.RegisteredClaims
 }
 
