@@ -19,16 +19,23 @@
 //! 线程安全:RemoteBackend 只持 Arc<GatewayClient>(内部锁 + 帧编解码),
 //! 满足 ShareBackend 的 Send + Sync + 'static 约束。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use smb_server::{
     BackendCapabilities, DirEntry, FileInfo, FileTimes, Handle, OpenIntent, OpenOptions,
-    ShareBackend, SmbError, SmbResult, SmbPath,
+    ShareBackend, SmbError, SmbPath, SmbResult,
 };
 
 use crate::types::*;
+
+/// 应答通道表:seq → 请求应答(oneshot)。
+/// 承载:reader 任务按 seq 投递响应,调用方 await 取回;
+/// 超时(30s)未收到 → 移除并回 ERR_TIMEOUT。
+type PendingReplies =
+    tokio::sync::Mutex<HashMap<u32, tokio::sync::oneshot::Sender<Result<Vec<u8>, u32>>>>;
 
 // ============================================================================
 // GatewayClient:SMB 网关的私有 TCP 客户端(帧协议)
@@ -44,11 +51,11 @@ use crate::types::*;
 /// - `shared_key`:握手 HMAC 密钥(内存持有,不落盘);
 /// - `reconnect`:断线自动重连 + 全量快照重同步(由 sync.rs 驱动)。
 pub struct GatewayClient {
-    stream: tokio::net::TcpStream,          // 底层 TCP 连接
-    write_lock: tokio::sync::Mutex<()>,     // 写串行化
+    stream: tokio::net::TcpStream,             // 底层 TCP 连接
+    write_lock: tokio::sync::Mutex<()>,        // 写串行化
     seq_counter: std::sync::atomic::AtomicU32, // 请求序列号
-    pending: tokio::sync::Mutex<std::collections::HashMap<u32, tokio::sync::oneshot::Sender<Result<Vec<u8>, u32>>>>, // seq → 应答
-    shared_key: Vec<u8>,                    // 共享密钥(握手鉴权)
+    pending: PendingReplies,                   // seq → 应答通道表
+    shared_key: Vec<u8>,                       // 共享密钥(握手鉴权)
 }
 
 impl GatewayClient {
@@ -131,8 +138,8 @@ impl GatewayClient {
 /// - `share`:本共享的静态定义(共享名/桶 ID/权限模式),TREE_CONNECT 时使用。
 #[derive(Clone)]
 pub struct RemoteBackend {
-    conn: Arc<GatewayClient>,  // 到 Go 网关的共享连接
-    share: ShareInfo,          // 本共享定义(共享名 = 桶名,桶根 = 虚拟根)
+    conn: Arc<GatewayClient>, // 到 Go 网关的共享连接
+    share: ShareInfo,         // 本共享定义(共享名 = 桶名,桶根 = 虚拟根)
 }
 
 /// 实现库定义的 `ShareBackend` trait(存储抽象层;trait 定义见
@@ -157,7 +164,7 @@ impl ShareBackend for RemoteBackend {
     /// 4. 错误映射:map_gateway_err(code)。
     async fn open(&self, path: &SmbPath, opts: OpenOptions) -> SmbResult<Box<dyn Handle>> {
         let _ = (path, opts);
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 删除路径(文件/空目录)。
@@ -170,7 +177,7 @@ impl ShareBackend for RemoteBackend {
     /// 2. 错误映射(非空目录 → SmbError::NotEmpty)。
     async fn unlink(&self, path: &SmbPath) -> SmbResult<()> {
         let _ = path;
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 重命名(SMB RENAME;目标已存在时协议层要求拒绝)。
@@ -183,7 +190,7 @@ impl ShareBackend for RemoteBackend {
     /// 2. Go 侧保证目标存在 → ERR_EXISTS(对应 SmbError::Exists)。
     async fn rename(&self, from: &SmbPath, to: &SmbPath) -> SmbResult<()> {
         let _ = (from, to);
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 静态能力声明(协议层 TREE_CONNECT 时读取)。
@@ -196,7 +203,7 @@ impl ShareBackend for RemoteBackend {
     /// 2. case_sensitive = false(桶内文件名不区分大小写,name_lower 索引)。
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
-            is_read_only: false,  // 伪代码:按 share.mode 计算
+            is_read_only: false, // 伪代码:按 share.mode 计算
             case_sensitive: false,
         }
     }
@@ -236,7 +243,7 @@ impl Handle for RemoteHandle {
     /// 4. 数据长度 0 = EOF;错误按 map_gateway_err 映射。
     async fn read(&self, offset: u64, len: u32) -> SmbResult<Bytes> {
         let _ = (offset, len);
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 按偏移写入(SMB WRITE;Go 侧走写回缓存)。
@@ -250,7 +257,7 @@ impl Handle for RemoteHandle {
     /// 3. conn.call(MSG_FILE_WRITE, body) → WriteResponse.written。
     async fn write(&self, offset: u64, data: &[u8]) -> SmbResult<u32> {
         let _ = (offset, data);
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 冲刷缓冲(SMB FLUSH;触发 Go 侧写回缓存整体上传)。
@@ -262,7 +269,7 @@ impl Handle for RemoteHandle {
     /// 1. conn.call(MSG_FILE_FLUSH, json(FlushRequest{handle_id}));
     /// 2. 错误映射(上传失败 → SmbError::Io)。
     async fn flush(&self) -> SmbResult<()> {
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 查询文件信息(SMB QUERY_INFO)。
@@ -274,7 +281,7 @@ impl Handle for RemoteHandle {
     /// 1. conn.call(MSG_FILE_STAT, json(StatRequest{handle_id}));
     /// 2. 解码 StatResponse.info → 库 FileInfo(字段名一一对应)。
     async fn stat(&self) -> SmbResult<FileInfo> {
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 设置时间戳(SMB SET_INFO / FILE_BASIC_INFORMATION)。
@@ -287,7 +294,7 @@ impl Handle for RemoteHandle {
     /// 2. conn.call(MSG_FILE_SET_TIMES, json(req));错误映射。
     async fn set_times(&self, times: FileTimes) -> SmbResult<()> {
         let _ = times;
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 截断/扩展文件到指定长度(SMB SET_END_OF_FILE)。
@@ -300,7 +307,7 @@ impl Handle for RemoteHandle {
     /// 2. 错误映射(目录 → SmbError::IsDirectory)。
     async fn truncate(&self, len: u64) -> SmbResult<()> {
         let _ = len;
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 列出目录内容(SMB QUERY_DIRECTORY)。
@@ -314,7 +321,7 @@ impl Handle for RemoteHandle {
     /// 3. 解码 ListDirResponse.entries → Vec<DirEntry>。
     async fn list_dir(&self, pattern: Option<&str>) -> SmbResult<Vec<DirEntry>> {
         let _ = pattern;
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 
     /// 关闭句柄(SMB CLOSE;Go 侧触发写回缓存整体上传 + delete_on_close)。
@@ -326,7 +333,7 @@ impl Handle for RemoteHandle {
     /// 1. conn.call(MSG_FILE_CLOSE, json(CloseRequest{handle_id}));
     /// 2. 失败记日志(句柄已注销,数据一致性由 Go 侧写回重试兜底)。
     async fn close(self: Box<Self>) -> SmbResult<()> {
-        Err(SmbError::NotImplemented)
+        Err(SmbError::NotSupported)
     }
 }
 
@@ -366,6 +373,45 @@ fn map_gateway_err(code: u32) -> SmbError {
         ERR_NOT_EMPTY => SmbError::NotEmpty,
         ERR_IS_DIRECTORY => SmbError::IsDirectory,
         ERR_NOT_A_DIRECTORY => SmbError::NotADirectory,
-        _ => SmbError::NotImplemented,
+        _ => SmbError::NotSupported,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// OpenIntent → 帧协议字符串,须与 Go 侧 OpenRequest.Intent 一致。
+    #[test]
+    fn intent_str_matches_go_side() {
+        assert_eq!(intent_str(OpenIntent::Open), "open");
+        assert_eq!(intent_str(OpenIntent::Create), "create");
+        assert_eq!(intent_str(OpenIntent::OpenOrCreate), "open_or_create");
+        assert_eq!(
+            intent_str(OpenIntent::OverwriteOrCreate),
+            "overwrite_or_create"
+        );
+        assert_eq!(intent_str(OpenIntent::Truncate), "truncate");
+    }
+
+    /// 帧协议错误码映射到库的 SmbError(NTSTATUS 语义)。
+    #[test]
+    fn gateway_err_maps_to_smb_error() {
+        assert!(matches!(map_gateway_err(ERR_NOT_FOUND), SmbError::NotFound));
+        assert!(matches!(
+            map_gateway_err(ERR_ACCESS_DENIED),
+            SmbError::AccessDenied
+        ));
+        assert!(matches!(map_gateway_err(ERR_EXISTS), SmbError::Exists));
+        assert!(matches!(map_gateway_err(ERR_NOT_EMPTY), SmbError::NotEmpty));
+        assert!(matches!(
+            map_gateway_err(ERR_IS_DIRECTORY),
+            SmbError::IsDirectory
+        ));
+        assert!(matches!(
+            map_gateway_err(ERR_NOT_A_DIRECTORY),
+            SmbError::NotADirectory
+        ));
+        assert!(matches!(map_gateway_err(0xFFFF), SmbError::NotSupported));
     }
 }

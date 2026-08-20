@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use smb_server::{Access, ConfigHandle, Share};
 
-use crate::remote_backend::{GatewayClient, RemoteBackend};
+use crate::remote_backend::GatewayClient;
 use crate::types::*;
 
 // ============================================================================
@@ -46,16 +46,11 @@ use crate::types::*;
 ///
 /// 内部逻辑(伪代码):
 /// 1. 先拉全量快照 apply_snapshot(启动即建立用户/共享/ACL);
-/// 2. 常驻循环:
-///    a. 接收增量帧(MSG_AUTH_PUSH → apply_push);
-///    b. 每 interval 做一次全量对账(与当前状态 diff 后增量应用,
-///       弥补推送通道丢失的变更);
-///    c. 断线(ERR_GATEWAY_DOWN) → 重连 GatewayClient → 重新全量快照。
-pub async fn sync_loop(
-    conn: Arc<GatewayClient>,
-    handle: ConfigHandle,
-    interval: Duration,
-) {
+/// 2. 常驻循环:接收增量帧(MSG_AUTH_PUSH → apply_push);
+/// 3. 每 interval 做一次全量对账(与当前状态 diff 后增量应用,弥补推送
+///    通道丢失的变更);
+/// 4. 断线(ERR_GATEWAY_DOWN) → 重连 GatewayClient → 重新全量快照。
+pub async fn sync_loop(conn: Arc<GatewayClient>, handle: ConfigHandle, interval: Duration) {
     let _ = (conn, handle, interval);
     todo!("伪代码:见上方分步注释")
 }
@@ -69,14 +64,12 @@ pub async fn sync_loop(
 /// 返回值:Result(错误时调用方重试)。
 ///
 /// 内部逻辑(伪代码):
-/// 1. 用户:对每个 UserCred 调 handle.add_user(username, nt_hash_hex)
-///    (add_user 参数为密码字符串,真实现时对 NT hash 做包装:
-///    库的 UserCreds::from_nt_hash 或经补丁扩展);
-/// 2. 共享:对每个 ShareInfo:
-///    a. 构造 Share::new(share_name, RemoteBackend{conn, share})
-///       + 按 mode 设置 public_read_only / user 权限;
-///    b. handle.add_share(share);
-///    c. 对 users 逐个 handle.grant_share_user(share_name, username, access);
+/// 1. 用户:对每个 UserCred 调 handle.add_user(username, nt_hash_hex);
+///    注:add_user 参数为密码字符串,真实现时对 NT hash 做包装
+///    (库的 UserCreds::from_nt_hash 或经补丁扩展);
+/// 2. 共享:对每个 ShareInfo 构造 Share + RemoteBackend,按 mode 设置
+///    public_read_only / user 权限后 handle.add_share,再对 users 逐个
+///    grant_share_user;
 /// 3. 记录本快照指纹(用于对账 diff)。
 pub async fn apply_snapshot(
     handle: &ConfigHandle,
@@ -95,18 +88,16 @@ pub async fn apply_snapshot(
 /// 返回值:Result(失败记日志,下轮全量对账兜底)。
 ///
 /// 内部逻辑(伪代码):
-/// 1. match (entry.op, entry.kind):
-///    a. ("upsert","user")  → handle.add_user(entry.user.username, nt_hash);
-///    b. ("delete","user")  → handle.remove_user(entry.user.username)
-///       (库自动 close_sessions_for_user,活跃连接即刻失效);
-///    c. ("upsert","share") → 同 apply_snapshot 的共享步骤
-///       (add_share / grant_share_user 逐条);
-///    d. ("delete","share") → handle.remove_share(entry.share.share_name)
-///       (库自动 close_trees_for_share);
-///    e. ("upsert","acl")   → handle.grant_share_user(share_name, username, access);
-///    f. ("delete","acl")   → handle.revoke_share_user(share_name, username)
-///       (库自动 close_trees_for_user_share);
-/// 2. 任一失败仅记日志(不中断循环)。
+/// 1. match (entry.op, entry.kind) 的六种组合;
+/// 2. ("upsert","user") → add_user;("delete","user") → remove_user
+///    (库自动 close_sessions_for_user,活跃连接即刻失效);
+/// 3. ("upsert","share") → 同 apply_snapshot 的共享步骤
+///    (add_share / grant_share_user 逐条);
+/// 4. ("delete","share") → remove_share(库自动 close_trees_for_share);
+/// 5. ("upsert","acl") → grant_share_user(share_name, username, access);
+/// 6. ("delete","acl") → revoke_share_user
+///    (库自动 close_trees_for_user_share);
+/// 7. 任一失败仅记日志(不中断循环)。
 pub async fn apply_push(handle: &ConfigHandle, entry: AclEntry) -> Result<(), String> {
     let _ = (handle, entry);
     Err("伪代码:未实现".into())
@@ -126,10 +117,7 @@ pub async fn apply_push(handle: &ConfigHandle, entry: AclEntry) -> Result<(), St
 ///    - 多出的用户/共享/授权 → upsert;
 ///    - 缺失的 → delete(先删除授权再删共享,顺序防 ConfigError);
 /// 3. 更新本地指纹。
-pub async fn reconcile(
-    conn: &Arc<GatewayClient>,
-    handle: &ConfigHandle,
-) -> Result<(), String> {
+pub async fn reconcile(conn: &Arc<GatewayClient>, handle: &ConfigHandle) -> Result<(), String> {
     let _ = (conn, handle);
     Err("伪代码:未实现".into())
 }
@@ -162,7 +150,7 @@ fn build_share(conn: Arc<GatewayClient>, info: &ShareInfo) -> Share {
 /// 返回值:库的 Access。
 fn access_from_str(access: &str) -> Access {
     match access {
-        "readonly" => Access::ReadOnly,
+        "readonly" => Access::Read,
         _ => Access::ReadWrite,
     }
 }

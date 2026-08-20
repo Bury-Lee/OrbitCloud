@@ -10,7 +10,7 @@
 //!            │  445 (SMB 2.02/2.10/3.0/3.1.1,ixr-smb-server)
 //!            ▼
 //!   SmbServer(builder)
-//!      ├─ 初始无静态共享:共享全部由 sync.rs 经 ConfigHandle 动态注册
+//!      ├─ 初始无静态共享:共享全部由 sync 模块经 ConfigHandle 动态注册
 //!      │   (启动快照:Go 网关按"每桶一共享"下发桶定义)
 //!      └─ 后端 = RemoteBackend(转发文件操作 RPC 到 Go 网关)
 //!            │  出站私有 TCP(共享密钥 + 帧协议)
@@ -24,21 +24,25 @@
 //! - `SMB_LISTEN`:SMB 监听地址(默认 0.0.0.0:2445);
 //! - `RUST_LOG`:日志级别(默认 "info,smb_server=debug")。
 
+// 协议帧契约类型与常量(与 Go 侧 types.go 镜像)在真实现阶段被消费;
+// 设计阶段暂未引用属预期,用 expect 声明:一旦真实现接入,此 lint 自动失效。
+#![expect(
+    dead_code,
+    reason = "帧协议契约类型/常量:真实现阶段消费,见 smb_server/go/types.go"
+)]
+
 mod remote_backend;
 mod sync;
 mod types;
 
-use std::sync::Arc;
+use std::time::Duration;
 
-use smb_server::SmbServer;
-
-// 伪代码依赖(真实现时按需引入):
-// use remote_backend::GatewayClient;
-// use sync::sync_loop;
+use remote_backend::GatewayClient;
+use tracing::info;
 
 /// 程序入口(tokio 异步运行器)。
 ///
-/// 启动流程(伪代码分步注释):
+/// 启动流程(伪代码分步注释,真实现按序落地):
 /// 1. 初始化 tracing 日志(默认 "info,smb_server=debug",RUST_LOG 覆盖);
 /// 2. 读取配置(环境变量):
 ///    - gw_addr = env(GW_ADDR) 默认 "127.0.0.1:9001";
@@ -70,8 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 2. 配置读取(环境变量覆盖,带默认值) ----
     let gw_addr = std::env::var("GW_ADDR").unwrap_or_else(|_| "127.0.0.1:9001".into());
-    let key_env = std::env::var("GW_KEY_ENV")
-        .unwrap_or_else(|_| "ORBITCLOUD_SMB_GATEWAY_KEY".into());
+    let key_env =
+        std::env::var("GW_KEY_ENV").unwrap_or_else(|_| "ORBITCLOUD_SMB_GATEWAY_KEY".into());
     let shared_key = std::env::var(&key_env)
         .expect("GW_KEY_ENV 指向的共享密钥环境变量必须设置(启动即终止)")
         .into_bytes();
@@ -79,29 +83,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen = std::env::var("SMB_LISTEN").unwrap_or_else(|_| "0.0.0.0:2445".into());
 
     // ---- 3. 连接 Go 网关(握手失败退避重试) ----
-    // 伪代码:let conn = GatewayClient::connect(&gw_addr, shared_key, client_id).await?;
+    // 伪代码阶段:连接真实执行会 panic(见 GatewayClient::connect 的 todo!());
+    // 真实现接入后取消 `_` 前缀。
+    let _conn = GatewayClient::connect(&gw_addr, shared_key, hostname())
+        .await
+        .map_err(|e| format!("连接 Go 网关 {gw_addr} 失败: {e}"))?;
+    info!(%gw_addr, "已连接 Go 网关");
 
     // ---- 4. 构建 SMB 服务器(初始共享为空,动态注册) ----
-    let server: SmbServer = {
-        // 伪代码:SmbServer::builder().listen(listen.parse()?).build()?
-        let _ = listen;
-        todo!("伪代码:见启动流程注释第 4 步")
-    };
+    // 伪代码:SmbServer::builder().listen(listen.parse()?).build()?
+    let _listen = listen;
 
-    // ---- 5. 启动同步任务 ----
+    // ---- 5. 启动同步任务(全量快照 + 增量推送) ----
     // 伪代码:
-    // let handle = server.config_handle();
-    // let conn = Arc::new(conn);
-    // tokio::spawn(sync::sync_loop(conn.clone(), handle, Duration::from_secs(60)));
+    //   let handle = server.config_handle();
+    //   tokio::spawn(sync_loop(conn.clone(), handle, Duration::from_secs(60)));
 
     // ---- 6. 绑定并服务 ----
     // 伪代码:
-    // let addr = server.bind().await?;
-    // tracing::info!(%addr, "smb gateway listening");
-    // server.serve().await?;
-    Ok(())
+    //   let addr = server.bind().await?;
+    //   info!(%addr, "smb gateway listening");
+    //   server.serve().await?;
+
+    let _ = Duration::from_secs(60);
+    todo!("伪代码设计阶段:按上方分步注释真实现后删除")
 }
 
-/// 本文件未直接使用但为设计文档需要(伪代码占位,防未用告警)。
-#[allow(dead_code)]
-fn _keep(_: Arc<SmbServer>) {}
+/// 本机标识(握手 client_id 用,多实例隔离远程句柄表)。
+/// 返回:主机名;获取失败退化为 "unknown"。
+fn hostname() -> String {
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())
+}
