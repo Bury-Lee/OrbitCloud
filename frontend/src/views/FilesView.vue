@@ -215,6 +215,8 @@ function enterDir(row: FileRow) {
 // ---- 上传(结构化:复刻文件夹/文件结构,自动创建目录并上传) ----
 const uploading = ref(false)
 const uploadPercent = ref(0)
+const uploadLoaded = ref(0) // 已上传字节数(进度按字节而非文件数计算)
+const uploadTotal = ref(0)
 const uploadItems = ref<UploadTreeItem[]>([])
 const pickFilesInput = ref<HTMLInputElement>()
 const pickFolderInput = ref<HTMLInputElement>()
@@ -222,6 +224,8 @@ const pickFolderInput = ref<HTMLInputElement>()
 function openUpload() {
   uploadItems.value = []
   uploadPercent.value = 0
+  uploadLoaded.value = 0
+  uploadTotal.value = 0
   dialog.open('upload')
 }
 
@@ -270,9 +274,13 @@ async function onUpload() {
   }
   uploading.value = true
   uploadPercent.value = 0
+  uploadLoaded.value = 0
+  uploadTotal.value = 0
   try {
-    const res = await uploadStructured(bucketId.value, items, currentPath.value, (done, total) => {
-      uploadPercent.value = total > 0 ? Math.round((done / total) * 100) : 0
+    const res = await uploadStructured(bucketId.value, items, currentPath.value, (uploaded, total) => {
+      uploadLoaded.value = uploaded
+      uploadTotal.value = total
+      uploadPercent.value = total > 0 ? Math.round((uploaded / total) * 100) : 0
     })
     const msg = `上传完成:成功 ${res.ok}/${res.total} 个(目录结构已复刻)`
     if (res.failed.length > 0) {
@@ -1015,6 +1023,10 @@ async function onSaveVisibility() {
       </div>
       <div class="upload-target">上传到目录:{{ currentPath }}</div>
       <el-progress v-if="uploading" :percentage="uploadPercent" :stroke-width="10" class="upload-progress" />
+      <div v-if="uploading" class="upload-progress-text">
+        已上传 {{ formatSize(uploadLoaded) }} / {{ formatSize(uploadTotal) }}
+        <span v-if="uploadTotal > 0">({{ uploadPercent }}%)</span>
+      </div>
       <template #footer>
         <el-button @click="dialog.close()">取消</el-button>
         <el-button type="primary" :loading="uploading" @click="onUpload">
@@ -1307,6 +1319,13 @@ async function onSaveVisibility() {
   margin-top: 6px;
   font-size: 12px;
   color: #909399;
+}
+
+.upload-progress-text {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #606266;
+  text-align: center;
 }
 
 .upload-progress {
