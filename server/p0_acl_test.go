@@ -90,7 +90,7 @@ func newP0TestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func mkUserP0(t *testing.T, username string, perm int8) *model.User {
+func mkUserP0(t *testing.T, username string, perm model.PermissionLevel) *model.User {
 	t.Helper()
 	u := &model.User{Username: username, Password: "x", Name: username, PermissionLevel: perm, Status: 1}
 	if err := core.DB.Create(u).Error; err != nil {
@@ -99,7 +99,7 @@ func mkUserP0(t *testing.T, username string, perm int8) *model.User {
 	return u
 }
 
-func mkBucketP0(t *testing.T, name string, perm int8, owner uint) *model.Bucket {
+func mkBucketP0(t *testing.T, name string, perm model.PermissionLevel, owner uint) *model.Bucket {
 	t.Helper()
 	b := &model.Bucket{Name: name, PermissionLevel: perm, OwnerID: owner, Status: 1}
 	if err := core.DB.Create(b).Error; err != nil {

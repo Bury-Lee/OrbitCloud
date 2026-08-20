@@ -1,7 +1,7 @@
 ﻿// user_group.go —— 用户组:组 CRUD / 成员管理 / 我的组 / 组成员 ID 查询。
 //
 // 用户组支撑文件/文件夹"仅组 n 可见"(条目级可见性,见 visibility.go)。
-// 管理员(权限 <= 1)可管理组与成员,组内成员可查看组信息;
+// 管理员(IsAdmin)可管理组与成员,组内成员可查看组信息;
 // 组删除采用软删;组无权限等级概念(纯可见组白名单,不参与等级体系判定)。
 package server
 
@@ -83,7 +83,7 @@ func ListGroups(ctx context.Context, arg ListGroupsArg) (total int64, items []mo
 	db := core.DB.WithContext(ctx)
 	opt := common.NewOption(page, pageSize)
 	opt.DefaultOrder = "created_at DESC"
-	if user.PermissionLevel > 1 {
+	if !user.PermissionLevel.IsAdmin() {
 		ids, err := UserGroupIDs(ctx, UserGroupIDsArg{UserID: userID})
 		if err != nil {
 			return 0, nil, err

@@ -115,13 +115,13 @@ func addSuperAdmin(username, password string) error {
 	if err != nil {
 		return fmt.Errorf("flag: add-superadmin: hash password: %w", err)
 	}
-	// 用 map 落库:permission_level 字段 gorm tag 带 default:1,对零值(0)字段的
-	// struct Create 会以默认值 1 填充;map Create 保留显式 0
+	// 用 map 落库:permission_level 字段 gorm tag 带 default:3,对零值(0)字段的
+	// struct Create 会以默认值 3 填充;map Create 保留显式 0(超级管理员)
 	if err := core.DB.Model(&model.User{}).Create(map[string]any{
 		"username":         name,
 		"password":         string(hash),
 		"name":             name,
-		"permission_level": int8(0),
+		"permission_level": model.SuperAdmin,
 		"status":           1,
 	}).Error; err != nil {
 		return fmt.Errorf("flag: add-superadmin: create user: %w", err)

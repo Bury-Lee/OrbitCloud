@@ -1,7 +1,7 @@
 ﻿// user.go —— 用户:注册 / 登录 / 刷新 / 登出 / 查询 / 列表 / 修改 / 删除。
 //
 // 权限模型:0 = 超级管理员(仅命令行添加,API 不可创建);1 = 管理员;
-// 其余为普通用户。管理员判定统一为 PermissionLevel <= 1,数值越小权限越高。
+// 其余为普通用户。管理员判定统一为 PermissionLevel.IsAdmin(),数值越小权限越高。
 package server
 
 import (
@@ -30,9 +30,9 @@ type LoginResult struct {
 
 // RegisterArg 用户注册入参。
 type RegisterArg struct {
-	Username        string // 用户名(trim 后非空)
-	Password        string // 密码(≥8 位)
-	PermissionLevel int8   // 权限等级(0/负值归一为最低权限普通用户)
+	Username        string                // 用户名(trim 后非空)
+	Password        string                // 密码(≥8 位)
+	PermissionLevel model.PermissionLevel // 权限等级(<=0 归一为最低权限普通用户)
 }
 
 // Register 注册用户(管理员接口;普通用户不能自助注册):
@@ -48,8 +48,8 @@ func Register(ctx context.Context, arg RegisterArg) (*model.User, error) {
 	}
 	// permissionLevel 归一:<=0 → 最低权限普通用户
 	perm := permissionLevel
-	if perm <= 0 {
-		perm = int8(model.NormalUser)
+	if perm <= model.SuperAdmin {
+		perm = model.NormalUser
 	}
 
 	// 密码哈希(bcrypt)
@@ -311,11 +311,11 @@ func UpdateMe(ctx context.Context, arg UpdateMeArg) (*model.User, error) {
 
 // UpdateUserInput 用户可更新字段(管理员改他人;指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
 type UpdateUserInput struct {
-	Password        string // 非空则重置密码(bcrypt 哈希后落库)
-	Name            string // 名字/昵称
-	Email           string // 邮箱
-	PermissionLevel *int8  // 权限等级(不能设为 0;0 仅命令行添加)
-	Status          *int   // 1 正常 / 0 禁用
+	Password        string                // 非空则重置密码(bcrypt 哈希后落库)
+	Name            string                // 名字/昵称
+	Email           string                // 邮箱
+	PermissionLevel *model.PermissionLevel // 权限等级(不能设为 0;0 仅命令行添加)
+	Status          *int                  // 1 正常 / 0 禁用
 }
 
 // UpdateUserArg 用户更新入参(管理员改他人)。
@@ -350,7 +350,7 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 		updates["email"] = in.Email
 	}
 	if in.PermissionLevel != nil {
-		if *in.PermissionLevel < 1 {
+		if *in.PermissionLevel < model.Admin {
 			return nil, ErrInvalidInput // 0 仅命令行添加;负值非法
 		}
 		updates["permission_level"] = *in.PermissionLevel

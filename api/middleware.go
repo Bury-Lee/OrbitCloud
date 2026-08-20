@@ -62,7 +62,7 @@ func QueryTokenAuthMiddleware(c *gin.Context) {
 	c.Next()
 }
 
-// AdminMiddleware 管理员校验(须在 AuthMiddleware 之后):Claims.PermissionLevel <= 1,否则 403。
+// AdminMiddleware 管理员校验(须在 AuthMiddleware 之后):Claims.PermissionLevel.IsAdmin(),否则 403。
 func AdminMiddleware(c *gin.Context) {
 	// 未鉴权 → 401
 	claims := ClaimsFrom(c)
@@ -72,8 +72,8 @@ func AdminMiddleware(c *gin.Context) {
 		return
 	}
 
-	// 管理员 = 权限 <= 1
-	if claims.PermissionLevel > 1 {
+	// 管理员 = IsAdmin(0/1)
+	if !claims.PermissionLevel.IsAdmin() {
 		common.Forbidden(c, "forbidden")
 		c.Abort()
 		return

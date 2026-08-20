@@ -144,6 +144,11 @@ type RequestPool struct {
 	Mode          RequestPoolMode `yaml:"mode" json:"mode"`                     // block | reject(默认 block)
 }
 
+// Bucket 桶相关配置(config.yaml 的 bucket 段)。
+type Bucket struct {
+	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
+}
+
 // Config 总配置结构
 type Config struct {
 	App         App         `yaml:"app" json:"app"`
@@ -153,6 +158,7 @@ type Config struct {
 	RefreshJWT  RefreshJWT  `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
 	Log         Log         `yaml:"log" json:"log"`
 	Storage     Storage     `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
+	Bucket      Bucket      `yaml:"bucket" json:"bucket"`   // 桶相关配置
 
 	Health      Health      `yaml:"health" json:"health"`
 	Pool        Pool        `yaml:"pool" json:"pool"`
