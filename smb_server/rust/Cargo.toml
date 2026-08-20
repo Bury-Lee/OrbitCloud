@@ -1,0 +1,26 @@
+[package]
+name = "smb-gateway"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "OrbitCloud SMB 网关 Rust 侧:基于 ixr-smb-server 接入 SMB 协议,经私有 TCP 帧协议转发到 Go 侧网关"
+license = "Apache-2.0"
+repository = "http://localhost/Bury/OrbitCloud"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+hex = "0.4"
+hmac = "0.12"
+ixr-smb-server = { version = "0.5.1", default-features = false }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+strip = true

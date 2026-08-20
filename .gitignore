@@ -21,3 +21,4 @@ frontend/dist/
 reports/
 TODO.md
 rust-smb-server/target/
+smb_server/rust/target/

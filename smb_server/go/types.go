@@ -12,12 +12,40 @@
 //	          ▼
 //	Go 侧网关服务(smb_server/go,本包)—— 对接 OrbitCloud 后端
 //	      ├─ auth.go     用户 / NT hash / ACL 查询与变更推送(动态认证)
-//	      ├─ file_ops.go 文件操作 RPC(复用 model + server 层 + core.Storage)
-//	      ├─ gateway.go  Socket 帧协议:连接管理、心跳、鉴权
-//	      └─ main.go     启动入口
+//	      ├─ file_ops.go 文件操作(复用 model + server 层 + core.Storage)
+//	      ├─ gateway.go  Socket 帧协议:连接管理、心跳、鉴权、请求池
+//	      └─ wire.go     装配(由根 main.go 集成,与 HTTP 服务并行)
 //
 // 本包全部函数体为"伪代码"(分步注释 + 编译期占位),但签名/结构体/帧定义
 // 是最终设计,可直接作为 Go 侧与 Rust 侧并行开发的依据。
+//
+// ============================================================================
+// 控制面设计:总操作 JSON + 操作码路由(单次反序列化)
+// ============================================================================
+//
+//	每个请求 body 只反序列化一次成 OperateRequest(总操作 JSON),
+//	用操作码 Code 路由到具体操作(仿 HTTP 路由组):
+//
+//	    body = [4B jsonLen] + 总操作JSON(OperateRequest) + [流数据段(可选)]
+//	                    │ 一次 json.Unmarshal
+//	                    ▼
+//	          OperateRequest.Route(handler) ── switch Code
+//	                    │
+//	                    ├─ 校验:Code ≠ 0 且对应指针非 nil(两者同时非 nil → 报错)
+//	                    ├─ 调用 handler 对应方法(handler 由 Gateway 实现,
+//	                    │    转发到 auth / files 业务服务)
+//	                    └─ 返回 OperateResponse(总响应 JSON)+ 流数据段
+//
+//	约定:
+//	  - Code 不能从 0 开始:0 = 未填写(校验层直接拒绝);
+//	  - 操作参数(路径/意图/句柄/元数据)走 JSON;文件数据走流数据段
+//	    (设计点 8:控制面 JSON、数据面 io.Reader 流式);
+//	  - 流数据段仅 Read/Write 操作携带,其余操作 bodyLen == jsonLen。
+//
+//	帧消息类型因此精简为:
+//	  MSG_OPERATE(请求)/ MSG_OPERATE_RESP(响应)承载全部控制面操作;
+//	  MSG_AUTH_PUSH 保留为 Go→Rust 单向变更推送(无响应);
+//	  握手/心跳仍为独立帧。
 //
 // ============================================================================
 // 帧协议(与 smb_server/rust/types.rs 完全对应:字段语义/名称/顺序一致)
@@ -35,16 +63,20 @@
 //	  ──────  ────  ──────────────────────────────────────────────
 //
 //	消息体 body:
-//	  - 结构化消息:UTF-8 JSON(字段名与 Rust 侧 serde 字段一一对应);
-//	  - FILE_READ_RESP:  [4B 实际长度 u32] + 原始数据(数据长度以实际长度为准);
-//	  - FILE_WRITE_REQ:  [8B 偏移 u64] + 原始数据(数据长度 = bodyLen-8);
-//	  - 其余二进制消息以 8 字节定长偏移/长度头 + 数据体排列。
+//	  - MSG_OPERATE / MSG_OPERATE_RESP:
+//	    [4B jsonLen u32] + 总操作/总响应 JSON + [流数据段(仅 Read/Write)];
+//	  - 其余消息(握手/心跳/推送):JSON 或空。
 //
-//	错误:业务失败统一回 ErrorEnvelope(JSON),msgType = MSG_ERR_RESP,
-//	code 使用下方 Err* 哨兵常量(与 Rust 侧 SmbError 映射一一对应)。
+//	错误:业务失败统一进 OperateResponse.Err(ErrorEnvelope,code 用 Err* 哨兵)。
 package smbgateway
 
-import "errors"
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"reflect"
+)
 
 // 协议魔数与版本(帧头校验,两侧一致)。
 const (
@@ -67,6 +99,7 @@ const (
 )
 
 // 消息类型(msgType)常量表 —— 与 Rust 侧 MsgType 枚举完全一致。
+// 控制面操作统一走 MSG_OPERATE/MSG_OPERATE_RESP,内部用 OperateCode 路由。
 const (
 	// MSG_HELLO 握手:body = HelloRequest(共享密钥挑战应答)。
 	MSG_HELLO uint16 = 0x0001
@@ -75,71 +108,23 @@ const (
 	// MSG_HEARTBEAT 心跳探测(单向,FlagHeartbeat)。
 	MSG_HEARTBEAT uint16 = 0x0003
 
-	// MSG_AUTH_QUERY_USER 查询用户凭据(NT hash):Rust→Go。
-	MSG_AUTH_QUERY_USER uint16 = 0x0011
-	// MSG_AUTH_QUERY_USER_RESP 用户凭据查询结果。
-	MSG_AUTH_QUERY_USER_RESP uint16 = 0x0012
-	// MSG_AUTH_QUERY_ACL 查询用户可见共享清单:Rust→Go。
-	MSG_AUTH_QUERY_ACL uint16 = 0x0013
-	// MSG_AUTH_QUERY_ACL_RESP 共享清单查询结果。
-	MSG_AUTH_QUERY_ACL_RESP uint16 = 0x0014
-	// MSG_AUTH_PUSH 变更推送(用户/共享/ACL upsert/delete):Go→Rust 单向。
+	// MSG_AUTH_PUSH 变更推送(用户/共享/ACL upsert/delete):Go→Rust 单向,
+	// body = AclEntry(JSON);无响应。
 	MSG_AUTH_PUSH uint16 = 0x0015
-	// MSG_AUTH_SYNC_SNAPSHOT 全量快照请求(启动同步):Rust→Go。
-	MSG_AUTH_SYNC_SNAPSHOT uint16 = 0x0016
-	// MSG_AUTH_SYNC_SNAPSHOT_RESP 全量快照响应。
-	MSG_AUTH_SYNC_SNAPSHOT_RESP uint16 = 0x0017
 
-	// MSG_FILE_OPEN 打开/创建(文件或目录)。
-	MSG_FILE_OPEN uint16 = 0x0101
-	// MSG_FILE_OPEN_RESP 打开结果(远程句柄 ID 等)。
-	MSG_FILE_OPEN_RESP uint16 = 0x0102
-	// MSG_FILE_READ 按偏移读。
-	MSG_FILE_READ uint16 = 0x0103
-	// MSG_FILE_READ_RESP 读结果(实际数据)。
-	MSG_FILE_READ_RESP uint16 = 0x0104
-	// MSG_FILE_WRITE 按偏移写(写回缓存)。
-	MSG_FILE_WRITE uint16 = 0x0105
-	// MSG_FILE_WRITE_RESP 写结果(实际写入字节数)。
-	MSG_FILE_WRITE_RESP uint16 = 0x0106
-	// MSG_FILE_FLUSH 冲刷写回缓存。
-	MSG_FILE_FLUSH uint16 = 0x0107
-	// MSG_FILE_FLUSH_RESP 冲刷结果。
-	MSG_FILE_FLUSH_RESP uint16 = 0x0108
-	// MSG_FILE_STAT 查询文件元信息。
-	MSG_FILE_STAT uint16 = 0x0109
-	// MSG_FILE_STAT_RESP 元信息结果(FileInfo)。
-	MSG_FILE_STAT_RESP uint16 = 0x010A
-	// MSG_FILE_SET_TIMES 设置时间戳。
-	MSG_FILE_SET_TIMES uint16 = 0x010B
-	// MSG_FILE_SET_TIMES_RESP 设置结果。
-	MSG_FILE_SET_TIMES_RESP uint16 = 0x010C
-	// MSG_FILE_TRUNCATE 截断/扩展到指定长度。
-	MSG_FILE_TRUNCATE uint16 = 0x010D
-	// MSG_FILE_TRUNCATE_RESP 截断结果。
-	MSG_FILE_TRUNCATE_RESP uint16 = 0x010E
-	// MSG_FILE_LIST_DIR 列目录。
-	MSG_FILE_LIST_DIR uint16 = 0x010F
-	// MSG_FILE_LIST_DIR_RESP 目录条目列表。
-	MSG_FILE_LIST_DIR_RESP uint16 = 0x0110
-	// MSG_FILE_CLOSE 关闭句柄(触发写回上传)。
-	MSG_FILE_CLOSE uint16 = 0x0111
-	// MSG_FILE_CLOSE_RESP 关闭结果。
-	MSG_FILE_CLOSE_RESP uint16 = 0x0112
-	// MSG_FILE_UNLINK 删除路径(文件/空目录)。
-	MSG_FILE_UNLINK uint16 = 0x0113
-	// MSG_FILE_UNLINK_RESP 删除结果。
-	MSG_FILE_UNLINK_RESP uint16 = 0x0114
-	// MSG_FILE_RENAME 重命名/移动。
-	MSG_FILE_RENAME uint16 = 0x0115
-	// MSG_FILE_RENAME_RESP 重命名结果。
-	MSG_FILE_RENAME_RESP uint16 = 0x0116
+	// MSG_OPERATE 控制面总操作请求:body = [4B jsonLen] + OperateRequest
+	// + [流数据段(可选)]。
+	MSG_OPERATE uint16 = 0x0201
+	// MSG_OPERATE_RESP 控制面总响应:body = [4B jsonLen] + OperateResponse
+	// + [流数据段(可选,Read 数据)]。
+	MSG_OPERATE_RESP uint16 = 0x0202
 
-	// MSG_ERR_RESP 错误响应帧(ErrorEnvelope)。
+	// MSG_ERR_RESP 兜底错误帧(ErrorEnvelope;正常业务错误走
+	// OperateResponse.Err,本帧仅用于协议级错误)。
 	MSG_ERR_RESP uint16 = 0x8001
 )
 
-// 哨兵错误码(帧协议 ErrorEnvelope.Code)—— 与 Rust 侧一致,一一映射到
+// 哨兵错误码(OperateResponse.Err.Code)—— 与 Rust 侧一致,一一映射到
 // ixr-smb-server 的 SmbError(NTSTATUS 语义)。
 const (
 	ErrCodeOK           uint32 = 0  // 成功
@@ -154,6 +139,7 @@ const (
 	ErrCodeBadAuth      uint32 = 9  // STATUS_LOGON_FAILURE(握手/密钥失败)
 	ErrCodeGatewayDown  uint32 = 10 // 网关不可达(连接断开/超时)
 	ErrCodeTimeout      uint32 = 11 // 请求超时
+	ErrCodeBadRequest   uint32 = 12 // 请求不合法(Code=0 / 指针与 Code 不匹配)
 )
 
 // errNotImplemented 伪代码占位哨兵:所有伪代码函数统一返回它,
@@ -179,7 +165,7 @@ type FrameHeader struct {
 // 握手(HELLO / HELLO_ACK)
 // ============================================================================
 
-// HelloRequest 客户端( Rust 侧)发起握手的请求体。
+// HelloRequest 客户端(Rust 侧)发起握手的请求体。
 // 共享密钥双方预置(配置下发),不落盘明文;挑战应答防重放。
 type HelloRequest struct {
 	// ClientID Rust 网关实例标识(多实例隔离远程句柄表用,如 hostname+pid)。
@@ -187,7 +173,7 @@ type HelloRequest struct {
 	// Nonce 客户端随机 16 字节(hex);服务端以其为基础计算挑战。
 	Nonce string `json:"nonce"`
 	// ChallengeDigest 挑战应答摘要:
-	// HMAC-SHA256(sharedKey, "HELLO:" + clientId + ":" + nonce) 的 hex。
+	// HMAC-SHA256(sharedKey, "HELLO:"+clientId+":"+nonce) 的 hex。
 	ChallengeDigest string `json:"challengeDigest"`
 }
 
@@ -202,7 +188,562 @@ type HelloResponse struct {
 }
 
 // ============================================================================
-// 动态认证(用户 / NT hash / ACL 查询与变更推送)
+// 总操作 JSON:OperateCode + OperateRequest + Route 路由
+// ============================================================================
+
+// OperateCode 操作码:一个码对应一种操作。
+// 约定:不能从 0 开始(0 = 根本没填写 JSON,校验层直接拒绝)。
+type OperateCode int32
+
+// 操作码常量表 —— 与 Rust 侧 OperateCode 完全一致。
+const (
+	// CodeInvalid 未填写(哨兵,禁止使用)。
+	CodeInvalid OperateCode = 0
+	// CodeAuthQueryUser 查询用户凭据(NT hash;AuthUserArgs)。
+	CodeAuthQueryUser OperateCode = 1
+	// CodeAuthQueryAcl 查询用户可见共享清单(AuthAclArgs)。
+	CodeAuthQueryAcl OperateCode = 2
+	// CodeAuthSnapshot 全量同步快照(SnapshotArgs,空)。
+	CodeAuthSnapshot OperateCode = 3
+	// CodeFileOpen 打开/创建文件或目录(OpenArgs)。
+	CodeFileOpen OperateCode = 4
+	// CodeFileRead 按偏移读(ReadArgs;响应带流数据段)。
+	CodeFileRead OperateCode = 5
+	// CodeFileWrite 按偏移写(WriteArgs;请求带流数据段)。
+	CodeFileWrite OperateCode = 6
+	// CodeFileFlush 冲刷写回缓存(FlushArgs)。
+	CodeFileFlush OperateCode = 7
+	// CodeFileStat 查询元信息(StatArgs)。
+	CodeFileStat OperateCode = 8
+	// CodeFileSetTimes 设置时间戳(SetTimesArgs)。
+	CodeFileSetTimes OperateCode = 9
+	// CodeFileTruncate 截断/扩展(TruncateArgs)。
+	CodeFileTruncate OperateCode = 10
+	// CodeFileListDir 列目录(ListDirArgs)。
+	CodeFileListDir OperateCode = 11
+	// CodeFileClose 关闭句柄(CloseArgs)。
+	CodeFileClose OperateCode = 12
+	// CodeFileUnlink 删除路径(UnlinkArgs)。
+	CodeFileUnlink OperateCode = 13
+	// CodeFileRename 重命名/移动(RenameArgs)。
+	CodeFileRename OperateCode = 14
+)
+
+// OperateRequest 总操作 JSON:所有操作共用这一个结构,单次反序列化。
+// 每个操作用指针字段承载参数;未填写的操作指针为 nil。
+// 校验规则(见 Route):
+//   - Code 必须在常量表中,且为 0 直接拒绝;
+//   - Code 对应的指针必须非 nil,其余指针必须为 nil(防误填)。
+type OperateRequest struct {
+	// Code 操作码(CodeInvalid=0 视为未填写,直接拒绝)。
+	Code OperateCode `json:"code"`
+	// AuthUser Code=CodeAuthQueryUser 时有效。
+	AuthUser *AuthUserArgs `json:"authUser,omitempty"`
+	// AuthAcl Code=CodeAuthQueryAcl 时有效。
+	AuthAcl *AuthAclArgs `json:"authAcl,omitempty"`
+	// Snapshot Code=CodeAuthSnapshot 时有效(空参数)。
+	Snapshot *SnapshotArgs `json:"snapshot,omitempty"`
+	// Open Code=CodeFileOpen 时有效。
+	Open *OpenArgs `json:"open,omitempty"`
+	// Read Code=CodeFileRead 时有效。
+	Read *ReadArgs `json:"read,omitempty"`
+	// Write Code=CodeFileWrite 时有效。
+	Write *WriteArgs `json:"write,omitempty"`
+	// Flush Code=CodeFileFlush 时有效。
+	Flush *FlushArgs `json:"flush,omitempty"`
+	// Stat Code=CodeFileStat 时有效。
+	Stat *StatArgs `json:"stat,omitempty"`
+	// SetTimes Code=CodeFileSetTimes 时有效。
+	SetTimes *SetTimesArgs `json:"setTimes,omitempty"`
+	// Truncate Code=CodeFileTruncate 时有效。
+	Truncate *TruncateArgs `json:"truncate,omitempty"`
+	// ListDir Code=CodeFileListDir 时有效。
+	ListDir *ListDirArgs `json:"listDir,omitempty"`
+	// Close Code=CodeFileClose 时有效。
+	Close *CloseArgs `json:"close,omitempty"`
+	// Unlink Code=CodeFileUnlink 时有效。
+	Unlink *UnlinkArgs `json:"unlink,omitempty"`
+	// Rename Code=CodeFileRename 时有效。
+	Rename *RenameArgs `json:"rename,omitempty"`
+}
+
+// OperateHandler 路由处理器(由 Gateway 实现,转发到 auth/files 业务服务)。
+// 每个操作码对应一个方法,方法与操作参数/结果类型一一对应。
+type OperateHandler interface {
+	// HandleAuthQueryUser 查询用户凭据(CodeAuthQueryUser)。
+	HandleAuthQueryUser(ctx context.Context, args *AuthUserArgs) (*AuthUserResult, error)
+	// HandleAuthQueryAcl 查询用户可见共享清单(CodeAuthQueryAcl)。
+	HandleAuthQueryAcl(ctx context.Context, args *AuthAclArgs) (*AuthAclResult, error)
+	// HandleAuthSnapshot 全量同步快照(CodeAuthSnapshot)。
+	HandleAuthSnapshot(ctx context.Context, args *SnapshotArgs) (*SnapshotResult, error)
+	// HandleFileOpen 打开/创建(CodeFileOpen)。
+	HandleFileOpen(ctx context.Context, args *OpenArgs) (*OpenResult, error)
+	// HandleFileRead 按偏移读(CodeFileRead;返回流数据段,由 gateway 组装)。
+	HandleFileRead(ctx context.Context, args *ReadArgs) (result *ReadResult, stream []byte, err error)
+	// HandleFileWrite 按偏移写(CodeFileWrite;流数据段由 gateway 拆出)。
+	HandleFileWrite(ctx context.Context, args *WriteArgs, stream []byte) (*WriteResult, error)
+	// HandleFileFlush 冲刷写回缓存(CodeFileFlush)。
+	HandleFileFlush(ctx context.Context, args *FlushArgs) error
+	// HandleFileStat 查询元信息(CodeFileStat)。
+	HandleFileStat(ctx context.Context, args *StatArgs) (*StatResult, error)
+	// HandleFileSetTimes 设置时间戳(CodeFileSetTimes)。
+	HandleFileSetTimes(ctx context.Context, args *SetTimesArgs) error
+	// HandleFileTruncate 截断/扩展(CodeFileTruncate)。
+	HandleFileTruncate(ctx context.Context, args *TruncateArgs) error
+	// HandleFileListDir 列目录(CodeFileListDir)。
+	HandleFileListDir(ctx context.Context, args *ListDirArgs) (*ListDirResult, error)
+	// HandleFileClose 关闭句柄(CodeFileClose)。
+	HandleFileClose(ctx context.Context, args *CloseArgs) error
+	// HandleFileUnlink 删除路径(CodeFileUnlink)。
+	HandleFileUnlink(ctx context.Context, args *UnlinkArgs) error
+	// HandleFileRename 重命名/移动(CodeFileRename)。
+	HandleFileRename(ctx context.Context, args *RenameArgs) error
+}
+
+// Route 路由并操作(仿 HTTP 路由组;在 gateway 收到 MSG_OPERATE 后调用,
+// 整个 body 已在外部只反序列化过一次)。
+// 参数:ctx 上下文;handler 路由处理器(Gateway 实现);stream 流数据段
+// (仅 Write 请求携带,其余为 nil)。
+// 返回值:resp 总响应 JSON(Code 回显,失败时 Err 非 nil);streamOut 流
+// 数据段(仅 Read 响应携带);err 路由/校验级错误。
+// 实现步骤:
+//
+//	1. Code 为 0 → ErrCodeBadRequest(视为根本没填写 JSON);
+//	2. 校验唯一性:Code 对应指针必须非 nil,且其余指针必须全 nil,
+//	   否则 → ErrCodeBadRequest(防误填,拒绝静默路由);
+//	3. switch Code → 调 handler 对应方法;
+//	4. 业务错误 → 填 resp.Err(哨兵 code),不抛 Go error;
+//	5. 组装 resp{Code 回显, 结果指针} 返回。
+func (r *OperateRequest) Route(ctx context.Context, handler OperateHandler, stream []byte) (resp *OperateResponse, streamOut []byte, err error) {
+	// ---- 1. 哨兵校验:Code=0 视为根本没填写 JSON ----
+	if r.Code == CodeInvalid {
+		return errResp(ErrCodeBadRequest, "operate: code is 0 (json not filled)"), nil, nil
+	}
+
+	// ---- 1.5 已知性校验:未知操作码直接 NotImpl ----
+	switch r.Code {
+	case CodeAuthQueryUser, CodeAuthQueryAcl, CodeAuthSnapshot,
+		CodeFileOpen, CodeFileRead, CodeFileWrite, CodeFileFlush,
+		CodeFileStat, CodeFileSetTimes, CodeFileTruncate, CodeFileListDir,
+		CodeFileClose, CodeFileUnlink, CodeFileRename:
+		// 已知操作码,继续。
+	default:
+		return errResp(ErrCodeNotImpl, "operate: unknown code"), nil, nil
+	}
+
+	// ---- 2. 唯一性校验:Code 对应指针非 nil 且其余指针全 nil ----
+	// 注意:类型化 nil 指针放进 interface{} 后 != nil,必须用 reflect 判空。
+	codePtr := func(code OperateCode) any {
+		switch code {
+		case CodeAuthQueryUser:
+			return r.AuthUser
+		case CodeAuthQueryAcl:
+			return r.AuthAcl
+		case CodeAuthSnapshot:
+			return r.Snapshot
+		case CodeFileOpen:
+			return r.Open
+		case CodeFileRead:
+			return r.Read
+		case CodeFileWrite:
+			return r.Write
+		case CodeFileFlush:
+			return r.Flush
+		case CodeFileStat:
+			return r.Stat
+		case CodeFileSetTimes:
+			return r.SetTimes
+		case CodeFileTruncate:
+			return r.Truncate
+		case CodeFileListDir:
+			return r.ListDir
+		case CodeFileClose:
+			return r.Close
+		case CodeFileUnlink:
+			return r.Unlink
+		case CodeFileRename:
+			return r.Rename
+		default:
+			return nil // 已在上方已知性校验排除,不会到达
+		}
+	}
+	// 记录每个字段的"预期归属"操作码,用于反查误填。
+	fieldCodes := []struct {
+		code OperateCode
+		ptr  any
+	}{
+		{CodeAuthQueryUser, r.AuthUser}, {CodeAuthQueryAcl, r.AuthAcl},
+		{CodeAuthSnapshot, r.Snapshot}, {CodeFileOpen, r.Open},
+		{CodeFileRead, r.Read}, {CodeFileWrite, r.Write},
+		{CodeFileFlush, r.Flush}, {CodeFileStat, r.Stat},
+		{CodeFileSetTimes, r.SetTimes}, {CodeFileTruncate, r.Truncate},
+		{CodeFileListDir, r.ListDir}, {CodeFileClose, r.Close},
+		{CodeFileUnlink, r.Unlink}, {CodeFileRename, r.Rename},
+	}
+	// 本 Code 对应的指针必须非 nil。
+	if isNilPtr(codePtr(r.Code)) {
+		return errResp(ErrCodeBadRequest, "operate: args not filled for code"), nil, nil
+	}
+	// 其余指针必须全 nil(防误填)。
+	for _, fc := range fieldCodes {
+		if fc.code != r.Code && !isNilPtr(fc.ptr) {
+			return errResp(ErrCodeBadRequest, "operate: multiple args filled"), nil, nil
+		}
+	}
+
+	// ---- 3~5. switch 分发:调用 handler 对应方法并组装响应 ----
+	switch r.Code {
+	case CodeAuthQueryUser:
+		result, callErr := handler.HandleAuthQueryUser(ctx, r.AuthUser)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, AuthUser: result}, nil, nil
+
+	case CodeAuthQueryAcl:
+		result, callErr := handler.HandleAuthQueryAcl(ctx, r.AuthAcl)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, AuthAcl: result}, nil, nil
+
+	case CodeAuthSnapshot:
+		result, callErr := handler.HandleAuthSnapshot(ctx, r.Snapshot)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Snapshot: result}, nil, nil
+
+	case CodeFileOpen:
+		result, callErr := handler.HandleFileOpen(ctx, r.Open)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Open: result}, nil, nil
+
+	case CodeFileRead:
+		result, streamOut, callErr := handler.HandleFileRead(ctx, r.Read)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		_ = stream // Read 请求不携带流段
+		return &OperateResponse{Code: r.Code, Read: result}, streamOut, nil
+
+	case CodeFileWrite:
+		result, callErr := handler.HandleFileWrite(ctx, r.Write, stream)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Write: result}, nil, nil
+
+	case CodeFileFlush:
+		if callErr := handler.HandleFileFlush(ctx, r.Flush); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileStat:
+		result, callErr := handler.HandleFileStat(ctx, r.Stat)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, Stat: result}, nil, nil
+
+	case CodeFileSetTimes:
+		if callErr := handler.HandleFileSetTimes(ctx, r.SetTimes); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileTruncate:
+		if callErr := handler.HandleFileTruncate(ctx, r.Truncate); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileListDir:
+		result, callErr := handler.HandleFileListDir(ctx, r.ListDir)
+		if callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code, ListDir: result}, nil, nil
+
+	case CodeFileClose:
+		if callErr := handler.HandleFileClose(ctx, r.Close); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileUnlink:
+		if callErr := handler.HandleFileUnlink(ctx, r.Unlink); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	case CodeFileRename:
+		if callErr := handler.HandleFileRename(ctx, r.Rename); callErr != nil {
+			return wrapErrResp(r.Code, callErr), nil, nil
+		}
+		return &OperateResponse{Code: r.Code}, nil, nil
+
+	default:
+		return errResp(ErrCodeNotImpl, "operate: unknown code"), nil, nil
+	}
+}
+
+// errResp 构造仅含错误的总响应(Code=0,Err 填充)。
+// 参数:code 哨兵错误码;msg 错误说明(仅日志)。
+// 返回值:总响应结构。
+func errResp(code uint32, msg string) *OperateResponse {
+	return &OperateResponse{Err: &ErrorEnvelope{Code: code, Message: msg}}
+}
+
+// isNilPtr 判空(兼容类型化 nil 指针装入 interface{} 的情况)。
+// 参数:v 任意接口值(可能为 nil 接口或 nil 指针)。
+// 返回值:true 表示 nil(接口 nil 或指针 nil)。
+// 背景:Go 中 (*T)(nil) 转 interface{} 后 != nil,必须经 reflect 判断。
+func isNilPtr(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
+}
+
+// wrapErrResp 把 handler 返回的 Go error 映射为哨兵错误响应。
+// 参数:code 回显操作码;err 业务错误。
+// 返回值:总响应结构(Code 回显,Err 按哨兵映射)。
+// 实现:errNotImplemented → ErrCodeNotImpl;其余包装为 ErrCodeIO。
+func wrapErrResp(code OperateCode, err error) *OperateResponse {
+	msg := err.Error()
+	c := ErrCodeIO
+	if errors.Is(err, errNotImplemented) {
+		c = ErrCodeNotImpl
+	}
+	return &OperateResponse{Code: code, Err: &ErrorEnvelope{Code: c, Message: msg}}
+}
+
+// ============================================================================
+// 总响应 JSON:OperateResponse
+// ============================================================================
+
+// OperateResponse 总响应 JSON:与请求同构,操作结果用指针字段承载;
+// 失败时 Err 非 nil(哨兵 code),结果字段保持 nil。
+type OperateResponse struct {
+	// Code 回显请求操作码(与请求一致;校验失败时为 0)。
+	Code OperateCode `json:"code"`
+	// Err 业务错误(成功为 nil)。
+	Err *ErrorEnvelope `json:"err,omitempty"`
+	// AuthUser Code=CodeAuthQueryUser 时有效。
+	AuthUser *AuthUserResult `json:"authUser,omitempty"`
+	// AuthAcl Code=CodeAuthQueryAcl 时有效。
+	AuthAcl *AuthAclResult `json:"authAcl,omitempty"`
+	// Snapshot Code=CodeAuthSnapshot 时有效。
+	Snapshot *SnapshotResult `json:"snapshot,omitempty"`
+	// Open Code=CodeFileOpen 时有效。
+	Open *OpenResult `json:"open,omitempty"`
+	// Read Code=CodeFileRead 时有效(数据走流数据段)。
+	Read *ReadResult `json:"read,omitempty"`
+	// Write Code=CodeFileWrite 时有效。
+	Write *WriteResult `json:"write,omitempty"`
+	// Stat Code=CodeFileStat 时有效。
+	Stat *StatResult `json:"stat,omitempty"`
+	// ListDir Code=CodeFileListDir 时有效。
+	ListDir *ListDirResult `json:"listDir,omitempty"`
+	// 无结果操作(Flush/SetTimes/Truncate/Close/Unlink/Rename):仅 Code+Err。
+}
+
+// ErrorEnvelope 错误响应体(Err 字段;Code 用 Err* 哨兵常量)。
+type ErrorEnvelope struct {
+	// Code 哨兵错误码(ErrCode* 常量;与 Rust 侧映射一致)。
+	Code uint32 `json:"code"`
+	// Message 人类可读说明(仅日志,不面向 SMB 客户端)。
+	Message string `json:"message"`
+}
+
+// ============================================================================
+// 操作参数(Args)—— 与旧协议各 Request 结构对应,字段语义不变
+// ============================================================================
+
+// AuthUserArgs 查询用户凭据参数(CodeAuthQueryUser)。
+type AuthUserArgs struct {
+	// Username 待查询用户名。
+	Username string `json:"username"`
+}
+
+// AuthAclArgs 查询用户可见共享清单参数(CodeAuthQueryAcl)。
+type AuthAclArgs struct {
+	// Username 用户名。
+	Username string `json:"username"`
+}
+
+// SnapshotArgs 全量同步快照参数(CodeAuthSnapshot;空结构,占位)。
+type SnapshotArgs struct{}
+
+// OpenArgs 打开/创建文件或目录参数(CodeFileOpen)。
+// 字段语义与 ixr-smb-server 的 OpenOptions + OpenIntent 一一对应。
+type OpenArgs struct {
+	// Path SMB 相对路径(共享根下,组件以 "/" 分隔,不含 ".." 等;协议层已验证)。
+	Path string `json:"path"`
+	// Read 请求读权限。
+	Read bool `json:"read"`
+	// Write 请求写权限。
+	Write bool `json:"write"`
+	// Intent 创建处置语义(与 OpenIntent 对应):
+	// "open" | "create" | "open_or_create" | "overwrite_or_create" | "truncate"。
+	Intent string `json:"intent"`
+	// Directory 按目录打开(FILE_DIRECTORY_FILE)。
+	Directory bool `json:"directory"`
+	// NonDirectory 按普通文件打开,目标为目录则报错(FILE_NON_DIRECTORY_FILE)。
+	NonDirectory bool `json:"nonDirectory"`
+	// DeleteOnClose 关闭句柄时删除(FILE_DELETE_ON_CLOSE)。
+	DeleteOnClose bool `json:"deleteOnClose"`
+}
+
+// ReadArgs 按偏移读参数(CodeFileRead)。
+type ReadArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+	// Offset 读取起始偏移(字节)。
+	Offset uint64 `json:"offset"`
+	// Length 期望读取长度(≤ 1 MiB);返回可少于请求(EOF)。
+	Length uint32 `json:"length"`
+}
+
+// WriteArgs 按偏移写参数(CodeFileWrite;数据在流数据段)。
+type WriteArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+	// Offset 写入偏移(字节)。
+	Offset uint64 `json:"offset"`
+}
+
+// FlushArgs 冲刷写回缓存参数(CodeFileFlush)。
+type FlushArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+}
+
+// StatArgs 查询元信息参数(CodeFileStat)。
+type StatArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+}
+
+// SetTimesArgs 设置时间戳参数(CodeFileSetTimes;nil 字段 = 不改)。
+type SetTimesArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+	// CreationTime 创建时间 FILETIME(nil = 不改)。
+	CreationTime *uint64 `json:"creationTime,omitempty"`
+	// LastAccessTime 最后访问时间 FILETIME(nil = 不改)。
+	LastAccessTime *uint64 `json:"lastAccessTime,omitempty"`
+	// LastWriteTime 最后写入时间 FILETIME(nil = 不改)。
+	LastWriteTime *uint64 `json:"lastWriteTime,omitempty"`
+	// ChangeTime 变更时间 FILETIME(nil = 不改;后端可忽略)。
+	ChangeTime *uint64 `json:"changeTime,omitempty"`
+}
+
+// TruncateArgs 截断/扩展参数(CodeFileTruncate;SET_END_OF_FILE)。
+type TruncateArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+	// Length 目标长度(字节)。
+	Length uint64 `json:"length"`
+}
+
+// ListDirArgs 列目录参数(CodeFileListDir)。
+type ListDirArgs struct {
+	// HandleID 目录句柄 ID。
+	HandleID uint64 `json:"handleId"`
+	// Pattern 通配符(后端可不实现,由 SMB 层后过滤;空 = 全部)。
+	Pattern string `json:"pattern"`
+}
+
+// CloseArgs 关闭句柄参数(CodeFileClose;触发写回缓存整体上传)。
+type CloseArgs struct {
+	// HandleID 远程句柄 ID。
+	HandleID uint64 `json:"handleId"`
+}
+
+// UnlinkArgs 删除路径参数(CodeFileUnlink;目录须为空)。
+type UnlinkArgs struct {
+	// Path SMB 相对路径。
+	Path string `json:"path"`
+}
+
+// RenameArgs 重命名/移动参数(CodeFileRename;目标已存在必须拒绝)。
+type RenameArgs struct {
+	// FromPath 源 SMB 相对路径。
+	FromPath string `json:"fromPath"`
+	// ToPath 目标 SMB 相对路径(须同桶)。
+	ToPath string `json:"toPath"`
+}
+
+// ============================================================================
+// 操作结果(Result)—— 与旧协议各 Response 结构对应
+// ============================================================================
+
+// AuthUserResult 查询用户凭据结果。
+type AuthUserResult struct {
+	// Found 用户是否存在(不存在 → false,认证方按 LOGON_FAILURE 处理)。
+	Found bool `json:"found"`
+	// Cred 用户凭据(Found=true 时有效)。
+	Cred *UserCred `json:"cred,omitempty"`
+}
+
+// AuthAclResult 用户可见共享清单结果。
+type AuthAclResult struct {
+	// Shares 该用户可见的共享列表(经可见性 ACL 过滤,复用 server/visibility.go)。
+	Shares []ShareInfo `json:"shares"`
+}
+
+// SnapshotResult 全量同步快照结果:一次性下发全部用户与共享定义。
+type SnapshotResult struct {
+	// Users 全部有效用户(含 NT hash)。
+	Users []UserCred `json:"users"`
+	// Shares 全部共享(含各自 ACL)。
+	Shares []ShareInfo `json:"shares"`
+}
+
+// OpenResult 打开结果。
+type OpenResult struct {
+	// HandleID Go 网关分配的远程句柄 ID(全局唯一,后续 RPC 用)。
+	HandleID uint64 `json:"handleId"`
+	// IsDir 实际打开的是目录。
+	IsDir bool `json:"isDir"`
+	// EndOfFile 打开时的文件大小(新建 = 0;stat 语义预取)。
+	EndOfFile uint64 `json:"endOfFile"`
+	// Exists 打开时目标已存在(open_or_create 语义下客户端可据此判断新建/打开)。
+	Exists bool `json:"exists"`
+}
+
+// ReadResult 读结果(数据走流数据段,本结构仅承载元信息)。
+type ReadResult struct {
+	// Length 流数据段实际字节数(0 = EOF)。
+	Length uint32 `json:"length"`
+}
+
+// WriteResult 写结果。
+type WriteResult struct {
+	// Written 实际写入字节数(通常 = 流数据段长度;异常时更少)。
+	Written uint32 `json:"written"`
+}
+
+// StatResult 元信息结果。
+type StatResult struct {
+	// Info 元信息。
+	Info FileInfo `json:"info"`
+}
+
+// ListDirResult 目录条目列表结果。
+type ListDirResult struct {
+	// Entries 目录条目(FileInfo 列表)。
+	Entries []FileInfo `json:"entries"`
+}
+
+// ============================================================================
+// 动态认证共享类型(与 Rust 侧镜像)
 // ============================================================================
 
 // UserCred 用户凭据快照(驱动 Rust 侧用户表;对应 model.User)。
@@ -224,12 +765,13 @@ type UserCred struct {
 type ShareUserAccess struct {
 	// Username 用户名。
 	Username string `json:"username"`
-	// Access 访问级别:"readwrite" | "readonly"(对应 ixr Access::ReadWrite/ReadOnly)。
+	// Access 访问级别:"readwrite" | "readonly"(对应 ixr Access::ReadWrite/Read)。
 	Access string `json:"access"`
 }
 
 // ShareInfo 一个 SMB 共享的完整定义(对应一个桶;拓扑一"每桶一共享")。
 // 共享名 = 桶名;共享根 = 桶根(虚拟根,FolderID=0)。
+// 桶级元数据(配额/已用/状态)随推送下发,Rust 侧维护桶实例表(registry.rs)。
 type ShareInfo struct {
 	// ShareName SMB 共享名(客户端 \\host\<ShareName> 访问;= 桶显示名)。
 	ShareName string `json:"shareName"`
@@ -241,6 +783,12 @@ type ShareInfo struct {
 	Mode string `json:"mode"`
 	// Users 该共享的 ACL 用户清单(空 = 仅 Mode 生效)。
 	Users []ShareUserAccess `json:"users"`
+	// Quota 桶容量配额(字节;0 = 不限;SMB FS_SIZE_INFORMATION 容量上报)。
+	Quota int64 `json:"quota"`
+	// UsedSpace 桶已用空间(字节;冗余统计,上报剩余容量)。
+	UsedSpace int64 `json:"usedSpace"`
+	// Status 桶状态(1 正常 / 0 禁用;禁用 = 实例下线,踢出活跃连接)。
+	Status int `json:"status"`
 }
 
 // AclEntry 变更推送条目(增量;Go→Rust,MSG_AUTH_PUSH)。
@@ -258,123 +806,6 @@ type AclEntry struct {
 	Acl *ShareUserAccess `json:"acl,omitempty"`
 	// ShareName Kind=acl 时有效:授权变更所在的共享名。
 	ShareName string `json:"shareName"`
-}
-
-// AuthQueryUserRequest 查询单个用户凭据(Rust 认证时实时回调用,级别 B 预留)。
-type AuthQueryUserRequest struct {
-	// Username 待查询用户名。
-	Username string `json:"username"`
-}
-
-// AuthQueryUserResponse 用户凭据查询结果。
-type AuthQueryUserResponse struct {
-	// Found 用户是否存在(不存在 → false,认证方按 LOGON_FAILURE 处理)。
-	Found bool `json:"found"`
-	// Cred 用户凭据(Found=true 时有效)。
-	Cred *UserCred `json:"cred,omitempty"`
-}
-
-// AuthQueryAclRequest 查询用户可见共享清单(级别 A 动态 ACL 用)。
-type AuthQueryAclRequest struct {
-	// Username 用户名。
-	Username string `json:"username"`
-}
-
-// AuthQueryAclResponse 用户可见共享清单结果。
-type AuthQueryAclResponse struct {
-	// Shares 该用户可见的共享列表(经可见性 ACL 过滤,复用 server/visibility.go)。
-	Shares []ShareInfo `json:"shares"`
-}
-
-// SyncSnapshotRequest 全量同步请求(Rust 启动/断线重连后拉取;无字段)。
-type SyncSnapshotRequest struct{}
-
-// SyncSnapshotResponse 全量同步响应:一次性下发全部用户与共享定义。
-type SyncSnapshotResponse struct {
-	// Users 全部有效用户(含 NT hash)。
-	Users []UserCred `json:"users"`
-	// Shares 全部共享(含各自 ACL)。
-	Shares []ShareInfo `json:"shares"`
-}
-
-// ============================================================================
-// 文件操作 RPC(open/read/write/list/unlink/rename/stat 等)
-// ============================================================================
-
-// OpenRequest 打开/创建文件或目录(MSG_FILE_OPEN 请求体)。
-// 字段语义与 ixr-smb-server 的 OpenOptions + OpenIntent 一一对应。
-type OpenRequest struct {
-	// Path SMB 相对路径(共享根下,组件以 "/" 分隔,不含 ".." 等;协议层已验证)。
-	Path string `json:"path"`
-	// Read 请求读权限。
-	Read bool `json:"read"`
-	// Write 请求写权限。
-	Write bool `json:"write"`
-	// Intent 创建处置语义(与 OpenIntent 对应):
-	// "open" | "create" | "open_or_create" | "overwrite_or_create" | "truncate"。
-	Intent string `json:"intent"`
-	// Directory 按目录打开(FILE_DIRECTORY_FILE)。
-	Directory bool `json:"directory"`
-	// NonDirectory 按普通文件打开,目标为目录则报错(FILE_NON_DIRECTORY_FILE)。
-	NonDirectory bool `json:"nonDirectory"`
-	// DeleteOnClose 关闭句柄时删除(FILE_DELETE_ON_CLOSE)。
-	DeleteOnClose bool `json:"deleteOnClose"`
-}
-
-// OpenResponse 打开结果(MSG_FILE_OPEN_RESP 响应体)。
-type OpenResponse struct {
-	// HandleID Go 网关分配的远程句柄 ID(全局唯一,后续 RPC 用)。
-	HandleID uint64 `json:"handleId"`
-	// IsDir 实际打开的是目录。
-	IsDir bool `json:"isDir"`
-	// EndOfFile 打开时的文件大小(新建 = 0;stat 语义预取)。
-	EndOfFile uint64 `json:"endOfFile"`
-	// Exists 打开时目标已存在(open_or_create 语义下客户端可据此判断新建/打开)。
-	Exists bool `json:"exists"`
-}
-
-// ReadRequest 按偏移读(MSG_FILE_READ 请求体)。
-type ReadRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-	// Offset 读取起始偏移(字节)。
-	Offset uint64 `json:"offset"`
-	// Length 期望读取长度(≤ 1 MiB);返回可少于请求(EOF)。
-	Length uint32 `json:"length"`
-}
-
-// ReadResponse 读结果(MSG_FILE_READ_RESP;body = [4B 实际长度 u32] + 数据)。
-type ReadResponse struct {
-	// Data 实际读到的字节(长度 ≤ Length;0 字节 = EOF)。
-	Data []byte `json:"data"`
-}
-
-// WriteRequest 按偏移写(MSG_FILE_WRITE;body = [8B 偏移 u64] + 数据)。
-type WriteRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-	// Offset 写入偏移(字节)。
-	Offset uint64 `json:"offset"`
-	// Data 待写入数据。
-	Data []byte `json:"data"`
-}
-
-// WriteResponse 写结果(MSG_FILE_WRITE_RESP)。
-type WriteResponse struct {
-	// Written 实际写入字节数(通常 = len(Data);异常时更少)。
-	Written uint32 `json:"written"`
-}
-
-// FlushRequest 冲刷写回缓存(MSG_FILE_FLUSH;空结构)。
-type FlushRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-}
-
-// StatRequest 查询元信息(MSG_FILE_STAT)。
-type StatRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
 }
 
 // FileInfo 文件/目录元信息 —— 与 ixr-smb-server FileInfo 字段一一对应
@@ -400,72 +831,92 @@ type FileInfo struct {
 	FileIndex uint64 `json:"fileIndex"`
 }
 
-// StatResponse 元信息结果(MSG_FILE_STAT_RESP)。
-type StatResponse struct {
-	// Info 元信息。
-	Info FileInfo `json:"info"`
+// ============================================================================
+// 帧编解码(传输层真实现;与 Rust 侧 types.rs 的编解码完全一致)
+// ============================================================================
+
+// headerLen 帧头固定长度(16 字节,大端序)。
+const headerLen = 16
+
+// marshalFrameHeader 把帧头编码为 16 字节大端字节串。
+// 参数:hdr 帧头结构。
+// 返回值:16 字节帧头。
+// 布局:magic(4) + version(1) + flags(1) + msgType(2) + seq(4) + bodyLen(4)。
+func marshalFrameHeader(hdr FrameHeader) []byte {
+	buf := make([]byte, headerLen)
+	binary.BigEndian.PutUint32(buf[0:4], hdr.Magic)
+	buf[4] = hdr.Version
+	buf[5] = hdr.Flags
+	binary.BigEndian.PutUint16(buf[6:8], hdr.MsgType)
+	binary.BigEndian.PutUint32(buf[8:12], hdr.Seq)
+	binary.BigEndian.PutUint32(buf[12:16], hdr.BodyLen)
+	return buf
 }
 
-// SetTimesRequest 设置时间戳(MSG_FILE_SET_TIMES;nil 字段 = 不改)。
-type SetTimesRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-	// CreationTime 创建时间 FILETIME(nil = 不改)。
-	CreationTime *uint64 `json:"creationTime,omitempty"`
-	// LastAccessTime 最后访问时间 FILETIME(nil = 不改)。
-	LastAccessTime *uint64 `json:"lastAccessTime,omitempty"`
-	// LastWriteTime 最后写入时间 FILETIME(nil = 不改)。
-	LastWriteTime *uint64 `json:"lastWriteTime,omitempty"`
-	// ChangeTime 变更时间 FILETIME(nil = 不改;后端可忽略)。
-	ChangeTime *uint64 `json:"changeTime,omitempty"`
+// unmarshalFrameHeader 从 16 字节大端字节串解析帧头。
+// 参数:buf 帧头字节(长度必须 ≥ headerLen)。
+// 返回值:帧头结构;err 长度不足或魔数/版本不匹配。
+func unmarshalFrameHeader(buf []byte) (FrameHeader, error) {
+	if len(buf) < headerLen {
+		return FrameHeader{}, errors.New("frame: header too short")
+	}
+	hdr := FrameHeader{
+		Magic:   binary.BigEndian.Uint32(buf[0:4]),
+		Version: buf[4],
+		Flags:   buf[5],
+		MsgType: binary.BigEndian.Uint16(buf[6:8]),
+		Seq:     binary.BigEndian.Uint32(buf[8:12]),
+		BodyLen: binary.BigEndian.Uint32(buf[12:16]),
+	}
+	// 硬契约校验:魔数与版本必须匹配,body 长度不得超过上限。
+	if hdr.Magic != Magic {
+		return FrameHeader{}, errors.New("frame: bad magic")
+	}
+	if hdr.Version != Version {
+		return FrameHeader{}, errors.New("frame: version mismatch")
+	}
+	if hdr.BodyLen > MaxBodyLen {
+		return FrameHeader{}, errors.New("frame: body too large")
+	}
+	return hdr, nil
 }
 
-// TruncateRequest 截断/扩展到指定长度(MSG_FILE_TRUNCATE;SET_END_OF_FILE)。
-type TruncateRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-	// Length 目标长度(字节)。
-	Length uint64 `json:"length"`
+// marshalFrame 组一帧(帧头 + body),并回填 BodyLen。
+// 参数:hdr 帧头(调用方填 Magic/Version/Flags/MsgType/Seq);body 消息体。
+// 返回值:完整帧字节串(帧头 BodyLen 已按 len(body) 回填)。
+func marshalFrame(hdr FrameHeader, body []byte) []byte {
+	hdr.Magic = Magic
+	hdr.Version = Version
+	hdr.BodyLen = uint32(len(body))
+	out := marshalFrameHeader(hdr)
+	return append(out, body...)
 }
 
-// ListDirRequest 列目录(MSG_FILE_LIST_DIR)。
-type ListDirRequest struct {
-	// HandleID 目录句柄 ID。
-	HandleID uint64 `json:"handleId"`
-	// Pattern 通配符(后端可不实现,由 SMB 层后过滤;空 = 全部)。
-	Pattern string `json:"pattern"`
+// marshalOperateBody 组装控制面 body:[4B jsonLen] + JSON + [流数据段]。
+// 参数:req 总操作 JSON 或总响应 JSON;stream 流数据段(仅 Read/Write 携带)。
+// 返回值:body 字节串;err 序列化失败。
+func marshalOperateBody(v any, stream []byte) ([]byte, error) {
+	j, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 4+len(j))
+	binary.BigEndian.PutUint32(out[0:4], uint32(len(j)))
+	copy(out[4:], j)
+	return append(out, stream...), nil
 }
 
-// ListDirResponse 目录条目列表(MSG_FILE_LIST_DIR_RESP)。
-type ListDirResponse struct {
-	// Entries 目录条目(FileInfo 列表)。
-	Entries []FileInfo `json:"entries"`
-}
-
-// CloseRequest 关闭句柄(MSG_FILE_CLOSE;触发写回缓存整体上传)。
-type CloseRequest struct {
-	// HandleID 远程句柄 ID。
-	HandleID uint64 `json:"handleId"`
-}
-
-// UnlinkRequest 删除路径(MSG_FILE_UNLINK;目录须为空)。
-type UnlinkRequest struct {
-	// Path SMB 相对路径。
-	Path string `json:"path"`
-}
-
-// RenameRequest 重命名/移动(MSG_FILE_RENAME;目标已存在必须拒绝)。
-type RenameRequest struct {
-	// FromPath 源 SMB 相对路径。
-	FromPath string `json:"fromPath"`
-	// ToPath 目标 SMB 相对路径(须同桶)。
-	ToPath string `json:"toPath"`
-}
-
-// ErrorEnvelope 错误响应体(MSG_ERR_RESP;Code 用 Err* 哨兵常量)。
-type ErrorEnvelope struct {
-	// Code 哨兵错误码(ErrCode* 常量;与 Rust 侧映射一致)。
-	Code uint32 `json:"code"`
-	// Message 人类可读说明(仅日志,不面向 SMB 客户端)。
-	Message string `json:"message"`
+// splitOperateBody 拆解控制面 body:解 [4B jsonLen] 并分离 JSON 与流数据段。
+// 参数:body 帧消息体(由 MSG_OPERATE/OPERATE_RESP 承载)。
+// 返回值:jsonBytes JSON 段;stream 流数据段(可为空);err 布局非法。
+// 硬契约:jsonLen 必须 ≤ body 长度,否则判协议错误。
+func splitOperateBody(body []byte) (jsonBytes, stream []byte, err error) {
+	if len(body) < 4 {
+		return nil, nil, errors.New("frame: operate body too short")
+	}
+	jsonLen := int(binary.BigEndian.Uint32(body[0:4]))
+	if jsonLen > len(body)-4 {
+		return nil, nil, errors.New("frame: operate jsonLen overflow")
+	}
+	return body[4 : 4+jsonLen], body[4+jsonLen:], nil
 }

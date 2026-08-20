@@ -1,0 +1,24 @@
+# ============================================================================
+# smb-gateway 默认配置 —— 字段与 src/core/enter.rs 的 Config 结构一一对应
+# 读取规则(与 Go 侧铁律一致):
+#   - 启动时优先读工作目录 ./config.yaml;缺失 → 用本文件(include_str! 内置)
+#     落盘生成后继续;
+#   - 配置缺失/非法 → 启动即终止,不做缺省值兜底;
+#   - 敏感项(共享密钥)禁止写入本文件,走环境变量(见 gateway.shared_key_env)。
+# ============================================================================
+
+smb:
+  listen: "0.0.0.0:2445"          # SMB 监听地址(Windows Explorer 连接 \\host)
+  netbios_name: "ORBITCLOUD"      # NetBIOS 名(局域网浏览显示名,可选)
+
+gateway:
+  addr: "127.0.0.1:9001"          # Go 网关地址(私有 TCP 长连接,Rust 为客户端)
+  shared_key_env: "ORBITCLOUD_SMB_GATEWAY_KEY"  # 共享密钥所在环境变量名(≥16 字节)
+                                    # 可留空:未定义时改为握手后双方交换随机密钥(后续实现)
+  heartbeat_secs: 30              # 心跳间隔(秒)
+  sync_interval_secs: 60          # 与 Go 网关全量对账周期(秒,增量推送丢失兜底)
+  channel_buffer: 1024            # 发送管道缓冲长度(设计点 6;与 Go 侧请求池队列深度对齐)
+
+log:
+  level: "info"                   # 日志级别(debug/info/warn/error;可用 RUST_LOG 覆盖)
+  output: "logs"                  # 日志输出文件夹(相对工作目录;空 = 仅控制台)
