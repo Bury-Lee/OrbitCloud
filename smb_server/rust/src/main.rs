@@ -38,11 +38,6 @@ mod remote_backend;
 mod sync;
 mod types;
 
-use std::time::Duration;
-
-use remote_backend::GatewayClient;
-use tracing::info;
-
 /// 程序入口(tokio 异步运行器)。
 ///
 /// 启动流程(伪代码分步注释,真实现按序落地):
@@ -68,66 +63,34 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. 命令行指令(伪代码:flag::parse_args(&std::env::args().collect())) ----
-    // 指令处理路径返回 None 时此处直接 return Ok(())(--help/--version/-initConfig)。
+    // 指令处理路径返回 None 时直接 return Ok(())(--help/--version/-initConfig)。
 
-    // ---- 2. 配置读取与校验(伪代码:let config = flag::load_config(...) ?) ----
-    let config = core::Config {
-        smb: core::SmbConfig {
-            listen: "0.0.0.0:2445".into(),
-            netbios_name: "ORBITCLOUD".into(),
-        },
-        gateway: core::GatewayConfig {
-            addr: "127.0.0.1:9001".into(),
-            shared_key_env: "ORBITCLOUD_SMB_GATEWAY_KEY".into(),
-            heartbeat_secs: 30,
-            sync_interval_secs: 60,
-        },
-        log: core::LogConfig {
-            level: "info".into(),
-        },
-    };
-    let _ = flag::DEFAULT_CONFIG; // 伪代码:落盘内置默认由 load_config 完成
+    // ---- 2. 配置读取与校验(伪代码:let config = flag::load_config(flag::DEFAULT_CONFIG_PATH) ?) ----
+    // 伪代码阶段占位:不读取配置文件,启动链路见本函数上方文档注释;
+    // 真实现按注释接入 flag::load_config / flag::validate / flag::load_shared_key。
 
-    // ---- 3. 日志初始化(按 config.log.level,RUST_LOG 覆盖) ----
+    // ---- 3. 日志初始化(伪代码:按 config.log.level / log.output,RUST_LOG 覆盖) ----
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("{},smb_server=debug", config.log.level).into()),
+                .unwrap_or_else(|_| "info,smb_server=debug".into()),
         )
         .init();
 
-    // ---- 4. 共享密钥(伪代码:flag::load_shared_key(&config.gateway.shared_key_env) ?) ----
-    let shared_key: Vec<u8> = vec![0u8; 16]; // 伪代码占位:真实现从环境变量读取
-    assert!(shared_key.len() >= 16, "共享密钥长度须 ≥ 16 字节");
-
-    // ---- 5. 连接 Go 网关(握手失败退避重试) ----
-    // 伪代码阶段:连接真实执行会 panic(见 GatewayClient::connect 的 todo!());
-    // 真实现接入后取消 `_` 前缀。
-    let _conn = GatewayClient::connect(&config.gateway.addr, shared_key, hostname())
-        .await
-        .map_err(|e| format!("连接 Go 网关 {} 失败: {e}", config.gateway.addr))?;
-    info!(addr = %config.gateway.addr, "已连接 Go 网关");
-
-    // ---- 6. 构建 SMB 服务器(初始共享为空,动态注册) ----
-    // 伪代码:SmbServer::builder()
-    //   .listen(config.smb.listen.parse()?).netbios_name(&config.smb.netbios_name)
-    //   .build()?
-    let _listen = &config.smb.listen;
-
-    // ---- 7. 启动同步任务(全量快照 + 增量推送) ----
-    // 伪代码:
+    // ---- 4~8. 共享密钥 / 连接网关 / 构建服务器 / 同步任务 / serve ----
+    // 伪代码(见上方文档注释第 4~9 步,按序真实现):
+    //   let shared_key = flag::load_shared_key(&config.gateway.shared_key_env)?;
+    //   let conn = GatewayClient::connect(&config.gateway.addr, shared_key, hostname()).await?;
+    //   let server = SmbServer::builder()
+    //       .listen(config.smb.listen.parse()?).netbios_name(&config.smb.netbios_name)
+    //       .build()?;
     //   let handle = server.config_handle();
-    //   tokio::spawn(sync_loop(_conn.clone(), handle,
+    //   tokio::spawn(sync_loop(conn.clone(), handle,
     //       Duration::from_secs(config.gateway.sync_interval_secs)));
+    //   server.bind().await?; server.serve().await?;
 
-    // ---- 8. 绑定并服务 ----
-    // 伪代码:
-    //   let addr = server.bind().await?;
-    //   info!(%addr, "smb gateway listening");
-    //   server.serve().await?;
-
-    let _ = Duration::from_secs(config.gateway.sync_interval_secs);
-    todo!("伪代码设计阶段:按上方分步注释真实现后删除")
+    // 伪代码设计阶段占位:启动链路未实现,静默正常退出(不 panic、无报错)。
+    Ok(())
 }
 
 /// 本机标识(握手 client_id 用,多实例隔离远程句柄表)。

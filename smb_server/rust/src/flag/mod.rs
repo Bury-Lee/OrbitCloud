@@ -7,7 +7,6 @@
 //!   编译期嵌入 config.yaml)落盘生成后继续;
 //! - serde 反序列化 + 必填校验,配置缺失/非法 → 返回错误(启动即终止);
 //! - 共享密钥经环境变量注入(禁止写入配置文件)。
-
+//!
+//! 引用方式:`crate::flag::enter::{load_config, ...}`。
 pub mod enter;
-
-pub use enter::*;

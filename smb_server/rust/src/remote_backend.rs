@@ -1,4 +1,4 @@
-//! ============================================================================
+﻿//! ============================================================================
 //! remote_backend.rs —— RemoteBackend:实现 ShareBackend/Handle trait,转发到 Go
 //! ============================================================================
 //!
@@ -80,7 +80,8 @@ impl GatewayClient {
         client_id: String,
     ) -> std::io::Result<Arc<Self>> {
         let _ = (addr, shared_key, client_id);
-        todo!("伪代码:见上方分步注释")
+        // 伪代码阶段占位:返回未实现错误;真实现按上方分步注释执行。
+        Err(std::io::Error::other("伪代码:未实现"))
     }
 
     /// 发送一帧(帧头 + body),不等待响应(单向通知/心跳)。
@@ -93,7 +94,8 @@ impl GatewayClient {
     /// 返回值:网络错误。
     async fn send_frame(&self, msg_type: u16, flags: u8, body: &[u8]) -> std::io::Result<()> {
         let _ = (msg_type, flags, body);
-        todo!("伪代码:加锁 → 组帧头(大端) → 单次写")
+        // 伪代码阶段占位:返回未实现错误;真实现按注释执行(加锁 → 组帧头 → 写)。
+        Err(std::io::Error::other("伪代码:未实现"))
     }
 
     /// 发起请求-响应调用(核心 RPC 原语)。
@@ -122,8 +124,16 @@ impl GatewayClient {
     }
 
     /// 心跳与空闲回收任务(goroutine 对应)。
+    ///
+    /// 内部逻辑(伪代码):
+    /// 1. 每 30s 发 MSG_HEARTBEAT(单向,FLAG_HEARTBEAT);
+    /// 2. 对端超过 idleTimeout(90s)无任何帧 → 主动重连;
+    /// 3. 重连后由 sync 模块重新全量快照。
+    ///
+    /// 伪代码阶段占位:空任务,不执行任何动作。
     async fn heartbeat_task(self: Arc<Self>) {
-        todo!("伪代码:每 30s 发 MSG_HEARTBEAT;对端超时 90s 未活动则重连")
+        // 伪代码阶段:留空;真实现按上方分步注释执行。
+        let _ = self;
     }
 }
 

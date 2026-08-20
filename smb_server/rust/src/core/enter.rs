@@ -59,6 +59,8 @@ pub struct GatewayConfig {
 pub struct LogConfig {
     /// 日志级别(debug/info/warn/error)。
     pub level: String,
+    //输出文件夹
+    pub output: String,
 }
 
 /// 运行期全局单例(仿 Go 侧 core.Storage 等单例的 Rust 对应)。
@@ -74,20 +76,20 @@ pub struct Core {
     pub handle_table: Option<()>, // 伪代码:真实现为句柄注册表
 }
 
-impl Core {
-    /// 构造单例(伪代码阶段:仅占位)。
+impl Config {
+    /// 构造配置(伪代码阶段:占位返回入参,不执行任何逻辑)。
     ///
     /// 参数:
-    /// - `config`:已加载的全局配置。
+    /// - `config`:已加载的全局配置(见 flag::load_config)。
     ///
-    /// 返回值:组装完成的单例(连接/句柄表为空,由启动流程填充)。
+    /// 返回值:配置自身(连接/日志初始化等副作用留待启动流程)。
     ///
     /// 内部逻辑(伪代码):
     /// 1. 校验配置完整性(必填项非空,见 flag::validate);
-    /// 2. 初始化日志(按 config.log.level);
-    /// 3. 返回 Core{config, gateway_conn: None, handle_table: None}。
+    /// 2. 初始化日志(按 config.log.level / log.output);
+    /// 3. 返回 config。
     pub fn new(config: Config) -> Self {
-        let _ = config;
-        todo!("伪代码:见上方分步注释")
+        // 伪代码阶段占位:直接返回入参;真实现按上方分步注释执行。
+        config
     }
 }

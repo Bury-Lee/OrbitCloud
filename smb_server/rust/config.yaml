@@ -19,3 +19,4 @@ gateway:
 
 log:
   level: "info"                   # 日志级别(debug/info/warn/error;可用 RUST_LOG 覆盖)
+  output: "logs"                  # 日志输出文件夹(相对工作目录;空 = 仅控制台)

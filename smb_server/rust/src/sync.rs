@@ -52,7 +52,7 @@ use crate::types::*;
 /// 4. 断线(ERR_GATEWAY_DOWN) → 重连 GatewayClient → 重新全量快照。
 pub async fn sync_loop(conn: Arc<GatewayClient>, handle: ConfigHandle, interval: Duration) {
     let _ = (conn, handle, interval);
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:空任务,不执行任何动作;真实现按上方分步注释执行。
 }
 
 /// 应用全量快照(启动/重连时把 Go 权威源状态同步到内存)。
@@ -132,16 +132,19 @@ pub async fn reconcile(conn: &Arc<GatewayClient>, handle: &ConfigHandle) -> Resu
 /// - `conn`:GatewayClient;
 /// - `info`:共享定义(桶上下文)。
 ///
-/// 返回值:库的 Share 构建器输入。
+/// 返回值:
+/// - Ok(Share):构建成功的库 Share;
+/// - Err(String):共享名非法/用户缺失等(由调用方记日志)。
 ///
 /// 内部逻辑(伪代码):
 /// 1. backend = RemoteBackend{conn, share: info.clone()};
 /// 2. share = Share::new(info.share_name, backend);
 /// 3. mode=="readonly" → share.public_read_only()(或按 ACL 逐用户设置);
 /// 4. 返回 share。
-fn build_share(conn: Arc<GatewayClient>, info: &ShareInfo) -> Share {
+fn build_share(conn: Arc<GatewayClient>, info: &ShareInfo) -> Result<Share, String> {
     let _ = (conn, info);
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
+    Err("伪代码:未实现".into())
 }
 
 /// 把 ACL 的 access 字符串翻译为库的 Access 枚举。

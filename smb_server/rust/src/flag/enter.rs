@@ -10,7 +10,7 @@
 //! 真实现解析建议:serde_yml(serde_yaml 已弃用维护);本设计阶段不引入
 //! 该依赖,解析函数体保持伪代码占位。
 
-use crate::core::enter::{Config, GatewayConfig, LogConfig, SmbConfig};
+use crate::core::enter::Config;
 
 /// 内置默认配置(编译期嵌入;与包根 config.yaml 保持同步,禁止手工漂移)。
 ///
@@ -37,7 +37,8 @@ pub const DEFAULT_CONFIG_PATH: &str = "./config.yaml";
 /// 4. 返回 config。
 pub fn load_config(path: &str) -> Result<Config, String> {
     let _ = path;
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
+    Err("伪代码:未实现".into())
 }
 
 /// 必填项与合法性校验(反序列化后的二次检查)。
@@ -57,7 +58,8 @@ pub fn load_config(path: &str) -> Result<Config, String> {
 /// 5. 任一失败 → Err(拼接全部问题,一次报全)。
 pub fn validate(config: &Config) -> Result<(), String> {
     let _ = config;
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
+    Err("伪代码:未实现".into())
 }
 
 /// 读取共享密钥(环境变量注入,禁止写入 config.yaml)。
@@ -75,7 +77,8 @@ pub fn validate(config: &Config) -> Result<(), String> {
 /// 3. 返回字节。
 pub fn load_shared_key(env_name: &str) -> Result<Vec<u8>, String> {
     let _ = env_name;
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
+    Err("伪代码:未实现".into())
 }
 
 /// 命令行入口占位(仿 Go 侧 flag 包:-initConfig 等指令)。
@@ -96,9 +99,6 @@ pub fn load_shared_key(env_name: &str) -> Result<Vec<u8>, String> {
 /// 5. 未知参数 → Err("unknown flag ...")。
 pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     let _ = args;
-    todo!("伪代码:见上方分步注释")
+    // 伪代码阶段占位:返回未实现哨兵;真实现按上方分步注释执行。
+    Err("伪代码:未实现".into())
 }
-
-// 编译期断言:本模块类型引用(伪代码占位,防未用告警)。
-#[allow(unused)]
-fn _keep(_: SmbConfig, _: GatewayConfig, _: LogConfig) {}
