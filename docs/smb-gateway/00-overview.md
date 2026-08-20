@@ -87,6 +87,7 @@ smb_server/
 | [04-bucket-registry-sync.md](04-bucket-registry-sync.md) | 桶实例注册表、同步状态机、快照/推送/对账 | 4 |
 | [05-file-ops-streaming.md](05-file-ops-streaming.md) | 文件操作、写回缓存、io.Reader 流式协调 | 5 |
 | [06-auth-config.md](06-auth-config.md) | 动态认证(NT hash/ACL)、配置项、JSON 注入、双服务 | 6 |
+| [07-linux-deployment.md](07-linux-deployment.md) | Linux 部署指南(构建/配置/systemd/防火墙/客户端/排障) | 7 |
 
 ## 5. 两侧对应关系(维护必看)
 
