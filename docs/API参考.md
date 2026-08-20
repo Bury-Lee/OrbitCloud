@@ -52,10 +52,10 @@
 
 请求:`{"refresh_token": "..."}` → `204`,幂等(令牌已吊销同样成功)。
 
-### POST `/auth/register`(管理员,权限 ≤ 1)
+### POST `/auth/register`(管理员)
 
-请求:`{"username": "alice", "password": "alice123456", "permission_level": 5}`
-→ 返回创建的用户。**权限 0 不可经 API 创建**(一律归一为普通用户),仅 `--add-superadmin` 可建。
+请求:`{"username": "alice", "password": "alice123456", "permission_level": 3}`
+→ 返回创建的用户。**权限 0 不可经 API 创建**(一律归一为普通用户),仅 `--add-superadmin` 可建;`permission_level` 缺省 = 普通用户。
 
 ### GET `/users/me` / PUT `/users/me`(登录)
 
@@ -86,10 +86,10 @@
 
 | 方法/路径 | 说明 |
 |---|---|
-| POST `/buckets` | 创建:`{"name", "description"?, "quota"?}`(quota 字节,0=不限);桶名全局唯一 |
+| POST `/buckets` | 创建:`{"name", "description"?, "permission_level"?, "manage_permission_level"?}`(等级缺省跟随创建者;管理等级 0 = 跟随访问等级,管理要求不得松于访问;配置 `bucket.admin_create_only` 时仅管理员可建) |
 | GET `/buckets` | 我的桶列表 |
-| GET `/buckets/:id` | 详情(含 `quota` / `used_space`) |
-| PUT `/buckets/:id` | 修改(`name? / description? / quota?`) |
+| GET `/buckets/:id` | 详情(含 `quota` / `used_space` / 两级等级) |
+| PUT `/buckets/:id` | 修改(`description? / permission_level? / manage_permission_level? / quota? / status?`);非管理员不得把等级改得比自身权限更高 |
 | DELETE `/buckets/:id` | 删除:桶置禁用 → 落 DeleteTask → 后台级联清理后删记录 |
 
 ## 5. 文件与文件夹
@@ -167,6 +167,5 @@
 
 - 登录后 access_token 放入 `Authorization: Bearer <token>`;刷新令牌轮换:收到 401 先
   `POST /auth/refresh` 换新令牌对并重放原请求(前端已实现并发共享刷新);
-- 管理员判定:`permission_level <= 1`;管理员改他人须权限严格高于目标;
-- 条目可见性:条目挂 `visible_to_groups`(JSON 组 ID 列表),空 = 不限制;组内成员可见,
-  非成员与管理员不受限。
+- 管理员判定:`PermissionLevel.IsAdmin()`(0/1);管理员改他人须权限严格高于目标;
+- 条目可见性:条目挂 `visible_to_groups`(JSON 组 ID 列表),空 = 不限制;非空时仅管理员/组内成员可见(上传者不自动放行)。

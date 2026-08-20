@@ -18,3 +18,7 @@ vendor/
 # 前端
 frontend/node_modules/
 frontend/dist/
+
+reports/
+TODO.md
+rust-smb-server/target/

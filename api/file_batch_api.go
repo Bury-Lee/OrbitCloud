@@ -4,12 +4,15 @@ package api
 
 import (
 	"archive/zip"
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
 
+	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
 
+	"orbitcloud/core"
 	"orbitcloud/server"
 )
 
@@ -50,6 +53,19 @@ func (FileAPI) BatchDelete(c *gin.Context) {
 		BucketID: bucketID,
 		Items:    req.Items,
 	})
+
+	// 文件夹项落后台任务表:统一经全局协程池提交物理清理(SubmitCtx 传请求上下文,
+	// 客户端断开则跳过提交,任务由启动/cron 续跑)
+	for i := range results {
+		if results[i].TaskID == 0 {
+			continue
+		}
+		taskID := results[i].TaskID
+		core.Pool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+			return server.ProcessDeleteTask(context.Background(), server.ProcessDeleteTaskArg{TaskID: taskID})
+		}))
+	}
+
 	respondResult(c, results, nil)
 }
 
@@ -62,8 +78,8 @@ func (FileAPI) BatchCopy(c *gin.Context) {
 		return
 	}
 	var req struct {
-		DstBucketID uint             `json:"dst_bucket_id"`
-		DstDir      string           `json:"dst_dir"`
+		DstBucketID uint              `json:"dst_bucket_id"`
+		DstDir      string            `json:"dst_dir"`
 		Items       []server.CopyItem `json:"items"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -109,8 +125,8 @@ func (FileAPI) BatchMove(c *gin.Context) {
 		return
 	}
 	var req struct {
-		DstBucketID uint             `json:"dst_bucket_id"`
-		DstDir      string           `json:"dst_dir"`
+		DstBucketID uint              `json:"dst_bucket_id"`
+		DstDir      string            `json:"dst_dir"`
 		Items       []server.MoveItem `json:"items"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {

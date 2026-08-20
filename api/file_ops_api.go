@@ -3,9 +3,13 @@
 package api
 
 import (
+	"context"
+
+	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/common"
+	"orbitcloud/core"
 	"orbitcloud/server"
 )
 
@@ -271,7 +275,8 @@ func (FileAPI) CreateDir(c *gin.Context) {
 }
 
 // DeleteDir 删除文件夹(DELETE /buckets/:id/dirs/:fid,成功 204)。
-// 内部置为不可见并由后台任务清理对象,目录立即从列表消失。
+// 内部置为不可见并落删除任务,目录立即从列表消失;
+// 物理清理经全局协程池后台执行(背压:池满时提交阻塞,请求自然排队)。
 func (FileAPI) DeleteDir(c *gin.Context) {
 	bucketID := parseIDParam(c, "id")
 	if bucketID == 0 {
@@ -283,17 +288,25 @@ func (FileAPI) DeleteDir(c *gin.Context) {
 	}
 
 	// 条目存在性 + 桶权限 + 条目/祖先 ACL
-	ctx := c.Request.Context()
 	userID := currentUser(c)
-	if _, err := precheckFolderRead(ctx, userID, bucketID, dirID); err != nil {
+	if _, err := precheckFolderRead(c.Request.Context(), userID, bucketID, dirID); err != nil {
 		respondError(c, err)
 		return
 	}
 
-	if err := server.DeleteDir(ctx, server.DeleteDirArg{UserID: userID, BucketID: bucketID, DirID: dirID}); err != nil {
+	// 落删除任务(幂等,中断由启动/cron 续跑)
+	taskID, err := server.DeleteDir(c.Request.Context(), server.DeleteDirArg{UserID: userID, BucketID: bucketID, DirID: dirID})
+	if err != nil {
 		respondError(c, err)
 		return
 	}
+
+	// 经全局协程池提交物理清理:SubmitCtx 传入 gin 请求上下文——
+	// 客户端断开后不再提交/未开始的任务被跳过(任务留在任务表由 cron 续跑);
+	// 任务已开始执行则内部 context.WithoutCancel 继续,不随断开中断
+	core.Pool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+		return server.ProcessDeleteTask(context.Background(), server.ProcessDeleteTaskArg{TaskID: taskID})
+	}))
 
 	c.Status(204)
 }

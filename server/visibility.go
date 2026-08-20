@@ -1,11 +1,10 @@
 ﻿// visibility.go —— 条目级可见性(用户组 ACL)。
 //
 // File/Folder.VisibleToGroups 存"可见组 ID"的 JSON 数组(如 "[1,5]"):
-// 空串 = 不限制(按桶级权限可见);非空 = 仅创建者 / 管理员(权限 <= 1)/
+// 空串 = 不限制(按桶级权限可见);非空 = 仅管理员(IsAdmin)/
 // 可见组内成员可访问。组为纯白名单参考,无权限等级概念。
-//
-// 权限判定已迁至 api/perm.go;本文件保留可见性写路径可行性(条目/组存在)
-// 与列表过滤型查询谓词(listVisibilityPredicate / visibilitySQL,数据塑形)。
+// 权限判定核心为 ItemVisibleRule(api/server 共用);列表过滤用
+// listVisibilityPredicate / visibilitySQL(数据塑形,损坏数据保守隐藏)。
 package server
 
 import (
@@ -72,10 +71,7 @@ func checkItemAccessTree(ctx context.Context, user *model.User, groups *[]uint, 
 	if strings.TrimSpace(visibleToGroups) == "" {
 		return nil // 空 = 不限制
 	}
-	if uploadedBy == user.ID {
-		return nil
-	}
-	if user.PermissionLevel <= 1 {
+	if user.PermissionLevel.IsAdmin() {
 		return nil
 	}
 	if *groups == nil {
@@ -112,7 +108,7 @@ func ParseVisibleGroups(s string) ([]uint, error) {
 }
 
 // ItemVisibleRule 条目级可见性纯判定(单一实现,api/server 共用):
-// 空 visibleToGroups 不限制;非空时仅创建者 / 管理员(权限<=1)/ 可见组内成员可访问,
+// 空 visibleToGroups 不限制;非空时仅管理员(IsAdmin)/ 可见组内成员可访问,
 // 解析失败或空数组 → ErrForbidden(数据异常拒绝访问)。
 // user 与 userGroups 由调用方加载,本函数不查库。
 func ItemVisibleRule(userID uint, visibleToGroups string, uploadedBy uint, user *model.User, userGroups []uint) error {
@@ -126,13 +122,10 @@ func ItemVisibleRule(userID uint, visibleToGroups string, uploadedBy uint, user 
 	if len(groupIDs) == 0 {
 		return ErrForbidden
 	}
-	if uploadedBy == userID {
-		return nil
+	if user == nil {
+		return ErrForbidden // 调用方未加载用户(不应发生);拒绝而非 panic
 	}
-	if user == nil || user.PermissionLevel <= 1 {
-		if user == nil {
-			return ErrForbidden // 调用方未加载用户(不应发生);拒绝而非 panic
-		}
+	if user.PermissionLevel.IsAdmin() {
 		return nil // 管理员可见一切(含受限条目)
 	}
 	for _, gid := range userGroups {
@@ -172,7 +165,8 @@ func SetFolderVisibility(ctx context.Context, arg SetFolderVisibilityArg) error 
 	return setItemVisibility(ctx, arg.UserID, arg.BucketID, ItemKindFolder, arg.FolderID, arg.GroupIDs)
 }
 
-// setItemVisibility 通用可见组设置:校验条目与目标组存在后写入(权限预检在 api 层)。
+// setItemVisibility 通用可见组设置:校验条目、目标组存在且操作者有权设置后写入。
+// 权限规则:管理员可设任意组;非管理员只能把条目设为"自己所在组"(防自锁/越权设置)。
 func setItemVisibility(ctx context.Context, userID, bucketID uint, itemType string, itemID uint, groupIDs []uint) error {
 	// 查条目(存在 + 属于该桶)
 	switch itemType {
@@ -192,6 +186,29 @@ func setItemVisibility(ctx context.Context, userID, bucketID uint, itemType stri
 	ids, err := normalizeAndCheckGroups(ctx, groupIDs)
 	if err != nil {
 		return err
+	}
+
+	// 非管理员:只能设自己所在组(空 = 恢复不限制,始终允许)
+	if len(ids) > 0 {
+		operator, err := GetUser(ctx, GetUserArg{ID: userID})
+		if err != nil {
+			return err
+		}
+		if !operator.PermissionLevel.IsAdmin() {
+			myGroups, err := UserGroupIDs(ctx, UserGroupIDsArg{UserID: userID})
+			if err != nil {
+				return err
+			}
+			mine := map[uint]bool{}
+			for _, gid := range myGroups {
+				mine[gid] = true
+			}
+			for _, gid := range ids {
+				if !mine[gid] {
+					return ErrForbidden // 不能把条目设为非自己所在组可见
+				}
+			}
+		}
 	}
 
 	// 写 JSON(空列表 → 空串 = 不限制)
@@ -259,31 +276,37 @@ func listVisibilityPredicate(ctx context.Context, userID uint) (string, []any, e
 	return sql, args, nil
 }
 
-// visibilitySQL 构造条目级可见性过滤 SQL 片段:管理员或未受限或创建者或
-// 可见组内成员 → 通过;dialect 感知(SQLite json_each / PostgreSQL json_array_elements_text)。
+// visibilitySQL 构造条目级可见性过滤 SQL 片段:管理员不过滤,未受限或可见组内
+// 成员通过;dialect 感知(SQLite json_each / PostgreSQL json_array_elements_text)。
+// 数据防护:损坏(非合法 JSON)或空数组的 visible_to_groups 行保守隐藏
+// (仅管理员可见),与 ItemVisibleRule 的 ErrForbidden 语义一致,禁止 json_each 抛错。
 func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (string, []any) {
-	if user == nil || user.PermissionLevel <= 1 {
+	if user == nil {
+		return "1 = 0", nil // 未加载用户(不应发生):拒绝一切,与 ItemVisibleRule 的 ErrForbidden 一致
+	}
+	if user.PermissionLevel.IsAdmin() {
 		return "", nil // 管理员不过滤
 	}
-	// 拼接组匹配子句(IN 列表)
+	// 拼接组匹配子句(IN 列表;损坏/非数组 JSON 行在解析层被守卫拦截,不外抛):
+	//   - sqlite: json_valid + json_type = 'array' 守卫后 json_each
+	//   - postgres: 正则守卫(仅数字数组)后 cast 再展开
 	var groupClause string
 	if len(userGroupIDs) > 0 {
 		switch dialect {
 		case "sqlite":
 			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(userGroupIDs)), ",")
-			groupClause = fmt.Sprintf(" OR EXISTS (SELECT 1 FROM json_each(visible_to_groups) WHERE CAST(json_each.value AS INTEGER) IN (%s))", placeholders)
+			groupClause = fmt.Sprintf(" OR (json_valid(visible_to_groups) AND json_type(visible_to_groups) = 'array' AND EXISTS (SELECT 1 FROM json_each(visible_to_groups) WHERE CAST(json_each.value AS INTEGER) IN (%s)))", placeholders)
 		default: // postgres / postgresql
 			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(userGroupIDs)), ",")
-			groupClause = fmt.Sprintf(" OR EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s))", placeholders)
+			groupClause = fmt.Sprintf(" OR (visible_to_groups ~ '^\\s*\\[(\\s*[0-9]+\\s*(,\\s*[0-9]+\\s*)*)?\\]\\s*$' AND EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s)))", placeholders)
 		}
 	}
-	// 参数顺序:uploaded_by, 组 ID 列表...
-	args := make([]any, 0, 1+len(userGroupIDs))
-	args = append(args, user.ID)
+	// 参数顺序:组 ID 列表...
+	args := make([]any, 0, len(userGroupIDs))
 	for _, gid := range userGroupIDs {
 		args = append(args, gid)
 	}
-	sql := "(visible_to_groups = '' OR visible_to_groups IS NULL OR uploaded_by = ?" + groupClause + ")"
+	sql := "(visible_to_groups = '' OR visible_to_groups IS NULL" + groupClause + ")"
 	return sql, args
 }
 

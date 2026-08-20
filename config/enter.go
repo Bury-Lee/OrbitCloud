@@ -118,19 +118,53 @@ type Log struct {
 	RetentionDays int    `yaml:"retention_days" json:"retention_days"` // 日志保留天数,默认 30;cron 按此清理 logs 与 operation_logs 两表
 }
 
+// ExecPool 执行池配置(config.yaml 的 exec_pool 段)。
+// api 层通过 ExecPoolMiddleware 将 handler 提交至此池执行。
+type ExecPool struct {
+	MaxWorkers    int `yaml:"max_workers" json:"max_workers"`       // 最大工作协程数(默认 128)
+	QueueSize     int `yaml:"queue_size" json:"queue_size"`         // 任务队列容量(默认 512;超出后提交方阻塞)
+	StreamWorkers int `yaml:"stream_workers" json:"stream_workers"` // 流式接口工作协程数(默认 64)
+	StreamQueue   int `yaml:"stream_queue" json:"stream_queue"`     // 流式接口任务队列容量(默认 256)
+}
+
+// RequestPoolMode 请求准入池满时的行为。
+type RequestPoolMode string
+
+const (
+	RequestPoolModeBlock  RequestPoolMode = "block"  // 阻塞等待(自然背压)
+	RequestPoolModeReject RequestPoolMode = "reject" // 快速拒绝(503)
+)
+
+// RequestPool 请求准入池配置(config.yaml 的 request_pool 段)。
+// 目前由 StreamingPoolMiddleware 使用,控制流式请求并发上限。
+type RequestPool struct {
+	MaxConcurrent int             `yaml:"max_concurrent" json:"max_concurrent"` // 同时在途请求上限(默认 256)
+	QueueSize     int             `yaml:"queue_size" json:"queue_size"`         // 等待队列深度(默认 512;0=不排队)
+	StreamingMax  int             `yaml:"streaming_max" json:"streaming_max"`   // 流式请求上限(默认 64)
+	Mode          RequestPoolMode `yaml:"mode" json:"mode"`                     // block | reject(默认 block)
+}
+
+// Bucket 桶相关配置(config.yaml 的 bucket 段)。
+type Bucket struct {
+	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
+}
+
 // Config 总配置结构
 type Config struct {
-	App      App      `yaml:"app" json:"app"`
-	Server   Server   `yaml:"server" json:"server"`
-	Database Database `yaml:"database" json:"database"`
-	AccessJWT  AccessJWT  `yaml:"jwt" json:"jwt"`
-	RefreshJWT RefreshJWT `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
-	Log        Log        `yaml:"log" json:"log"`
-	Storage    Storage    `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
+	App         App         `yaml:"app" json:"app"`
+	Server      Server      `yaml:"server" json:"server"`
+	Database    Database    `yaml:"database" json:"database"`
+	AccessJWT   AccessJWT   `yaml:"jwt" json:"jwt"`
+	RefreshJWT  RefreshJWT  `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
+	Log         Log         `yaml:"log" json:"log"`
+	Storage     Storage     `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
+	Bucket      Bucket      `yaml:"bucket" json:"bucket"`   // 桶相关配置
 
-	Health Health `yaml:"health" json:"health"`
-	Pool   Pool   `yaml:"pool" json:"pool"`
-	Nodes  []Node `yaml:"nodes" json:"nodes"`
+	Health      Health      `yaml:"health" json:"health"`
+	Pool        Pool        `yaml:"pool" json:"pool"`
+	RequestPool RequestPool `yaml:"request_pool" json:"request_pool"`
+	ExecPool    ExecPool    `yaml:"exec_pool" json:"exec_pool"`
+	Nodes       []Node      `yaml:"nodes" json:"nodes"`
 }
 
 // Health 健康检查配置(config.yaml 的 health 段)。

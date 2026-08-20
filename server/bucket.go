@@ -21,14 +21,15 @@ import (
 
 // CreateBucketArg 创建桶入参(api 层从请求体 + 鉴权上下文组装)。
 type CreateBucketArg struct {
-	OwnerID         uint   // 创建者 users.id(鉴权中间件注入)
-	Name            string // 桶名(全局唯一)
-	Description     string // 描述(可空)
-	PermissionLevel int8   // 桶访问等级(<=0 = 跟随创建者等级)
+	OwnerID              uint                   // 创建者 users.id(鉴权中间件注入)
+	Name                 string                 // 桶名(全局唯一)
+	Description          string                 // 描述(可空)
+	PermissionLevel      model.PermissionLevel  // 桶访问等级(<=0 = 跟随创建者等级;负数非法)
+	ManagePermissionLevel model.PermissionLevel // 桶管理等级(<=0 = 跟随访问等级;负数非法)
 }
 
-// CreateBucket 创建桶:校验桶名(非空 + S3 规范)与创建者存在后写入。
-// 错误语义:name 非法 → ErrInvalidInput;创建者不存在 → ErrNotFound;重名 → ErrConflict。
+// CreateBucket 创建桶:校验桶名(非空 + S3 规范)、创建者存在与等级合法后写入。
+// 错误语义:name 非法或等级为负 → ErrInvalidInput;创建者不存在 → ErrNotFound;重名 → ErrConflict。
 func CreateBucket(ctx context.Context, arg CreateBucketArg) (*model.Bucket, error) {
 	// 入参归一
 	name := strings.TrimSpace(arg.Name)
@@ -37,6 +38,9 @@ func CreateBucket(ctx context.Context, arg CreateBucketArg) (*model.Bucket, erro
 	}
 	if err := utils.ValidateS3BucketName(name); err != nil {
 		return nil, err // 桶名须符合 S3 命名规范
+	}
+	if arg.PermissionLevel < 0 || arg.ManagePermissionLevel < 0 {
+		return nil, ErrInvalidInput // 负数直接报错,不允许跟随归一
 	}
 
 	// 校验创建者存在
@@ -49,18 +53,23 @@ func CreateBucket(ctx context.Context, arg CreateBucketArg) (*model.Bucket, erro
 		return nil, fmt.Errorf("create bucket: query owner: %w", err)
 	}
 	perm := arg.PermissionLevel
-	if perm <= 0 {
+	if perm <= model.SuperAdmin {
 		perm = creator.PermissionLevel // 缺省自动取创建者等级
+	}
+	managePerm := arg.ManagePermissionLevel
+	if managePerm <= model.SuperAdmin {
+		managePerm = perm // 缺省跟随访问等级
 	}
 
 	// 落库用 map Create:permission_level 的 gorm tag 带 default:1,
 	// struct Create 会把零值(0)替换为默认值,map 可保留显式 0
 	if err := core.DB.WithContext(ctx).Model(&model.Bucket{}).Create(map[string]any{
-		"name":             name,
-		"description":      arg.Description,
-		"permission_level": perm,
-		"owner_id":         arg.OwnerID,
-		"status":           1,
+		"name":                     name,
+		"description":              arg.Description,
+		"permission_level":         perm,
+		"manage_permission_level":  managePerm,
+		"owner_id":                 arg.OwnerID,
+		"status":                   1,
 	}).Error; err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrConflict
@@ -76,7 +85,7 @@ func CreateBucket(ctx context.Context, arg CreateBucketArg) (*model.Bucket, erro
 	// Storage.Put 已含"隐式建桶"语义,无需预建
 
 	// 操作日志
-	log.Infof("create bucket: user %d bucket %q (id %d) permission %d", arg.OwnerID, bucket.Name, bucket.ID, bucket.PermissionLevel)
+	log.Infof("create bucket: user %d bucket %q (id %d) permission %d manage %d", arg.OwnerID, bucket.Name, bucket.ID, bucket.PermissionLevel, bucket.ManagePermissionLevel)
 	return bucket, nil
 }
 
@@ -152,13 +161,14 @@ func ListBuckets(ctx context.Context, arg ListBucketsArg) ([]model.Bucket, error
 
 // UpdateBucketInput 桶可更新字段(指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
 type UpdateBucketInput struct {
-	Description     string // 描述
-	PermissionLevel *int8  // 访问所需最低权限
-	Quota           *int64 // 容量配额(字节;0=不限)
-	Status          *int   // 1 正常 / 0 禁用
+	Description           string                  // 描述
+	PermissionLevel       *model.PermissionLevel  // 访问所需最低权限
+	ManagePermissionLevel *model.PermissionLevel  // 管理所需最低权限(0 = 跟随访问等级)
+	Quota                 *int64                  // 容量配额(字节;0=不限)
+	Status                *int                    // 1 正常 / 0 禁用
 }
 
-// 桶管理权限判定已迁移至 api.permCanManageBucket(owner / 管理员 / 同级代管)。
+// 桶管理权限判定已迁移至 api.permCanManageBucket(owner / 管理员 / 管理等级满足)。
 
 // UpdateBucketArg 桶更新入参。
 type UpdateBucketArg struct {
@@ -168,7 +178,10 @@ type UpdateBucketArg struct {
 }
 
 // UpdateBucket 更新桶:无更新字段 → ErrInvalidInput;桶不存在 → ErrNotFound。
-// 管理权限由 api 层 permCanManageBucket 预检。
+// 管理权限由 api 层 permCanManageBucket 预检;等级变更规则:
+//   - 等级为负 → ErrInvalidInput;
+//   - 管理等级非零时不得松于访问等级(manage <= access,管理须比访问更严或同级);
+//   - 非管理员不得把等级改得比自身权限更高(不允许把自己/更高级锁外面),管理员豁免。
 func UpdateBucket(ctx context.Context, arg UpdateBucketArg) (*model.Bucket, error) {
 	operatorID, bucketID, in := arg.OperatorID, arg.BucketID, arg.In
 	// 查桶(存在性)
@@ -177,16 +190,49 @@ func UpdateBucket(ctx context.Context, arg UpdateBucketArg) (*model.Bucket, erro
 		return nil, err
 	}
 
+	// 加载操作者等级(非管理员等级变更校验用)
+	var operator model.User
+	if err := core.DB.WithContext(ctx).First(&operator, operatorID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("update bucket: load operator: %w", err)
+	}
+
 	// 构造增量更新 map(只放非零字段)
 	updates := map[string]any{}
 	if in.Description != "" {
 		updates["description"] = in.Description
 	}
 	if in.PermissionLevel != nil {
-		if *in.PermissionLevel < 0 {
+		perm := *in.PermissionLevel
+		if perm < 0 {
 			return nil, ErrInvalidInput
 		}
-		updates["permission_level"] = *in.PermissionLevel
+		if !operator.PermissionLevel.IsAdmin() && perm < operator.PermissionLevel {
+			return nil, ErrForbidden // 非管理员不得把访问等级提得比自身权限更高
+		}
+		updates["permission_level"] = perm
+	}
+	if in.ManagePermissionLevel != nil {
+		manage := *in.ManagePermissionLevel
+		if manage < 0 {
+			return nil, ErrInvalidInput
+		}
+		if manage > 0 {
+			// 管理要求不得松于访问要求(数值须 <= 访问等级)
+			access := bucket.PermissionLevel
+			if in.PermissionLevel != nil {
+				access = *in.PermissionLevel
+			}
+			if manage > access {
+				return nil, ErrInvalidInput
+			}
+			if !operator.PermissionLevel.IsAdmin() && manage < operator.PermissionLevel {
+				return nil, ErrForbidden // 非管理员不得把管理等级提得比自身权限更高
+			}
+		}
+		updates["manage_permission_level"] = manage // 0 = 跟随访问等级
 	}
 	if in.Quota != nil {
 		if *in.Quota < 0 {
