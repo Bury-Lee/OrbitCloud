@@ -1,10 +1,11 @@
-﻿package main
+package main
 
 // main 应用入口:加载配置 → 初始化(appinit 包)→ 启动 HTTP 服务,
 // 服务启动失败或收到退出信号时优雅停机。
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"orbitcloud/cron"
 	"orbitcloud/flag"
 	"orbitcloud/log"
+	smbgateway "orbitcloud/smb_server/go"
 	"orbitcloud/utils"
 )
 
@@ -61,7 +63,11 @@ func main() {
 	}
 	core.Storage = storage
 
-	core.Pool = appinit.InitPool(cfg)
+	// 初始化三个池(顺序无关):
+	core.Pool = appinit.InitPool(cfg)                     // 后台任务池(Delete/Copy 任务)
+	core.ExecPool = appinit.InitExecPool(cfg)             // 非流式 API 执行池
+	core.StreamExecPool = appinit.InitStreamExecPool(cfg) // 流式 API 执行池
+	core.StreamingPool = appinit.InitAdmissionPool(cfg)   // 流式准入池(AdmissionPool)
 	log.Infof("orbitcloud core initialized (version %s, env %s)", cfg.App.Version, cfg.App.Environment)
 
 	// 2. 执行命令行指令(flag.Run):需 DB 已就绪,故放在初始化之后;
@@ -73,6 +79,15 @@ func main() {
 		log.Fatalf("main: %v", err)
 	}
 
+	//调试模式下打印配置
+	if core.GlobalConfig.Server.Mode == "debug" {
+		configJSON, err := json.MarshalIndent(core.GlobalConfig, "", "  ")
+		if err != nil {
+			log.Debugf("配置序列化失败: %v", err)
+			return
+		}
+		log.Debugf("当前配置:\n%s", configJSON)
+	}
 	// 3. 组装 HTTP 服务并启动(协程,不阻塞主流程)
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port), // 默认 0.0.0.0:8080
@@ -91,6 +106,31 @@ func main() {
 			log.Errorf("main: http server error: %v", err)
 		}
 	}()
+
+	// 3.5 双服务之二:SMB 网关服务(设计点 8,与本文件第 3 步的 HTTP 服务并行,
+	// 同属 API 层,统一调用 server 层包级函数;接线见 smb_server/go/wire.go):
+	//   1) 请求池:core.NewAdmissionPool(cfg.SmbGateway.MaxConcurrent,
+	//      cfg.SmbGateway.ChannelBuffer, core.AdmissionModeReject)(设计点 6);
+	//   2) auth := smbgateway.NewAuthService(core.DB)
+	//      files := smbgateway.NewFileOpsService(core.Storage, registry)
+	//      gw := smbgateway.NewGateway(cfg.SmbGateway.ListenAddr, key, pool, auth, files);
+	//   3) go auth.WatchAndPush(ctx) —— 用户/NT hash/ACL 变更推送常驻;
+	//   4) go gw.Serve(ctx) —— 私有 Socket 服务,优雅停机随本函数第 5 步一并关闭。
+	//   密钥:cfg.SmbGateway.SharedKeyEnv 非空时经 smbgateway 读取并校验长度;
+	//   留空则握手后双方动态协商(接口后续实现)。
+	//   配置:config.yaml smb_gateway 分节(缺省内置默认,见 config.DefaultSmbGatewayConfig)。
+	smbGW, err := smbgateway.BuildGateway(cfg.SmbGateway)
+	if err != nil {
+		log.Fatalf("main: 初始化 SMB 网关失败:%v", err)
+	}
+	smbCtx, smbCancel := context.WithCancel(context.Background())
+	go func() {
+		if err := smbGW.Serve(smbCtx); err != nil {
+			log.Errorf("main: SMB 网关服务出错:%v", err)
+		}
+	}()
+	go smbGW.Auth().WatchAndPush(smbCtx)
+	log.Infof("orbitcloud SMB 网关组件已启动(监听 %s)", cfg.SmbGateway.ListenAddr)
 
 	// 4. 启动后台任务:删除/复制任务启动时续跑一次,并定时清理过期日志/令牌/分享
 	if err := cron.ResumeDeleteTasks(context.Background()); err != nil {
@@ -113,8 +153,20 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Errorf("main: http shutdown: %v", err)
 	}
+	// 关闭 SMB 网关组件
+	smbCancel()
+	if err := smbGW.Shutdown(shutdownCtx); err != nil {
+		log.Errorf("main: SMB 网关关闭出错:%v", err)
+	}
+	// 关闭各池
 	if core.Pool != nil {
 		core.Pool.Close()
+	}
+	if core.ExecPool != nil {
+		core.ExecPool.Close()
+	}
+	if core.StreamExecPool != nil {
+		core.StreamExecPool.Close()
 	}
 	if sqlDB, err := core.DB.DB(); err == nil {
 		_ = sqlDB.Close()

@@ -115,10 +115,14 @@ type DownloadSharedFileArg struct {
 	RelPath  string // 文件夹分享:分享根内文件相对路径(空 = ErrInvalidInput)
 }
 
-// DownloadSharedFile 分享下载/预览通道(公开访问):校验并自增下载次数后
-// 返回 (对象读取流, 文件元数据);调用方负责关闭流。
+// DownloadSharedFile 分享下载/预览通道(公开访问):校验后直接返回
+// (对象读取流, 文件元数据);调用方负责关闭流。
 // 错误语义:分享不存在/过期 → ErrNotFound;提取码错误 → ErrUnauthorized;
-// 次数超限 → ErrForbidden;relPath 非法 → ErrInvalidInput。
+// relPath 非法 → ErrInvalidInput。
+//
+// 注(2026-08-24 评审决策):下载次数功能一期停用——max_downloads 计数与
+// 拦截均不再生效(原按 HTTP 请求计数,Range 流式播放会秒级耗尽次数,
+// 语义错误);二期重新设计(按会话/文件维度)后再启用。
 func DownloadSharedFile(ctx context.Context, arg DownloadSharedFileArg) (io.ReadCloser, *model.File, error) {
 	token, password, relPath := arg.Token, arg.Password, arg.RelPath
 	// 分享校验 + 定位 + Isable(不计数)
@@ -126,19 +130,7 @@ func DownloadSharedFile(ctx context.Context, arg DownloadSharedFileArg) (io.Read
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// 下载次数校验与自增(条件更新,防超卖)
-	if share.MaxDownloads > 0 {
-		res := core.DB.Model(&model.ShareLink{}).
-			Where("id = ? AND download_count < max_downloads", share.ID).
-			Update("download_count", gorm.Expr("download_count + 1"))
-		if res.Error != nil {
-			return nil, nil, fmt.Errorf("download shared file: increment count: %w", res.Error)
-		}
-		if res.RowsAffected == 0 {
-			return nil, nil, ErrForbidden // 次数已达上限
-		}
-	}
+	_ = share // 次数功能停用,分享句柄保留以备二期计数
 
 	// 取桶(桶已删 → 文件不可达)
 	bucket, err := GetBucket(ctx, GetBucketArg{ID: file.BucketID})
@@ -190,6 +182,7 @@ type DownloadSharedFileRangeArg struct {
 // start/end 为闭区间两端,由 api 层经 utils.ParseRange 归一,本函数兜底复检:
 // 起点越界 → ErrRangeNotSatisfiable(416,不计数),区间非法 → ErrInvalidInput。
 // 错误语义:同 DownloadSharedFile,另加 ErrRangeNotSatisfiable。
+// 注:下载次数功能一期停用(见 DownloadSharedFile 注释)。
 func DownloadSharedFileRange(ctx context.Context, arg DownloadSharedFileRangeArg) (io.ReadCloser, *model.File, error) {
 	token, password, relPath, start, end := arg.Token, arg.Password, arg.RelPath, arg.Start, arg.End
 	// 分享校验 + 定位 + Isable(不计数)
@@ -197,6 +190,7 @@ func DownloadSharedFileRange(ctx context.Context, arg DownloadSharedFileRangeArg
 	if err != nil {
 		return nil, nil, err
 	}
+	_ = share // 次数功能停用,分享句柄保留以备二期计数
 
 	// 兜底复检区间(start 越界必须最先判定,否则 416 分支永不触发)
 	if start >= file.FileSize {
@@ -204,19 +198,6 @@ func DownloadSharedFileRange(ctx context.Context, arg DownloadSharedFileRangeArg
 	}
 	if start < 0 || end < start || end >= file.FileSize {
 		return nil, nil, ErrInvalidInput
-	}
-
-	// 下载次数校验与自增(条件更新,防超卖)
-	if share.MaxDownloads > 0 {
-		res := core.DB.Model(&model.ShareLink{}).
-			Where("id = ? AND download_count < max_downloads", share.ID).
-			Update("download_count", gorm.Expr("download_count + 1"))
-		if res.Error != nil {
-			return nil, nil, fmt.Errorf("download shared file range: increment count: %w", res.Error)
-		}
-		if res.RowsAffected == 0 {
-			return nil, nil, ErrForbidden // 次数已达上限
-		}
 	}
 
 	// 取桶(桶已删 → 文件不可达)
@@ -345,7 +326,7 @@ func ListSharedDir(ctx context.Context, arg ListSharedDirArg) (files []model.Fil
 	unionSQL := `SELECT id, created_at, kind FROM (
 		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ?
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ?
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows := []unionRow{}
 	if err := core.DB.WithContext(ctx).Raw(unionSQL,
@@ -360,7 +341,7 @@ func ListSharedDir(ctx context.Context, arg ListSharedDirArg) (files []model.Fil
 		return nil, nil, 0, err
 	}
 	if err := core.DB.WithContext(ctx).Model(&model.Folder{}).
-		Where("bucket_id = ? AND parent_id = ?", root.BucketID, targetFolderID).Count(&n2).Error; err != nil {
+		Where("bucket_id = ? AND parent_id = ? AND isable = true", root.BucketID, targetFolderID).Count(&n2).Error; err != nil {
 		return nil, nil, 0, err
 	}
 	total = n1 + n2

@@ -24,7 +24,7 @@ func TestUploadFilesFolderIDRestricted(t *testing.T) {
 	b := mkBucketP0(t, "b1", 9, admin.ID)
 	g := mkGroupP0(t, "g1")
 
-	// 受限目录(仅组 g1 可见),创建者为 admin(非 doctor,排除创建者豁免)
+	// 受限目录(仅组 g1 可见),非组内 doctor 应被拒绝
 	restricted := mkFolderP0(t, b.ID, 0, admin.ID, "restricted")
 	setVisible(t, restricted.ID, fmt.Sprintf("[%d]", g.ID))
 

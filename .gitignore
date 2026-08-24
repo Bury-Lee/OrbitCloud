@@ -1,4 +1,4 @@
-# 编译产物
+﻿# 编译产物
 orbitcloud.exe
 orbitcloud-linux
 orbitcloud
@@ -18,3 +18,10 @@ vendor/
 # 前端
 frontend/node_modules/
 frontend/dist/
+reports/
+TODO.md
+smb_server/rust/target/
+tool/
+other_software/
+# VSCode ����ͳ�Ʋ������
+.VSCodeCounter/

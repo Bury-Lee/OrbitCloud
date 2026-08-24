@@ -1,5 +1,5 @@
 ﻿// user_api.go 用户模块接口:当前用户 / 修改 / 列表 / 修改他人 / 删除。
-// 管理员判定:PermissionLevel <= 1(0=超级管理员,1=管理员)。
+// 管理员判定:PermissionLevel.IsAdmin()(0=超级管理员,1=管理员)。
 package api
 
 import (
@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/common"
+	"orbitcloud/model"
 	"orbitcloud/server"
 )
 
@@ -49,14 +50,8 @@ func (UserAPI) UpdateMe(c *gin.Context) {
 }
 
 // ListUsers 管理员分页列出用户(GET /users?page=&page_size=);非管理员 403。
+// 管理员判定由路由挂载的 AdminMiddleware 统一完成。
 func (UserAPI) ListUsers(c *gin.Context) {
-	// 管理员校验:权限 <= 1
-	claims := ClaimsFrom(c)
-	if claims == nil || claims.PermissionLevel > 1 {
-		respondError(c, server.ErrForbidden)
-		return
-	}
-
 	// 分页参数(默认 1 / 50,非法值回退默认)
 	page := queryInt(c, "page", 1)
 	pageSize := queryInt(c, "page_size", 50)
@@ -72,7 +67,7 @@ func (UserAPI) ListUsers(c *gin.Context) {
 
 // UpdateUser 管理员修改指定用户(PUT /users/:id)。
 // 请求体:{"password"?,"name"?,"email"?,"permission_level"?,"status"?}(指针字段才更新);
-// 不能操作同级或更高级用户。
+// 不能操作同级或更高级用户。管理员判定由路由挂载的 AdminMiddleware 统一完成。
 func (UserAPI) UpdateUser(c *gin.Context) {
 	// 解析路径参数 :id
 	targetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -82,13 +77,8 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	operatorID := currentUser(c)
-
-	// 管理员校验:权限 <= 1
+	// 操作者等级(严格高于目标校验用;管理员身份已由 AdminMiddleware 保证)
 	claims := ClaimsFrom(c)
-	if claims == nil || claims.PermissionLevel > 1 {
-		respondError(c, server.ErrForbidden)
-		return
-	}
 
 	// 目标存在,且操作者权限须严格高于目标
 	target, err := server.GetUser(ctx, server.GetUserArg{ID: uint(targetID)})
@@ -103,11 +93,11 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 
 	// 解析请求体(本地 DTO 带 json tag,避免 server 层结构体直接绑定)
 	var req struct {
-		Password        string `json:"password"`
-		Name            string `json:"name"`
-		Email           string `json:"email"`
-		PermissionLevel *int8  `json:"permission_level"`
-		Status          *int   `json:"status"`
+		Password        string                 `json:"password"`
+		Name            string                 `json:"name"`
+		Email           string                 `json:"email"`
+		PermissionLevel *model.PermissionLevel `json:"permission_level"`
+		Status          *int                   `json:"status"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
@@ -133,15 +123,8 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 }
 
 // DeleteUser 管理员删除指定用户(DELETE /users/:id,软删,成功 204);
-// 不能删除同级或更高级用户。
+// 不能删除同级或更高级用户。管理员判定由路由挂载的 AdminMiddleware 统一完成。
 func (UserAPI) DeleteUser(c *gin.Context) {
-	// 管理员校验:权限 <= 1
-	claims := ClaimsFrom(c)
-	if claims == nil || claims.PermissionLevel > 1 {
-		respondError(c, server.ErrForbidden)
-		return
-	}
-
 	// 解析路径参数 :id
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
@@ -150,6 +133,8 @@ func (UserAPI) DeleteUser(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	operatorID := currentUser(c)
+	// 操作者等级(严格高于目标校验用;管理员身份已由 AdminMiddleware 保证)
+	claims := ClaimsFrom(c)
 
 	// 目标存在,且操作者权限须严格高于目标
 	target, err := server.GetUser(ctx, server.GetUserArg{ID: uint(id)})

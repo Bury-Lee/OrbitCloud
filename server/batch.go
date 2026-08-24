@@ -21,11 +21,12 @@ const batchMaxItems = 100
 
 // BatchResultItem 单条目操作结果(成功/失败统一结构)。
 type BatchResultItem struct {
-	Kind  string // file | folder(源条目类型)
-	ID    uint   // 源条目 ID(失败定位用)
-	Name  string // 条目名(展示用)
-	Data  any    // 成功时的业务对象:复制/上传 → 新 file/folder 记录;删除/下载 → nil
-	Error string // 空 = 成功;非空 = 该条失败原因(HTTP 层逐项提示)
+	Kind   string // file | folder(源条目类型)
+	ID     uint   // 源条目 ID(失败定位用)
+	Name   string // 条目名(展示用)
+	Data   any    // 成功时的业务对象:复制/上传 → 新 file/folder 记录;删除/下载 → nil
+	Error  string // 空 = 成功;非空 = 该条失败原因(HTTP 层逐项提示)
+	TaskID uint   // 落后台任务表时返回的任务 ID(api 层经协程池提交执行;0 = 无需提交)
 }
 
 // CheckBatchItemsArg 批量入参校验入参。
@@ -197,11 +198,12 @@ func DeleteItems(ctx context.Context, arg DeleteItemsArg) []BatchResultItem {
 			}
 			results = append(results, BatchResultItem{Kind: ItemKindFile, ID: it.ID})
 		case ItemKindFolder:
-			if err := DeleteDir(ctx, DeleteDirArg{UserID: arg.UserID, BucketID: arg.BucketID, DirID: it.ID}); err != nil {
+			taskID, err := DeleteDir(ctx, DeleteDirArg{UserID: arg.UserID, BucketID: arg.BucketID, DirID: it.ID})
+			if err != nil {
 				results = append(results, BatchResultItem{Kind: ItemKindFolder, ID: it.ID, Error: err.Error()})
 				continue
 			}
-			results = append(results, BatchResultItem{Kind: ItemKindFolder, ID: it.ID})
+			results = append(results, BatchResultItem{Kind: ItemKindFolder, ID: it.ID, TaskID: taskID})
 		default:
 			results = append(results, BatchResultItem{Kind: it.Kind, ID: it.ID, Error: "invalid kind: " + it.Kind})
 		}

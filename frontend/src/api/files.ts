@@ -95,13 +95,26 @@ export function getFolderMeta(bucketId: number, dirId: number): Promise<FolderIt
 /**
  * POST /buckets/:id/files?path= 单文件上传(multipart 字段 file)
  * @param dirPath 目标目录,缺省桶根 "/"
+ * @param onProgress 字节级上传进度回调(0~100);timeout: 0 覆盖全局 30s 超时
+ * (大文件传输/后端处理可能超过 30s,全局 timeout 会主动掐断请求导致 400 空响应)
  */
-export function uploadFile(bucketId: number, file: File, dirPath = '/'): Promise<FileItem> {
+export function uploadFile(
+  bucketId: number,
+  file: File,
+  dirPath = '/',
+  onProgress?: (percent: number) => void,
+): Promise<FileItem> {
   const fd = new FormData()
   fd.append('file', file)
   return http.post(`/buckets/${bucketId}/files`, fd, {
     params: { path: dirPath },
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    },
   })
 }
 
@@ -124,6 +137,7 @@ export function uploadFiles(
   return http.post(`/buckets/${bucketId}/files/batch`, fd, {
     params,
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
     onUploadProgress: (e) => {
       if (onProgress && e.total) {
         onProgress(Math.round((e.loaded / e.total) * 100))

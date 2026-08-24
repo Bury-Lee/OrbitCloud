@@ -65,10 +65,12 @@ async function onCreate() {
 
 // ---- 编辑桶 ----
 const editing = ref(false)
-const editForm = reactive({ id: 0, description: '', quota: 0, status: 1, permissionLevel: 3 })
+const editForm = reactive({ id: 0, description: '', quota: 0, status: 1, permissionLevel: 3, managePermissionLevel: 0 })
 
-/** 可选权限等级(0~3;低于该等级的用户不可访问本桶) */
+/** 可选访问等级(0~3;低于该等级的用户不可访问本桶) */
 const levelOptions = [0, 1, 2, 3]
+/** 可选管理等级(0 = 跟随访问等级,单独列项;管理要求不得松于访问要求) */
+const manageOptions = [1, 2, 3]
 
 function openEdit(row: Bucket) {
   editForm.id = row.ID
@@ -76,10 +78,36 @@ function openEdit(row: Bucket) {
   editForm.quota = row.Quota
   editForm.status = row.Status
   editForm.permissionLevel = row.PermissionLevel
+  editForm.managePermissionLevel = row.ManagePermissionLevel ?? 0
   dialog.open('edit-bucket')
 }
 
+/** 访问等级设为 0(仅超管可访问)属高危操作,连续三次确认告知后果 */
+async function confirmLockoutLevel(): Promise<boolean> {
+  const warnings = [
+    '警告(1/3):把访问等级设为「超级管理员」后,只有超级管理员能访问此桶,连桶拥有者和管理员都会被锁在外面。',
+    '警告(2/3):此操作之后,非超级管理员将无法修改回原等级,恢复需要超级管理员介入。',
+    '最终确认(3/3):确定要把本桶访问等级设为 0(仅超级管理员可访问)吗?',
+  ]
+  for (const msg of warnings) {
+    try {
+      await ElMessageBox.confirm(msg, '高危操作确认', {
+        type: 'error',
+        confirmButtonText: '继续',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
 async function onEdit() {
+  if (editForm.permissionLevel === 0) {
+    const ok = await confirmLockoutLevel()
+    if (!ok) return
+  }
   editing.value = true
   try {
     await updateBucket(editForm.id, {
@@ -87,6 +115,7 @@ async function onEdit() {
       quota: editForm.quota,
       status: editForm.status,
       permission_level: editForm.permissionLevel,
+      manage_permission_level: editForm.managePermissionLevel,
     })
     ElMessage.success('已保存')
     dialog.close()
@@ -156,6 +185,13 @@ onMounted(load)
           <el-tag size="small" effect="plain">{{ permissionLabel(row.PermissionLevel) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="管理等级" width="140">
+        <template #default="{ row }">
+          <el-tag size="small" effect="plain" type="warning">
+            {{ (row.ManagePermissionLevel ?? 0) === 0 ? '跟随访问等级' : permissionLabel(row.ManagePermissionLevel) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="容量" width="150">
         <template #default="{ row }">
           {{ formatSize(row.UsedSpace) }} / {{ row.Quota > 0 ? formatSize(row.Quota) : '不限' }}
@@ -205,11 +241,18 @@ onMounted(load)
         <el-form-item label="描述">
           <el-input v-model="editForm.description" maxlength="255" />
         </el-form-item>
-        <el-form-item label="权限等级">
+        <el-form-item label="访问等级">
           <el-select v-model="editForm.permissionLevel" style="width: 100%">
             <el-option v-for="lv in levelOptions" :key="lv" :value="lv" :label="permissionLabel(lv)" />
           </el-select>
-          <div class="form-tip">低于该等级的用户不可访问本桶</div>
+          <div class="form-tip">低于该等级的用户不可访问本桶;设为「超级管理员」将锁死所有非超管用户(高危)</div>
+        </el-form-item>
+        <el-form-item label="管理等级">
+          <el-select v-model="editForm.managePermissionLevel" style="width: 100%">
+            <el-option :value="0" label="跟随访问等级" />
+            <el-option v-for="lv in manageOptions" :key="lv" :value="lv" :label="permissionLabel(lv)" />
+          </el-select>
+          <div class="form-tip">管理该桶所需的最低等级;管理要求不得松于访问要求</div>
         </el-form-item>
         <el-form-item label="配额">
           <el-input-number v-model="editForm.quota" :min="0" :step="1073741824" style="width: 100%" />

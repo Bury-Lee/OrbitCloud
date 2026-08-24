@@ -36,7 +36,7 @@ func TestLevelColorDistinct(t *testing.T) {
 
 func TestOutputNoColorForBuffer(t *testing.T) {
 	var buf bytes.Buffer
-	if err := output(&buf, ERROR, "", time.Now(), "boom"); err != nil {
+	if err := output(&buf, ERROR, nil, "", time.Now(), "boom"); err != nil {
 		t.Fatalf("output: %v", err)
 	}
 	if got := buf.String(); strings.Contains(got, "\x1b[") {
@@ -53,7 +53,7 @@ func TestOutputNoColorForFile(t *testing.T) {
 	}
 	defer f.Close()
 
-	if err := output(f, WARN, "", time.Now(), "slow query"); err != nil {
+	if err := output(f, WARN, nil, "", time.Now(), "slow query"); err != nil {
 		t.Fatalf("output: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -105,9 +105,9 @@ func TestDebugFileOutputIncludesCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	// 文件输出 + Debug 模式:应附带调用方文件路径与行号(enter_test.go)
-	if !strings.Contains(got, "enter_test.go:") {
-		t.Fatalf("debug file output should include caller file:line, got %q", got)
+	// debug 模式:应附带调用方代码位置标签(enter_test.go)
+	if !strings.Contains(got, "[enter_test.go:") {
+		t.Fatalf("debug output should include caller [file:line] tag, got %q", got)
 	}
 	if !strings.Contains(got, "debug hello") {
 		t.Fatalf("content missing, got %q", got)
@@ -118,7 +118,7 @@ func TestNonDebugFileOutputSkipsCaller(t *testing.T) {
 	defer func(l Level) { MinLogLevel = l }(MinLogLevel)
 	defer func(l *log.Logger) { Logger = l }(Logger)
 
-	MinLogLevel = INFO // 非 Debug 模式:文件输出不带调用方位置
+	MinLogLevel = INFO // 非 Debug 模式:INFO 输出不带调用方位置
 	path := filepath.Join(t.TempDir(), "test.log")
 	f, err := os.Create(path)
 	if err != nil {
@@ -135,20 +135,162 @@ func TestNonDebugFileOutputSkipsCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := string(data); strings.Contains(got, "enter_test.go:") {
-		t.Fatalf("non-debug file output must not include caller, got %q", got)
+		t.Fatalf("non-debug INFO output must not include caller, got %q", got)
 	}
 }
 
-func TestDebugBufferOutputSkipsCaller(t *testing.T) {
+func TestDebugBufferOutputIncludesCaller(t *testing.T) {
 	defer func(l Level) { MinLogLevel = l }(MinLogLevel)
+	defer func(l *log.Logger) { Logger = l }(Logger)
 
 	MinLogLevel = DEBUG
 	var buf bytes.Buffer
-	// 内存 writer 不是文件输出:即使 Debug 模式也不附带调用方
-	if err := output(&buf, DEBUG, "", time.Now(), "mem"); err != nil {
-		t.Fatalf("output: %v", err)
+	Init(&buf, DEBUG)
+	// debug 模式:内存 writer 同样附带代码位置标签(与输出目标无关)
+	if err := Debugf("mem"); err != nil {
+		t.Fatalf("Debugf: %v", err)
 	}
-	if got := buf.String(); strings.Contains(got, ".go:") {
-		t.Fatalf("buffer output must not include caller, got %q", got)
+	got := buf.String()
+	if !strings.Contains(got, "[enter_test.go:") {
+		t.Fatalf("debug output should include caller [file:line] tag, got %q", got)
+	}
+	if !strings.Contains(got, "mem") {
+		t.Fatalf("content missing, got %q", got)
+	}
+}
+
+func TestErrorOutputAlwaysIncludesCaller(t *testing.T) {
+	defer func(l Level) { MinLogLevel = l }(MinLogLevel)
+	defer func(l *log.Logger) { Logger = l }(Logger)
+
+	MinLogLevel = INFO // 非 debug 模式
+	var buf bytes.Buffer
+	Init(&buf, INFO)
+
+	if err := Errorf("boom %d", 42); err != nil {
+		t.Fatalf("Errorf: %v", err)
+	}
+	got := buf.String()
+	// 错误级别:与级别配置无关恒附带代码位置标签
+	if !strings.Contains(got, "[enter_test.go:") {
+		t.Fatalf("error output should include caller [file:line] tag, got %q", got)
+	}
+	if !strings.Contains(got, "boom 42") {
+		t.Fatalf("content missing, got %q", got)
+	}
+}
+
+func TestFormatTags(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"gorm"}, "[gorm] "},
+		{[]string{"gorm", "sql"}, "[gorm] [sql] "},
+		{[]string{"a", "", "b", "  "}, "[a] [b] "},
+	}
+	for _, c := range cases {
+		if got := formatTags(c.in); got != c.want {
+			t.Errorf("formatTags(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestShortPath(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"orbitcloud/api/auth_api.go", "api/auth_api.go"},     // module 前缀剥离(配合 -trimpath)
+		{"orbitcloud\\api\\auth_api.go", "api/auth_api.go"},   // 反斜杠归一化
+		{"C:\\src\\orbitcloud\\main.go", "main.go"},           // 无法相对化(跨盘)→ base 兜底
+		{"/opt/orbitcloud/core/storage.go", "storage.go"},     // 无法相对化(异盘根)→ base 兜底
+	}
+	for _, c := range cases {
+		if got := shortPath(c.in); got != c.want {
+			t.Errorf("shortPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestPrefixedLevelFuncs 验证带前缀的 P 变体:输出含 [tag] 标记、内容完整、级别过滤生效。
+func TestPrefixedLevelFuncs(t *testing.T) {
+	defer func(l Level) { MinLogLevel = l }(MinLogLevel)
+	defer func(l *log.Logger) { Logger = l }(Logger)
+	MinLogLevel = DEBUG
+
+	var buf bytes.Buffer
+	Init(&buf, DEBUG)
+
+	if err := DebugfP("debug %d", []string{"dbg", "query"}, 1); err != nil {
+		t.Fatalf("DebugfP: %v", err)
+	}
+	if err := InfofP("info %s", []string{"gorm"}, "x"); err != nil {
+		t.Fatalf("InfofP: %v", err)
+	}
+	if err := WarnfP("warn %s", []string{"gorm", "slow"}, "y"); err != nil {
+		t.Fatalf("WarnfP: %v", err)
+	}
+	if err := ErrorfP("error %d", []string{"file"}, 7); err != nil {
+		t.Fatalf("ErrorfP: %v", err)
+	}
+	got := buf.String()
+	// debug 模式输出含代码位置标签,业务 [tag] 标记紧随级别标签之后
+	for _, want := range []string{
+		"[DEBUG] ",
+		"[dbg] [query] ",
+		"debug 1",
+		"[INFO] ",
+		"[gorm] ",
+		"info x",
+		"[WARN] ",
+		"[gorm] [slow] ",
+		"warn y",
+		"[ERROR] ",
+		"[file] ",
+		"error 7",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, got)
+		}
+	}
+	// 每条日志均应带代码位置来源标签
+	if strings.Count(got, "[enter_test.go:") != 4 {
+		t.Fatalf("expected 4 caller tags, got:\n%s", got)
+	}
+
+	// 级别过滤:WARN 级别下 DebugfP/InfofP 不输出
+	buf.Reset()
+	Init(&buf, WARN)
+	if err := InfofP("should skip", []string{"gorm"}); err != nil {
+		t.Fatalf("InfofP: %v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("info must be filtered at WARN level, got %q", got)
+	}
+}
+
+// TestSinkReceivesTags 验证接收器(sink)收到的内容包含 [tag] 标记(入库不丢标记)。
+func TestSinkReceivesTags(t *testing.T) {
+	defer func(l Level) { MinLogLevel = l }(MinLogLevel)
+	defer func(l *log.Logger) { Logger = l }(Logger)
+	defer SetLogSink(nil)
+
+	var buf bytes.Buffer
+	Init(&buf, DEBUG)
+	MinLogLevel = DEBUG
+
+	var got []string
+	SetLogSink(func(lvl Level, msg string) { got = append(got, msg) })
+
+	if err := InfofP("hello %s", []string{"gorm"}, "world"); err != nil {
+		t.Fatalf("InfofP: %v", err)
+	}
+	// debug 模式:sink 收到的内容应包含 [tag] 标记与代码位置来源(入库不丢上下文)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "[gorm] ") ||
+		!strings.Contains(got[0], "[enter_test.go:") || !strings.HasSuffix(got[0], "hello world") {
+		t.Fatalf("sink msg = %v, want [gorm]-tagged msg with caller tag and content", got)
 	}
 }

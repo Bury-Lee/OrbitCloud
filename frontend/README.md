@@ -86,7 +86,7 @@ frontend/
   `http.ts` 请求拦截器自动加 `Authorization: Bearer <token>`;
 - 刷新令牌轮换:响应 401 时先 `POST /auth/refresh` 换新令牌对再重放原请求
   (并发 401 共享同一刷新 Promise,避免重复刷新);刷新失败 → 清凭证跳登录页;
-- 登录时保存 `user`(含 `PermissionLevel`),用于判断管理员身份(权限 <= 1);
+- 登录时保存 `user`(含 `PermissionLevel`),用于判断管理员身份(`permission_level <= 1`);
 - 路由守卫:未登录访问受保护页 → `/login?redirect=...`;非管理员访问 `/admin/*`
   → `/403`。
 

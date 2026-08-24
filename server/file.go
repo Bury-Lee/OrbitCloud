@@ -118,12 +118,31 @@ func nameExists(ctx context.Context, bucketID, folderID uint, name string) (bool
 	return n1 > 0 || n2 > 0, nil
 }
 
+// findFolderByParent 按 (bucket, parent, name) 查启用子文件夹(Isable=true);
+// 未找到 → ErrNotFound。供复制任务续跑"目标子目录已存在则复用"判定。
+func findFolderByParent(ctx context.Context, bucketID, parentID uint, name string) (uint, error) {
+	var f model.Folder
+	err := core.DB.WithContext(ctx).
+		Where("bucket_id = ? AND parent_id = ? AND name_lower = ? AND isable = true",
+			bucketID, parentID, strings.ToLower(name)).First(&f).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find folder by parent: %w", err)
+	}
+	return f.ID, nil
+}
+
 // uniqueName 自动重命名:重名时生成 name (1)、name (2)… 返回第一个不冲突的名字,
 // 上限 1000 次保护。
 func uniqueName(ctx context.Context, bucketID, folderID uint, name string) (string, error) {
 	exists, err := nameExists(ctx, bucketID, folderID, name)
 	if err != nil {
 		return "", err
+	}
+	if !exists {
+		return name, nil
 	}
 	if !exists {
 		return name, nil

@@ -3,14 +3,18 @@
 // 目标:用户拖入/选择 文件夹+文件 混合内容时,在网盘内自动复刻原目录结构:
 //   文件夹 → 按相对路径在目标目录下 mkdir -p 自动创建(后端上传接口 DirPath 自带
 //             mkdir -p 建父链,已存在幂等,无需显式 createDir)
-//   文件   → 上传到其所属目录(按目录分组调批量上传,每组一次请求)
+//   文件   → 上传到其所属目录(逐文件独立请求,后端单文件接口即 mkdir -p)
 //
 // 目录树解析(浏览器能力分级):
 //   - Chromium 系(Chrome/Edge):DataTransferItem.webkitGetAsEntry() 递归读取,
 //     文件携带完整相对路径(支持拖拽文件夹);
 //   - 选择文件夹按钮:<input webkitdirectory> 选中的 File.webkitRelativePath 携带相对路径;
 //   - 回退(无 entry API):文件平铺上传到当前目录(保持旧行为)。
-import { uploadFiles } from '@/api/files'
+//
+// 上传策略:逐文件顺序独立上传(单文件失败只影响该文件,不中断整批)。
+// 进度:字节级回调 (uploadedBytes, totalBytes)——总字节 = Σ文件大小,
+// 当前文件用 axios onUploadProgress(loaded/total) 累加,进度条平滑前进。
+import { uploadFile } from '@/api/files'
 
 export interface UploadTreeItem {
   /** 相对路径(如 "dir/sub/f.txt";根级文件无 "/" 前缀) */
@@ -109,48 +113,41 @@ function normalizeDirSegments(relPath: string): { dir: string; name: string } {
 }
 
 /**
- * 结构化上传主入口:按目录分组调批量上传(后端 DirPath 自动 mkdir -p 建父链)。
+ * 结构化上传主入口:逐文件独立上传(后端 DirPath 自动 mkdir -p 建父链)。
  * @param bucketId 目标桶
  * @param items 解析后的文件树(相对路径)
  * @param rootDir 网盘目标目录(绝对路径,以 / 开头或空串=桶根)
- * @param onProgress 完成文件数/总数
+ * @param onProgress 字节级进度回调(uploadedBytes, totalBytes)
  */
 export async function uploadStructured(
   bucketId: number,
   items: UploadTreeItem[],
   rootDir = '/',
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
 ): Promise<StructuredUploadResult> {
   const root = rootDir === '/' ? '' : rootDir.replace(/\/+$/, '')
-  // 分组:目录路径 → 文件数组(同目录一批,复用批量上传)
-  const groups = new Map<string, UploadTreeItem[]>()
-  for (const it of items) {
-    const { dir, name } = normalizeDirSegments(it.relPath)
-    const dirPath = dir ? `${root}/${dir}` : (root || '/')
-    const list = groups.get(dirPath) ?? []
-    // 同名文件保留原名,后端重名自动加 (N) 后缀
-    list.push({ relPath: it.relPath, file: new File([it.file], name, { type: it.file.type }) })
-    groups.set(dirPath, list)
-  }
+  const totalBytes = items.reduce((sum, it) => sum + it.file.size, 0)
 
   const total = items.length
   let ok = 0
+  let uploadedBytes = 0
   const failed: { relPath: string; error: string }[] = []
-  onProgress?.(0, total)
-  // 逐目录顺序上传(避免并发打爆连接数;每目录一次批量请求)
-  for (const [dirPath, group] of groups) {
+  onProgress?.(0, totalBytes)
+  // 逐文件顺序上传:单文件失败只记录、继续下一个;目录结构由后端 mkdir -p 自动复刻
+  for (const it of items) {
+    const { dir, name } = normalizeDirSegments(it.relPath)
+    const dirPath = dir ? `${root}/${dir}` : (root || '/')
+    const file = new File([it.file], name, { type: it.file.type })
     try {
-      const res = await uploadFiles(bucketId, group.map((g) => g.file), dirPath, undefined)
-      ok += res.success.length
-      for (const f of res.failed) {
-        failed.push({ relPath: f.name ?? '(未知)', error: f.error ?? '上传失败' })
-      }
+      await uploadFile(bucketId, file, dirPath, (percent) => {
+        onProgress?.(uploadedBytes + Math.round((percent / 100) * file.size), totalBytes)
+      })
+      ok++
     } catch (e) {
-      for (const g of group) {
-        failed.push({ relPath: g.relPath, error: e instanceof Error ? e.message : '上传失败' })
-      }
+      failed.push({ relPath: it.relPath, error: e instanceof Error ? e.message : '上传失败' })
     }
-    onProgress?.(ok + failed.length, total)
+    uploadedBytes += file.size
+    onProgress?.(uploadedBytes, totalBytes)
   }
   return { total, ok, failed }
 }

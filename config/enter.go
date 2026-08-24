@@ -50,6 +50,11 @@ type Server struct {
 	IdleTimeout    int    `yaml:"idle_timeout" json:"idle_timeout"`         // 空闲超时时间(分钟;0=不限)
 	MaxHeaderBytes int    `yaml:"max_header_bytes" json:"max_header_bytes"` // 最大请求头大小(字节)
 	Mode           string `yaml:"mode" json:"mode"`                         // 运行模式: debug, release, test
+	// PprofEnabled 是否启用 pprof 管理接口(管理员路由 /api/v1/admin/pprof/,
+	// 按需采样:CPU 火焰图主动触发,内存快照随时可取;默认 false)
+	PprofEnabled bool `yaml:"pprof_enabled" json:"pprof_enabled"`
+	// PprofDir pprof 采样文件(火焰图等)保存目录;空 = 日志目录下 pprof/(作为日志文件管理)
+	PprofDir string `yaml:"pprof_dir" json:"pprof_dir"`
 }
 
 type StorageProvider string
@@ -118,19 +123,83 @@ type Log struct {
 	RetentionDays int    `yaml:"retention_days" json:"retention_days"` // 日志保留天数,默认 30;cron 按此清理 logs 与 operation_logs 两表
 }
 
+// ExecPool 执行池配置(config.yaml 的 exec_pool 段)。
+// api 层通过 ExecPoolMiddleware 将 handler 提交至此池执行。
+type ExecPool struct {
+	MaxWorkers    int `yaml:"max_workers" json:"max_workers"`       // 最大工作协程数(默认 128)
+	QueueSize     int `yaml:"queue_size" json:"queue_size"`         // 任务队列容量(默认 512;超出后提交方阻塞)
+	StreamWorkers int `yaml:"stream_workers" json:"stream_workers"` // 流式接口工作协程数(默认 64)
+	StreamQueue   int `yaml:"stream_queue" json:"stream_queue"`     // 流式接口任务队列容量(默认 256)
+}
+
+// RequestPoolMode 请求准入池满时的行为。
+type RequestPoolMode string
+
+const (
+	RequestPoolModeBlock  RequestPoolMode = "block"  // 阻塞等待(自然背压)
+	RequestPoolModeReject RequestPoolMode = "reject" // 快速拒绝(503)
+)
+
+// RequestPool 请求准入池配置(config.yaml 的 request_pool 段)。
+// 目前由 StreamingPoolMiddleware 使用,控制流式请求并发上限。
+type RequestPool struct {
+	MaxConcurrent int             `yaml:"max_concurrent" json:"max_concurrent"` // 同时在途请求上限(默认 256)
+	QueueSize     int             `yaml:"queue_size" json:"queue_size"`         // 等待队列深度(默认 512;0=不排队)
+	StreamingMax  int             `yaml:"streaming_max" json:"streaming_max"`   // 流式请求上限(默认 64)
+	Mode          RequestPoolMode `yaml:"mode" json:"mode"`                     // block | reject(默认 block)
+}
+
+// Bucket 桶相关配置(config.yaml 的 bucket 段)。
+type Bucket struct {
+	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
+}
+
 // Config 总配置结构
 type Config struct {
-	App      App      `yaml:"app" json:"app"`
-	Server   Server   `yaml:"server" json:"server"`
-	Database Database `yaml:"database" json:"database"`
-	AccessJWT  AccessJWT  `yaml:"jwt" json:"jwt"`
-	RefreshJWT RefreshJWT `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
-	Log        Log        `yaml:"log" json:"log"`
-	Storage    Storage    `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
+	App         App         `yaml:"app" json:"app"`
+	Server      Server      `yaml:"server" json:"server"`
+	Database    Database    `yaml:"database" json:"database"`
+	AccessJWT   AccessJWT   `yaml:"jwt" json:"jwt"`
+	RefreshJWT  RefreshJWT  `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
+	Log         Log         `yaml:"log" json:"log"`
+	Storage     Storage     `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
+	Bucket      Bucket      `yaml:"bucket" json:"bucket"`   // 桶相关配置
 
-	Health Health `yaml:"health" json:"health"`
-	Pool   Pool   `yaml:"pool" json:"pool"`
-	Nodes  []Node `yaml:"nodes" json:"nodes"`
+	Health      Health      `yaml:"health" json:"health"`
+	Pool        Pool        `yaml:"pool" json:"pool"`
+	RequestPool RequestPool `yaml:"request_pool" json:"request_pool"`
+	ExecPool    ExecPool    `yaml:"exec_pool" json:"exec_pool"`
+	Nodes       []Node      `yaml:"nodes" json:"nodes"`
+	// SmbGateway SMB 网关私有 Socket 配置(与 Rust 侧 config.yaml gateway: 分节对齐;
+	// 缺省时用 DefaultSmbGatewayConfig)。
+	SmbGateway SmbGatewayConfig `yaml:"smb_gateway" json:"smb_gateway"`
+}
+
+// SmbGatewayConfig SMB 网关服务配置(私有 Socket,仅本机 Rust 网关访问)。
+type SmbGatewayConfig struct {
+	// ListenAddr 私有 TCP 监听地址(如 127.0.0.1:9101)。
+	ListenAddr string `yaml:"listen_addr" json:"listen_addr"`
+	// SharedKey 共享密钥(可直接配置在 config.yaml;优先级高于 SharedKeyEnv。
+	// 留空时回退到 SharedKeyEnv 指定的环境变量;两者皆空则跳过静态鉴权,
+	// 等待握手后动态密钥协商(接口后续实现)。
+	SharedKey string `yaml:"shared_key" json:"shared_key"`
+	// SharedKeyEnv 共享密钥所在环境变量名(SharedKey 为空时读取;
+	// 留空 = 跳过静态密钥)。
+	SharedKeyEnv string `yaml:"shared_key_env" json:"shared_key_env"`
+	// ChannelBuffer 请求管道缓冲长度(与 Rust 侧 channel_buffer 对齐)。
+	ChannelBuffer int `yaml:"channel_buffer" json:"channel_buffer"`
+	// MaxConcurrent 请求池同时在途上限。
+	MaxConcurrent int `yaml:"max_concurrent" json:"max_concurrent"`
+}
+
+// DefaultSmbGatewayConfig 网关配置缺省值(与 Rust 侧 config.yaml 内置默认保持一致)。
+func DefaultSmbGatewayConfig() SmbGatewayConfig {
+	return SmbGatewayConfig{
+		ListenAddr:    "127.0.0.1:9101",
+		SharedKeyEnv:  "ORBITCLOUD_SMB_GATEWAY_KEY",
+		ChannelBuffer: 1024,
+		MaxConcurrent: 64,
+	}
 }
 
 // Health 健康检查配置(config.yaml 的 health 段)。

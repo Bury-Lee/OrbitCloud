@@ -50,21 +50,21 @@ func (l *GormLogger) LogMode(level logger.LogLevel) logger.Interface {
 // Info 记录 GORM info 级日志(如 AutoMigrate 的表结构变更)。
 func (l *GormLogger) Info(_ context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= logger.Info {
-		Infof("[gorm] "+msg, data...)
+		InfofP(msg, []string{"gorm"}, data...)
 	}
 }
 
 // Warn 记录 GORM warn 级日志(如慢查询)。
 func (l *GormLogger) Warn(_ context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= logger.Warn {
-		Warnf("[gorm] "+msg, data...)
+		WarnfP(msg, []string{"gorm"}, data...)
 	}
 }
 
 // Error 记录 GORM error 级日志。
 func (l *GormLogger) Error(_ context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= logger.Error {
-		Errorf("[gorm] "+msg, data...)
+		ErrorfP(msg, []string{"gorm"}, data...)
 	}
 }
 
@@ -81,13 +81,13 @@ func (l *GormLogger) Trace(_ context.Context, begin time.Time, fc func() (sql st
 	switch {
 	case err != nil && l.LogLevel >= logger.Error && (!errors.Is(err, logger.ErrRecordNotFound) || !l.IgnoreRecordNotFoundError):
 		sql, rows := fc()
-		Errorf("[gorm] %v [%.3fms] [rows:%s] %s", err, float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
+		ErrorfP("%v [%.3fms] [rows:%s] %s", []string{"gorm"}, err, float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
 	case elapsed > l.SlowThreshold && l.SlowThreshold > 0 && l.LogLevel >= logger.Warn:
 		sql, rows := fc()
-		Warnf("[gorm] SLOW SQL >= %v [%.3fms] [rows:%s] %s", l.SlowThreshold, float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
+		WarnfP("SLOW SQL >= %v [%.3fms] [rows:%s] %s", []string{"gorm"}, l.SlowThreshold, float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
 	case l.LogLevel == logger.Info:
 		sql, rows := fc()
-		Infof("[gorm] [%.3fms] [rows:%s] %s", float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
+		InfofP("[%.3fms] [rows:%s] %s", []string{"gorm"}, float64(elapsed.Nanoseconds())/1e6, rowsStr(rows), sql)
 	}
 }
 

@@ -1,4 +1,4 @@
-﻿// copy_task.go —— 文件夹复制任务处理。
+// copy_task.go —— 文件夹复制任务处理。
 //
 // CopyFolder 落 CopyTask → 后台 processCopyFolderTask 深度优先逐文件夹复制:
 // 每帧先建目标 Folder,再复制其下文件(建新 File 记录 → Get 源对象 → Put 新对象),
@@ -18,7 +18,6 @@ import (
 	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/model"
-	"orbitcloud/utils"
 )
 
 // copyFrame 深度优先复制栈帧:源 folder → 目标侧父 folder。
@@ -28,14 +27,99 @@ type copyFrame struct {
 	isTop       bool // 顶层:目标名用 task.DstName,不参与 uniqueName
 }
 
-// ProcessCopyFolderTaskArg 复制任务处理入参。
-type ProcessCopyFolderTaskArg struct {
+// ProcessCopyTaskArg 复制任务处理入参。
+type ProcessCopyTaskArg struct {
 	TaskID uint // 复制任务 copy_tasks.id
 }
 
-// ProcessCopyFolderTask 处理单个文件夹复制任务(启动/cron 续跑与 server 内同步触发共用)。
-func ProcessCopyFolderTask(ctx context.Context, arg ProcessCopyFolderTaskArg) error {
-	return processCopyFolderTask(ctx, arg.TaskID)
+// ProcessCopyTask 处理单个复制任务(启动/cron 续跑与 server 内同步触发共用)。
+// 按任务字段分派:SourceFileID > 0 → 单文件跨桶移动(复制+删源);
+// 否则 → 文件夹深度优先复制。
+func ProcessCopyTask(ctx context.Context, arg ProcessCopyTaskArg) error {
+	task := &model.CopyTask{}
+	if err := core.DB.WithContext(ctx).First(task, arg.TaskID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // 任务不存在 → 幂等
+		}
+		return fmt.Errorf("process copy task %d: query task: %w", arg.TaskID, err)
+	}
+	if task.SourceFileID > 0 {
+		return processCopyFileTask(ctx, arg.TaskID) // 单文件跨桶移动
+	}
+	return processCopyFolderTask(ctx, arg.TaskID) // 文件夹复制
+}
+
+// processCopyFileTask 处理单文件跨桶移动任务(两步串行,等价"复制任务+删除任务"):
+//  1. 复制源文件到目标(不重命名;目标已存在 = 上轮已复制 → 跳过,幂等);
+//  2. 删除源文件(移动语义;失败保留任务,续跑时复制跳过、重试删源)。
+//
+// 任务级锁/续租/幂等与文件夹任务一致;完成后硬删任务记录。
+func processCopyFileTask(ctx context.Context, taskID uint) error {
+	// 取任务;不存在 → 返回 nil(幂等)
+	task := &model.CopyTask{}
+	if err := core.DB.WithContext(ctx).First(task, taskID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("process copy file task %d: query task: %w", taskID, err)
+	}
+
+	// 抢占处理权(任务级数据库锁,乐观条件更新,防并发处理同一任务)
+	now := time.Now()
+	res := core.DB.WithContext(ctx).Model(&model.CopyTask{}).
+		Where("id = ? AND (lock_owner = '' OR lock_expires_at < ?)", taskID, now).
+		Updates(map[string]any{
+			"status":          1,
+			"lock_owner":      core.InstanceID(),
+			"lock_expires_at": now.Add(5 * time.Minute),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("process copy file task %d: acquire lock: %w", taskID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return nil // 其他进程处理中,跳过
+	}
+
+	// 后台任务不随 HTTP 请求取消;defer 释放锁(仅当仍持有,防误清新持有者)
+	ctx = context.WithoutCancel(ctx)
+	defer func() {
+		_ = core.DB.WithContext(ctx).Model(&model.CopyTask{}).
+			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
+			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error
+	}()
+
+	// 源文件存在性(已删 → 目标侧已复制过,移动完成,删任务)
+	if _, err := loadFile(ctx, task.BucketID, task.SourceFileID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+			return nil
+		}
+		return fmt.Errorf("process copy file task %d: load source: %w", taskID, err)
+	}
+
+	// 第一步:复制(不重命名;目标已存在 = 上轮已复制 → 跳过,续跑幂等)
+	if _, err := CopyFileNoRename(ctx, CopyFileArg{
+		UserID:      task.UploadedBy,
+		SrcBucketID: task.BucketID,
+		SrcFileID:   task.SourceFileID,
+		DstBucketID: task.DstBucketID,
+		DstFilename: task.DstName,
+		DstFolderID: task.DstFolderID,
+	}); err != nil && !errors.Is(err, ErrConflict) {
+		return fmt.Errorf("process copy file task %d: copy: %w", taskID, err)
+	}
+
+	// 第二步:删除源(跨桶移动 = 复制 + 删源串行;失败保留任务续跑重试删源)
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: task.UploadedBy, BucketID: task.BucketID, FileID: task.SourceFileID}); err != nil {
+		return fmt.Errorf("process copy file task %d: delete source: %w", taskID, err)
+	}
+
+	// 全部完成 → 硬删任务记录
+	if err := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; err != nil {
+		return fmt.Errorf("process copy file task %d: delete task: %w", taskID, err)
+	}
+	log.Infof("copy task %d: file %d moved (bucket %d -> %d)", taskID, task.SourceFileID, task.BucketID, task.DstBucketID)
+	return nil
 }
 
 // processCopyFolderTask 处理单个文件夹复制任务(内部实现,幂等)。
@@ -107,7 +191,7 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 		stack = stack[:len(stack)-1]
 
 		// 目标侧目录:顶层直接复用 CopyFolder 预建的任务目标(DstFolderID);
-		// 子层:以源文件夹名 + uniqueName 兜底创建
+		// 子层:已存在(上轮已建)则复用继续复制,否则创建(不重命名)。
 		var newFolder *model.Folder
 		if fr.isTop {
 			newFolder, err = loadFolderByID(ctx, task.DstFolderID)
@@ -119,25 +203,32 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 			if err != nil {
 				return fmt.Errorf("process copy task %d: load source folder %d: %w", taskID, fr.srcFolderID, err)
 			}
-			dstName, err := uniqueName(ctx, task.DstBucketID, fr.dstParentID, srcF.Name)
-			if err != nil {
-				return err
-			}
-			newFolder = &model.Folder{
-				BucketID:   task.DstBucketID,
-				ParentID:   fr.dstParentID,
-				Name:       dstName,
-				UploadedBy: task.UploadedBy,
-				Isable:     true,
-				// 可见组继承源目录(防复制后泄露给全桶)
-				VisibleToGroups: srcF.VisibleToGroups,
-			}
-			if err := core.DB.WithContext(ctx).Create(newFolder).Error; err != nil {
-				if isUniqueViolation(err) {
-					// 并发窗口(uniqueName 预检后仍被抢占):保留任务,下轮换新名重试
-					return fmt.Errorf("process copy task %d: dst folder conflict (retry later): %w", taskID, err)
+			// 目标子目录已存在(上轮已建,内容可能未完成)→ 复用继续(幂等续跑,
+			// 不可跳过:目录创建与内容复制之间可能中断,跳过会导致内容永久缺失)
+			if existingID, ferr := findFolderByParent(ctx, task.DstBucketID, fr.dstParentID, srcF.Name); ferr == nil {
+				newFolder, err = loadFolderByID(ctx, existingID)
+				if err != nil {
+					return fmt.Errorf("process copy task %d: load reused folder %d: %w", taskID, existingID, err)
 				}
-				return fmt.Errorf("process copy task %d: create dst folder: %w", taskID, err)
+			} else if !errors.Is(ferr, ErrNotFound) {
+				return fmt.Errorf("process copy task %d: check dst folder: %w", taskID, ferr)
+			} else {
+				newFolder = &model.Folder{
+					BucketID:   task.DstBucketID,
+					ParentID:   fr.dstParentID,
+					Name:       srcF.Name,
+					UploadedBy: task.UploadedBy,
+					Isable:     true,
+					// 可见组继承源目录(防复制后泄露给全桶)
+					VisibleToGroups: srcF.VisibleToGroups,
+				}
+				if err := core.DB.WithContext(ctx).Create(newFolder).Error; err != nil {
+					if isUniqueViolation(err) {
+						// 并发窗口(预检后仍被抢占):下轮复用已存在目录
+						return fmt.Errorf("process copy task %d: dst folder conflict (retry later): %w", taskID, err)
+					}
+					return fmt.Errorf("process copy task %d: create dst folder: %w", taskID, err)
+				}
 			}
 		}
 
@@ -156,51 +247,24 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 			}
 			for i := range srcFiles {
 				sf := &srcFiles[i]
-				// 目标文件名冲突自动重命名
-				dstFileName, err := uniqueName(ctx, task.DstBucketID, newFolder.ID, sf.Name)
-				if err != nil {
-					return err
-				}
-				nf := &model.File{
-					BucketID:   task.DstBucketID,
-					FolderID:   newFolder.ID,
-					Name:       dstFileName,
-					FileSize:   sf.FileSize,
-					FileType:   sf.FileType,
-					MD5:        sf.MD5,
-					UploadedBy: task.UploadedBy,
-					// 可见组继承源文件(防复制后泄露给全桶)
-					VisibleToGroups: sf.VisibleToGroups,
-				}
-				if err := core.DB.WithContext(ctx).Create(nf).Error; err != nil {
-					if isUniqueViolation(err) {
-						continue // 并发同名:跳过该文件,下一轮续跑重试
+				// 复制(不重命名,目标已存在 → ErrConflict):
+				// 上轮已完整复制的文件直接跳过,续跑幂等,不再产生 "xxx (1)" 副本;
+				// 复制内部建记录/对象复制/used_space 原子入账/失败补偿与 CopyFile 一致。
+				nf, cerr := CopyFileNoRename(ctx, CopyFileArg{
+					UserID:       task.UploadedBy,
+					SrcBucketID:  task.BucketID,
+					SrcFileID:    sf.ID,
+					DstBucketID:  task.DstBucketID,
+					DstFilename:  sf.Name,
+					DstFolderID:  newFolder.ID, // 目录 ID 直传(免路径重解析)
+				})
+				if cerr != nil {
+					if errors.Is(cerr, ErrConflict) {
+						continue // 目标已存在 = 上轮已复制,跳过(幂等)
 					}
-					return fmt.Errorf("process copy task %d: create dst file: %w", taskID, err)
+					return fmt.Errorf("process copy task %d: copy file %d: %w", taskID, sf.ID, cerr)
 				}
-				// 对象复制(Get 源 → Put 新 key;失败补偿删新记录,任务保留续跑)
-				rc, err := core.Storage.Get(ctx, utils.BucketEncoder(task.BucketID), objectKeyForFile(sf.ID))
-				if err != nil {
-					_ = core.DB.Unscoped().Delete(&model.File{}, nf.ID)
-					if errors.Is(err, core.ErrObjectNotFound) {
-						log.Errorf("process copy task %d: source object %d missing, skip", taskID, sf.ID)
-						continue // 源对象缺失:跳过该文件
-					}
-					return fmt.Errorf("process copy task %d: get source object: %w", taskID, err)
-				}
-				err = core.Storage.Put(ctx, utils.BucketEncoder(task.DstBucketID), objectKeyForFile(nf.ID), rc, sf.FileSize)
-				_ = rc.Close()
-				if err != nil {
-					_ = core.DB.Unscoped().Delete(&model.File{}, nf.ID) // 补偿:不留空洞
-					return fmt.Errorf("process copy task %d: put dst object: %w", taskID, err)
-				}
-				// used_space 原子自增;失败补偿删对象+删记录,任务保留续跑
-				if err := core.DB.WithContext(ctx).Model(&model.Bucket{}).Where("id = ?", task.DstBucketID).
-					Update("used_space", gorm.Expr("used_space + ?", sf.FileSize)).Error; err != nil {
-					_ = core.Storage.Delete(ctx, utils.BucketEncoder(task.DstBucketID), objectKeyForFile(nf.ID))
-					_ = core.DB.Unscoped().Delete(&model.File{}, nf.ID)
-					return fmt.Errorf("process copy task %d: update used space: %w", taskID, err)
-				}
+				_ = nf
 			}
 			lastFileID = srcFiles[len(srcFiles)-1].ID
 			if len(srcFiles) < batch {

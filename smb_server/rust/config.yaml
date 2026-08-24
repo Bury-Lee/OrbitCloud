@@ -1,0 +1,37 @@
+# ============================================================================
+# smb-gateway 默认配置 —— 字段与 src/core/enter.rs 的 Config 结构一一对应
+# 读取规则(与 Go 侧铁律一致):
+#   - 启动时优先读工作目录 ./config.yaml;缺失 → 用本文件(include_str! 内置)
+#     落盘生成后继续;
+#   - 配置缺失/非法 → 启动即终止,不做缺省值兜底;
+#   - 敏感项(共享密钥)禁止写入本文件,走环境变量(见 gateway.shared_key_env)。
+# ============================================================================
+
+smb:
+  listen: "0.0.0.0:445"          # SMB 监听地址(部署由 deploy-smb-gateway.sh 生成,root 下用标准 445)
+  netbios_name: "ORBITCLOUD"      # NetBIOS 名(局域网浏览显示名,可选)
+
+gateway:
+  addr: "127.0.0.1:9101"          # Go 网关地址(私有 TCP 长连接,Rust 为客户端)
+  shared_key: ""                  # 共享密钥(可直接配置在此;优先级高于 shared_key_env,
+                                    #   与 Go 侧 config.yaml smb_gateway.shared_key 保持一致;
+                                    #   留空时回退到 shared_key_env 环境变量;
+                                    #   两者皆空 = 跳过静态鉴权,动态协商后续实现)
+  shared_key_env: "ORBITCLOUD_SMB_GATEWAY_KEY"  # 共享密钥所在环境变量名(shared_key 为空时读取)
+                                    # 可留空:未定义时改为握手后双方交换随机密钥(后续实现)
+  heartbeat_secs: 30              # 心跳间隔(秒)
+  sync_interval_secs: 60          # 与 Go 网关全量对账周期(秒,增量推送丢失兜底)
+  channel_buffer: 1024            # 发送管道缓冲长度(设计点 6;与 Go 侧请求池队列深度对齐)
+  rpc_timeout_secs: 30            # RPC 请求应答超时(秒;大文件 Flush/Close 整体上传耗时可调大,
+                                  #   避免大文件保存被误判超时——客户端已写入但显示失败)
+
+log:
+  level: "debug"                  # 日志级别(debug/info/warn/error;可用 RUST_LOG 覆盖)
+  output: "logs"                  # 文本日志输出文件夹(相对工作目录;空 = 关闭文本文件日志,仅控制台)
+  file_prefix: "smb-gateway"      # 文本日志文件名前缀(每日一个日期子文件夹,文件名 = {prefix}-{HH-MM-SS}.log,
+                                  #   每次启动以启动时刻命名;缺省 smb-gateway)
+  db_enabled: true                # 是否启用本地 SQLite 日志入库
+  db_path: "logs/logs.db"         # SQLite 数据库文件路径(缺省 = {output}/logs.db;output 为空时退化为 ./logs/logs.db)
+  db_level: "info"                # 入库最低级别(debug/info/warn/error;低于该级别不入库)
+  retention_days: 30              # SQLite 日志保留天数(定时任务清理过期记录)
+  cleanup_interval_secs: 3600     # 过期日志清理周期(秒;下限 60)

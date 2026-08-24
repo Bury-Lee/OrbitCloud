@@ -14,17 +14,28 @@ export function getBucket(id: number): Promise<Bucket> {
 
 /**
  * POST /buckets 创建桶。
- * 后端语义:permission_level 缺省/<=0 时自动取创建者等级(仅允许创建相同等级的桶),
- * 因此前端不传该字段即可。
+ * 后端语义:permission_level 缺省/0 时自动取创建者等级(仅允许创建相同等级的桶),
+ * manage_permission_level 缺省/0 时跟随访问等级,因此前端不传即可。
  */
-export function createBucket(data: { name: string; description?: string }): Promise<Bucket> {
+export function createBucket(data: {
+  name: string
+  description?: string
+  permission_level?: number
+  manage_permission_level?: number
+}): Promise<Bucket> {
   return http.post('/buckets', data)
 }
 
 /** PUT /buckets/:id 修改桶(仅传入需要更新的字段) */
 export function updateBucket(
   id: number,
-  data: { description?: string; permission_level?: number; quota?: number; status?: number },
+  data: {
+    description?: string
+    permission_level?: number
+    manage_permission_level?: number
+    quota?: number
+    status?: number
+  },
 ): Promise<Bucket> {
   return http.put(`/buckets/${id}`, data)
 }

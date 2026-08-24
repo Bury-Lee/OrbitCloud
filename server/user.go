@@ -1,7 +1,7 @@
-﻿// user.go —— 用户:注册 / 登录 / 刷新 / 登出 / 查询 / 列表 / 修改 / 删除。
+// user.go —— 用户:注册 / 登录 / 刷新 / 登出 / 查询 / 列表 / 修改 / 删除。
 //
 // 权限模型:0 = 超级管理员(仅命令行添加,API 不可创建);1 = 管理员;
-// 其余为普通用户。管理员判定统一为 PermissionLevel <= 1,数值越小权限越高。
+// 其余为普通用户。管理员判定统一为 PermissionLevel.IsAdmin(),数值越小权限越高。
 package server
 
 import (
@@ -18,6 +18,7 @@ import (
 	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/model"
+	"orbitcloud/utils"
 )
 
 // LoginResult 登录/刷新成功返回的令牌对。
@@ -30,9 +31,9 @@ type LoginResult struct {
 
 // RegisterArg 用户注册入参。
 type RegisterArg struct {
-	Username        string // 用户名(trim 后非空)
-	Password        string // 密码(≥8 位)
-	PermissionLevel int8   // 权限等级(0/负值归一为最低权限普通用户)
+	Username        string                // 用户名(trim 后非空)
+	Password        string                // 密码(≥8 位)
+	PermissionLevel model.PermissionLevel // 权限等级(<=0 归一为最低权限普通用户)
 }
 
 // Register 注册用户(管理员接口;普通用户不能自助注册):
@@ -48,8 +49,8 @@ func Register(ctx context.Context, arg RegisterArg) (*model.User, error) {
 	}
 	// permissionLevel 归一:<=0 → 最低权限普通用户
 	perm := permissionLevel
-	if perm <= 0 {
-		perm = int8(model.NormalUser)
+	if perm <= model.SuperAdmin {
+		perm = model.NormalUser
 	}
 
 	// 密码哈希(bcrypt)
@@ -65,6 +66,7 @@ func Register(ctx context.Context, arg RegisterArg) (*model.User, error) {
 		Name:            name,
 		PermissionLevel: perm,
 		Status:          1,
+		NtHash:          utils.NtHashOf(password), // SMB 登录用(NTLM 校验,仅经私有通道下发)
 	}
 
 	// 落库(唯一索引兜底并发)
@@ -77,6 +79,7 @@ func Register(ctx context.Context, arg RegisterArg) (*model.User, error) {
 
 	// 返回前清敏感字段(禁止回传哈希)
 	user.Password = ""
+	user.NtHash = ""
 
 	log.Infof("register: user %q (id %d) permission %d created", name, user.ID, perm)
 	return user, nil
@@ -232,6 +235,7 @@ func GetUser(ctx context.Context, arg GetUserArg) (*model.User, error) {
 		return nil, fmt.Errorf("get user %d: %w", id, err)
 	}
 	user.Password = ""
+	user.NtHash = ""
 	return &user, nil
 }
 
@@ -258,6 +262,7 @@ func ListUsers(ctx context.Context, arg ListUsersArg) (total int64, items []mode
 	// 脱敏:禁止哈希外泄
 	for i := range items {
 		items[i].Password = ""
+		items[i].NtHash = ""
 	}
 	return total, items, nil
 }
@@ -288,6 +293,7 @@ func UpdateMe(ctx context.Context, arg UpdateMeArg) (*model.User, error) {
 			return nil, fmt.Errorf("update me: hash password: %w", err)
 		}
 		updates["password"] = string(hash)
+		updates["nt_hash"] = utils.NtHashOf(in.Password) // SMB 登录同步更新
 	}
 	if in.Name != "" {
 		updates["name"] = in.Name
@@ -311,11 +317,11 @@ func UpdateMe(ctx context.Context, arg UpdateMeArg) (*model.User, error) {
 
 // UpdateUserInput 用户可更新字段(管理员改他人;指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
 type UpdateUserInput struct {
-	Password        string // 非空则重置密码(bcrypt 哈希后落库)
-	Name            string // 名字/昵称
-	Email           string // 邮箱
-	PermissionLevel *int8  // 权限等级(不能设为 0;0 仅命令行添加)
-	Status          *int   // 1 正常 / 0 禁用
+	Password        string                // 非空则重置密码(bcrypt 哈希后落库)
+	Name            string                // 名字/昵称
+	Email           string                // 邮箱
+	PermissionLevel *model.PermissionLevel // 权限等级(不能设为 0;0 仅命令行添加)
+	Status          *int                  // 1 正常 / 0 禁用
 }
 
 // UpdateUserArg 用户更新入参(管理员改他人)。
@@ -342,6 +348,7 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 			return nil, fmt.Errorf("update user: hash password: %w", err)
 		}
 		updates["password"] = string(hash)
+		updates["nt_hash"] = utils.NtHashOf(in.Password) // SMB 登录同步更新
 	}
 	if in.Name != "" {
 		updates["name"] = in.Name
@@ -350,7 +357,7 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 		updates["email"] = in.Email
 	}
 	if in.PermissionLevel != nil {
-		if *in.PermissionLevel < 1 {
+		if *in.PermissionLevel < model.Admin {
 			return nil, ErrInvalidInput // 0 仅命令行添加;负值非法
 		}
 		updates["permission_level"] = *in.PermissionLevel
@@ -458,5 +465,6 @@ func sanitizeUser(u *model.User) *model.User {
 	}
 	copy := *u
 	copy.Password = ""
+	copy.NtHash = ""
 	return &copy
 }

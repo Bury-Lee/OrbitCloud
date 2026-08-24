@@ -96,7 +96,7 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 	unionSQL := `SELECT id, created_at, kind FROM (
 		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ?` + visCond + `
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ?` + visCond + `
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true` + visCond + `
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	queryArgs := []any{bucketID, folderID}
 	queryArgs = append(queryArgs, visArgs...)
@@ -118,7 +118,7 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 		return nil, nil, 0, fmt.Errorf("list files count (files): %w", err)
 	}
 	if err := core.DB.WithContext(ctx).
-		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ?"+visCond, countArgs...).
+		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true"+visCond, countArgs...).
 		Scan(&n2).Error; err != nil {
 		return nil, nil, 0, fmt.Errorf("list files count (folders): %w", err)
 	}
@@ -225,7 +225,7 @@ func ListFilesCursor(ctx context.Context, arg ListFilesCursorArg) (files []model
 	}
 
 	// 文件夹表
-	folderSQL := "SELECT id FROM folders WHERE bucket_id = ? AND parent_id = ?" + visCond
+	folderSQL := "SELECT id FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true" + visCond
 	folderArgs := []any{bucketID, folderID}
 	folderArgs = append(folderArgs, visArgs...)
 	if folderCond != "" {

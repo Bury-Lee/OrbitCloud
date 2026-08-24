@@ -11,7 +11,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -122,31 +124,59 @@ func isTerminal(out io.Writer) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// isFileOutput 判断 out 是否为文件输出:轮转文件 writer(*rotateWriter),
-// 或非终端的 *os.File。终端 stdout 与内存 writer(如 bytes.Buffer)不算文件输出。
-func isFileOutput(out io.Writer) bool {
-	switch w := out.(type) {
-	case *rotateWriter:
-		return true
-	case *os.File:
-		return !isTerminal(w)
+// shortPath 把编译期文件路径压缩为便于阅读的短路径(统一 / 分隔):
+//   - 优先剥离 module 前缀(orbitcloud/xxx → xxx,配合 -trimpath 构建);
+//   - 其次取相对当前工作目录的路径;
+//   - 兜底仅保留文件名。
+func shortPath(file string) string {
+	file = filepath.ToSlash(file)
+	const module = "orbitcloud/"
+	if strings.HasPrefix(file, module) {
+		return strings.TrimPrefix(file, module)
 	}
-	return false
+	if cwd, err := os.Getwd(); err == nil {
+		if rel, err := filepath.Rel(cwd, file); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(file)
 }
 
-// callerInfo 返回调用方的文件路径与行号(格式 file:line)。
+// shortCaller 返回调用方的精简代码位置(file:line,如 api/auth_api.go:56)。
 // skip 为相对本函数的栈帧数:0 为 Caller 自身,1 为调用方。
-func callerInfo(skip int) string {
+// 调用栈统一约定:output ← 包装函数(或 LogPrint)← 用户代码 → skip=3。
+func shortCaller(skip int) string {
 	if _, file, line, ok := runtime.Caller(skip); ok {
-		return fmt.Sprintf("%s:%d", file, line)
+		return fmt.Sprintf("%s:%d", shortPath(file), line)
 	}
 	return ""
 }
 
+// formatTags 把前缀标签列表渲染为日志标记串:["gorm","sql"] → "[gorm] [sql] "。
+// 空列表/空标签会被跳过,返回空串(不带任何标记)。
+func formatTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, t := range tags {
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		b.WriteByte('[')
+		b.WriteString(t)
+		b.WriteString("] ")
+	}
+	return b.String()
+}
+
 // output 写一条日志:级别过滤在调用方已做,此处仅负责格式化与写入。
-// 格式:[2006-01-02 15:04:05.000] [LEVEL] [prefix] content;终端输出按级别着色。
-// Debug 模式且输出到文件时,内容前附带调用方文件路径与行号(见 callerInfo)。
-func output(out io.Writer, lvl Level, prefix string, t time.Time, content string) error {
+// 格式:[2006-01-02 15:04:05.000] [LEVEL] [tag1] [tag2] [path/file.go:line] content;
+// tags 为前缀标签列表,按 formatTags 渲染成 [tag] 标记;终端输出按级别着色。
+// 代码位置标签自动附加(追加在业务标签之后、内容之前):
+//   - debug 模式(MinLogLevel == DEBUG):所有级别均附带,便于开发定位;
+//   - 错误级别(ERROR/FATAL/PANIC):与级别配置无关恒附带,便于线上排查错误来源。
+func output(out io.Writer, lvl Level, tags []string, prefix string, t time.Time, content string) error {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -155,17 +185,30 @@ func output(out io.Writer, lvl Level, prefix string, t time.Time, content string
 	if isTerminal(out) {
 		lvlTag = levelColor(lvl) + lvlTag + colorReset
 	}
-	// Debug 模式 + 文件输出:附带调用方文件路径与行号(调用栈偏移 4)
-	if MinLogLevel == DEBUG && isFileOutput(out) {
-		prefix = callerInfo(4)
+	// 代码位置标签:debug 模式全级别,或 ERROR 及以上级别(调用栈偏移 3,见 shortCaller)
+	if MinLogLevel == DEBUG || lvl >= ERROR {
+		if pos := shortCaller(3); pos != "" {
+			tags = append(tags, pos)
+		}
 	}
-	line := fmt.Sprintf("[%s] [%s] %s %s\n", t.Format("2006-01-02 15:04:05.000"), lvlTag, prefix, content)
+	tagStr := formatTags(tags)
+	var line string
+	if tagStr != "" {
+		if prefix != "" {
+			line = fmt.Sprintf("[%s] [%s] %s%s %s\n", t.Format("2006-01-02 15:04:05.000"), lvlTag, tagStr, prefix, content)
+		} else {
+			line = fmt.Sprintf("[%s] [%s] %s%s\n", t.Format("2006-01-02 15:04:05.000"), lvlTag, tagStr, content)
+		}
+	} else {
+		line = fmt.Sprintf("[%s] [%s] %s %s\n", t.Format("2006-01-02 15:04:05.000"), lvlTag, prefix, content)
+	}
 	_, err := fmt.Fprint(out, line)
 
 	// 可选:日志接收器(如日志入库)——由 appinit.AttachLogDBWriter 经 log.EnableLogDBWriter
 	// 注册(见 log/dbwriter.go);级别过滤/重试/防递归由接收器自行实现。
+	// 接收器收到带 [tag] 标记的完整内容,入库后标记不丢失。
 	if s := getSink(); s != nil {
-		s(lvl, content)
+		s(lvl, tagStr+content)
 	}
 	return err
 }
@@ -174,14 +217,23 @@ func output(out io.Writer, lvl Level, prefix string, t time.Time, content string
 // Debug 记录调试信息，通常仅在开发环境使用
 func Debug(msg ...any) error {
 	if MinLogLevel <= DEBUG {
-		return LogPrint(outWriter(), DEBUG, "", time.Now(), fmt.Sprint(msg...))
+		return output(outWriter(), DEBUG, nil, "", time.Now(), fmt.Sprint(msg...))
 	}
 	return nil
 }
 
 func Debugf(format string, args ...any) error {
 	if MinLogLevel <= DEBUG {
-		return LogPrint(outWriter(), DEBUG, "", time.Now(), fmt.Sprintf(format, args...))
+		return output(outWriter(), DEBUG, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	return nil
+}
+
+// DebugfP 带前缀标签的 Debugf:prefix 为标签列表,按标签渲染成 [tag] 标记,
+// 输出形如 [时间] [DEBUG] [tag1] [tag2] 内容。
+func DebugfP(format string, prefix []string, args ...any) error {
+	if MinLogLevel <= DEBUG {
+		return output(outWriter(), DEBUG, prefix, "", time.Now(), fmt.Sprintf(format, args...))
 	}
 	return nil
 }
@@ -190,14 +242,23 @@ func Debugf(format string, args ...any) error {
 // 记录信息
 func Info(msg ...any) error {
 	if MinLogLevel <= INFO {
-		return LogPrint(outWriter(), INFO, "", time.Now(), fmt.Sprint(msg...))
+		return output(outWriter(), INFO, nil, "", time.Now(), fmt.Sprint(msg...))
 	}
 	return nil
 }
 
 func Infof(format string, args ...any) error {
 	if MinLogLevel <= INFO {
-		return LogPrint(outWriter(), INFO, "", time.Now(), fmt.Sprintf(format, args...))
+		return output(outWriter(), INFO, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	return nil
+}
+
+// InfofP 带前缀标签的 Infof:prefix 为标签列表,按标签渲染成 [tag] 标记,
+// 输出形如 [时间] [INFO] [tag1] [tag2] 内容。
+func InfofP(format string, prefix []string, args ...any) error {
+	if MinLogLevel <= INFO {
+		return output(outWriter(), INFO, prefix, "", time.Now(), fmt.Sprintf(format, args...))
 	}
 	return nil
 }
@@ -205,14 +266,23 @@ func Infof(format string, args ...any) error {
 // ============ Warn 级别 ============
 func Warn(msg ...any) error {
 	if MinLogLevel <= WARN {
-		return LogPrint(outWriter(), WARN, "", time.Now(), fmt.Sprint(msg...))
+		return output(outWriter(), WARN, nil, "", time.Now(), fmt.Sprint(msg...))
 	}
 	return nil
 }
 
 func Warnf(format string, args ...any) error {
 	if MinLogLevel <= WARN {
-		return LogPrint(outWriter(), WARN, "", time.Now(), fmt.Sprintf(format, args...))
+		return output(outWriter(), WARN, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	return nil
+}
+
+// WarnfP 带前缀标签的 Warnf:prefix 为标签列表,按标签渲染成 [tag] 标记,
+// 输出形如 [时间] [WARN] [tag1] [tag2] 内容。
+func WarnfP(format string, prefix []string, args ...any) error {
+	if MinLogLevel <= WARN {
+		return output(outWriter(), WARN, prefix, "", time.Now(), fmt.Sprintf(format, args...))
 	}
 	return nil
 }
@@ -220,14 +290,23 @@ func Warnf(format string, args ...any) error {
 // ============ Error 级别 ============
 func Error(msg ...any) error {
 	if MinLogLevel <= ERROR {
-		return LogPrint(outWriter(), ERROR, "", time.Now(), fmt.Sprint(msg...))
+		return output(outWriter(), ERROR, nil, "", time.Now(), fmt.Sprint(msg...))
 	}
 	return nil
 }
 
 func Errorf(format string, args ...any) error {
 	if MinLogLevel <= ERROR {
-		return LogPrint(outWriter(), ERROR, "", time.Now(), fmt.Sprintf(format, args...))
+		return output(outWriter(), ERROR, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	return nil
+}
+
+// ErrorfP 带前缀标签的 Errorf:prefix 为标签列表,按标签渲染成 [tag] 标记,
+// 输出形如 [时间] [ERROR] [tag1] [tag2] 内容。
+func ErrorfP(format string, prefix []string, args ...any) error {
+	if MinLogLevel <= ERROR {
+		return output(outWriter(), ERROR, prefix, "", time.Now(), fmt.Sprintf(format, args...))
 	}
 	return nil
 }
@@ -236,14 +315,22 @@ func Errorf(format string, args ...any) error {
 // Fatal 记录日志后调用 os.Exit(1) 终止程序
 func Fatal(msg ...any) {
 	if MinLogLevel <= FATAL {
-		LogPrint(outWriter(), FATAL, "", time.Now(), fmt.Sprint(msg...)) // 错误仅记 stderr,不阻断退出
+		output(outWriter(), FATAL, nil, "", time.Now(), fmt.Sprint(msg...)) // 错误仅记 stderr,不阻断退出
 	}
 	os.Exit(1)
 }
 
 func Fatalf(format string, args ...any) {
 	if MinLogLevel <= FATAL {
-		LogPrint(outWriter(), FATAL, "", time.Now(), fmt.Sprintf(format, args...))
+		output(outWriter(), FATAL, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	os.Exit(1)
+}
+
+// FatalfP 带前缀标签的 Fatalf:输出后 os.Exit(1) 终止程序。
+func FatalfP(format string, prefix []string, args ...any) {
+	if MinLogLevel <= FATAL {
+		output(outWriter(), FATAL, prefix, "", time.Now(), fmt.Sprintf(format, args...)) // 错误仅记 stderr,不阻断退出
 	}
 	os.Exit(1)
 }
@@ -252,19 +339,27 @@ func Fatalf(format string, args ...any) {
 // Panic 记录日志后调用 panic() 抛出异常
 func Panic(msg ...any) {
 	if MinLogLevel <= PANIC {
-		LogPrint(outWriter(), PANIC, "", time.Now(), fmt.Sprint(msg...))
+		output(outWriter(), PANIC, nil, "", time.Now(), fmt.Sprint(msg...))
 	}
 	panic(fmt.Sprint(msg...))
 }
 
 func Panicf(format string, args ...any) {
 	if MinLogLevel <= PANIC {
-		LogPrint(outWriter(), PANIC, "", time.Now(), fmt.Sprintf(format, args...))
+		output(outWriter(), PANIC, nil, "", time.Now(), fmt.Sprintf(format, args...))
+	}
+	panic(fmt.Sprintf(format, args...))
+}
+
+// PanicfP 带前缀标签的 Panicf:输出后 panic() 抛出异常。
+func PanicfP(format string, prefix []string, args ...any) {
+	if MinLogLevel <= PANIC {
+		output(outWriter(), PANIC, prefix, "", time.Now(), fmt.Sprintf(format, args...))
 	}
 	panic(fmt.Sprintf(format, args...))
 }
 
 // LogPrint 统一日志写入入口:组装并写入一行日志到 out(格式见 output)。
 func LogPrint(out io.Writer, Level Level, prefix string, Time time.Time, Content string) error {
-	return output(out, Level, prefix, Time, Content)
+	return output(out, Level, nil, prefix, Time, Content)
 }

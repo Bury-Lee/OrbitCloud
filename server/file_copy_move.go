@@ -1,4 +1,4 @@
-﻿// file_copy_move.go —— 桶内条目复制与移动:文件/文件夹复制(含跨桶)、
+// file_copy_move.go —— 桶内条目复制与移动:文件/文件夹复制(含跨桶)、
 // 同桶 O(1) 移动重命名(剪切)。
 //
 // 源/目标桶权限由 api 层预检,本文件只做源对象状态与目标目录可行性校验;
@@ -28,6 +28,9 @@ type CopyFileArg struct {
 	DstBucketID  uint   // 目标桶
 	DstDirPath   string // 目标目录(空串 = 桶根;mkdir -p)
 	DstFilename  string // 目标文件名(空 = 沿用源名)
+	// DstFolderID 目标目录 ID 直传(0 = 按 DstDirPath 解析);
+	// 复制任务等已持有目录 ID 的场景免路径重解析。
+	DstFolderID uint
 }
 
 // CopyFile 复制文件(可同桶/跨桶):校验源与目标桶 → 解析目标目录 →
@@ -35,6 +38,21 @@ type CopyFileArg struct {
 // 复制 = 新记录+新对象,与源完全独立;失败补偿删新记录。
 // 错误语义:源不存在/目标桶不存在 → ErrNotFound;桶禁用 → ErrForbidden。
 func CopyFile(ctx context.Context, arg CopyFileArg) (*model.File, error) {
+	return copyFileInner(ctx, arg, true) // HTTP 语义:同名冲突自动重命名
+}
+
+// CopyFileNoRename 复制文件(不重命名;供复制任务幂等续跑使用):
+// 行为与 CopyFile 完全一致(校验/建记录/对象复制/used_space 原子自增/失败补偿),
+// 唯一差异:目标名已存在(文件或文件夹)→ 直接返回 ErrConflict,绝不自动改名。
+// 复制任务收到 ErrConflict 视为"该文件上轮已复制完成",跳过即可。
+func CopyFileNoRename(ctx context.Context, arg CopyFileArg) (*model.File, error) {
+	return copyFileInner(ctx, arg, false)
+}
+
+// copyFileInner 文件复制内部实现(CopyFile / CopyFileNoRename 共用)。
+// autoRename=true:目标名冲突自动重命名(HTTP 语义);
+// autoRename=false:目标已存在 → ErrConflict(任务幂等语义,唯一索引冲突兜底)。
+func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*model.File, error) {
 	userID, srcBucketID, srcFileID, dstBucketID, dstDirPath, dstFilename := arg.UserID, arg.SrcBucketID, arg.SrcFileID, arg.DstBucketID, arg.DstDirPath, arg.DstFilename
 	// 校验源(桶可用 + 文件存在 + Isable)
 	srcBucket, err := CheckBucketUsable(ctx, CheckBucketUsableArg{BucketID: srcBucketID})
@@ -70,10 +88,14 @@ func CopyFile(ctx context.Context, arg CopyFileArg) (*model.File, error) {
 		return nil, err
 	}
 
-	// 解析目标目录(建父链)+ 同名冲突自动重命名
-	dstFolderID, err := common.ResolveDirPath(ctx, userID, dstBucketID, dstDir)
-	if err != nil {
-		return nil, err
+	// 解析目标目录(建父链)+ 同名冲突处理
+	// 直传 DstFolderID 时跳过路径解析(复制任务已持有目标目录 ID)
+	dstFolderID := arg.DstFolderID
+	if dstFolderID == 0 {
+		dstFolderID, err = common.ResolveDirPath(ctx, userID, dstBucketID, dstDir)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// 目标目录可用性与条目级可见性校验
 	if err := checkAncestorsUsable(ctx, dstBucketID, dstFolderID); err != nil {
@@ -83,9 +105,20 @@ func CopyFile(ctx context.Context, arg CopyFileArg) (*model.File, error) {
 	if err := checkAncestorsAccessTree(ctx, userID, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
-	dstName, err = uniqueName(ctx, dstBucketID, dstFolderID, dstName)
-	if err != nil {
-		return nil, err
+	if autoRename {
+		dstName, err = uniqueName(ctx, dstBucketID, dstFolderID, dstName)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 不重命名:目标已存在(文件/文件夹)→ ErrConflict(复制任务跳过语义)
+		exists, err := nameExists(ctx, dstBucketID, dstFolderID, dstName)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, ErrConflict
+		}
 	}
 
 	// 先建新记录拿主键(可见组继承源,防复制后泄露给全桶)
@@ -100,7 +133,24 @@ func CopyFile(ctx context.Context, arg CopyFileArg) (*model.File, error) {
 		VisibleToGroups: srcFile.VisibleToGroups,
 	}
 	if err := core.DB.WithContext(ctx).Create(f).Error; err != nil {
-		return nil, fmt.Errorf("copy file: create record: %w", err)
+		if isUniqueViolation(err) {
+			if autoRename { // 并发窗口:唯一索引兜底,重命名后重试一次
+				if name, err2 := uniqueName(ctx, dstBucketID, dstFolderID, dstName); err2 == nil && name != dstName {
+					f.Name = name
+					f.NameLower = strings.ToLower(name)
+					if err2 := core.DB.WithContext(ctx).Create(f).Error; err2 != nil {
+						return nil, fmt.Errorf("copy file: create record: %w", err2)
+					}
+					dstName = name
+				} else {
+					return nil, ErrConflict
+				}
+			} else {
+				return nil, ErrConflict // 不重命名语义:并发同名 → 冲突(任务跳过)
+			}
+		} else {
+			return nil, fmt.Errorf("copy file: create record: %w", err)
+		}
 	}
 
 	// 对象复制(Get 源 → Put 新 key;失败补偿:删记录)
@@ -147,7 +197,7 @@ type CopyFolderArg struct {
 
 // CopyFolder 复制文件夹(同桶/跨桶均可):校验源与目标桶 → 解析目标父目录 →
 // 目标名冲突自动重命名 → 同步预建目标顶层目录(拿真实 ID)→ 落 CopyTask →
-// 同步触发 ProcessCopyFolderTask 后台深度优先复制子树。
+// 同步触发 ProcessCopyTask 后台深度优先复制子树。
 // 返回目标侧新建的顶层目录记录;子树由后台任务逐步完成。
 func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 	userID, srcBucketID, srcFolderID, dstBucketID, dstDirPath, dstName := arg.UserID, arg.SrcBucketID, arg.SrcFolderID, arg.DstBucketID, arg.DstDirPath, arg.DstName
@@ -237,7 +287,7 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 	}
 
 	// 同步触发处理(尽力而为,失败由启动/cron 续跑)
-	if err := ProcessCopyFolderTask(ctx, ProcessCopyFolderTaskArg{TaskID: task.ID}); err != nil {
+	if err := ProcessCopyTask(ctx, ProcessCopyTaskArg{TaskID: task.ID}); err != nil {
 		log.Errorf("copy folder: process task %d: %v", task.ID, err)
 	}
 
@@ -294,19 +344,63 @@ func MoveFile(ctx context.Context, arg MoveFileArg) (*model.File, error) {
 		return f, nil
 	}
 
-	// 跨桶:剪切 = 复制 + 删源
-	f, err := CopyFile(ctx, CopyFileArg{
-		UserID: userID, SrcBucketID: srcBucketID, SrcFileID: srcFileID,
-		DstBucketID: dstBucketID, DstDirPath: dstDirPath, DstFilename: dstName,
-	})
+	// 跨桶:剪切 = 复制任务 + 删除任务(两步串行,任务内幂等续跑)。
+	// 先解析目标目录并预检冲突(首次调用目标已存在 → 拒绝,不覆盖用户已有文件);
+	// 任务执行:复制(目标已存在即跳过,幂等)→ 删源;失败由启动/cron 续跑。
+	dstFolderID, err := common.ResolveDirPath(ctx, userID, dstBucketID, dstDir)
 	if err != nil {
-		return nil, err // 源保留,不产生半成品
+		return nil, err
 	}
-	if err := DeleteFile(ctx, DeleteFileArg{UserID: userID, BucketID: srcBucketID, FileID: srcFileID}); err != nil {
-		return nil, err // 目标已有副本,源未删,调用方可重试
+	// 目标目录可用性与条目级可见性校验
+	if err := checkAncestorsUsable(ctx, dstBucketID, dstFolderID); err != nil {
+		return nil, err
 	}
-	log.Infof("move: user %d file %d -> bucket %d dir %q name %q (cross-bucket, new id %d)", userID, srcFileID, dstBucketID, dstDir, newName, f.ID)
-	return f, nil
+	if err := checkAncestorsAccessTree(ctx, userID, dstBucketID, dstFolderID); err != nil {
+		return nil, err
+	}
+	// 目标已存在(文件/文件夹)→ 冲突:不覆盖用户已有文件
+	exists, err := nameExists(ctx, dstBucketID, dstFolderID, newName)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrConflict
+	}
+
+	// 落复制任务(SourceFileID > 0 = 单文件跨桶移动:复制 + 删源)
+	task := &model.CopyTask{
+		BucketID:     srcBucketID,
+		SourceFileID: srcFileID,
+		DstBucketID:  dstBucketID,
+		DstFolderID:  dstFolderID,
+		DstDirPath:   dstDir,
+		DstName:      newName,
+		UploadedBy:   userID,
+		Status:       0,
+	}
+	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
+		return nil, fmt.Errorf("move file: create copy task: %w", err)
+	}
+
+	// 同步触发处理(尽力而为;失败任务保留,由启动/cron 续跑)
+	if err := ProcessCopyTask(ctx, ProcessCopyTaskArg{TaskID: task.ID}); err != nil {
+		log.Errorf("move file: process copy task %d: %v", task.ID, err)
+	}
+
+	// 返回目标文件记录(任务已创建;同步处理失败时任务续跑,客户端可重试)
+	dst := &model.File{}
+	err = core.DB.WithContext(ctx).
+		Where("bucket_id = ? AND folder_id = ? AND name_lower = ?",
+			dstBucketID, dstFolderID, strings.ToLower(newName)).First(dst).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("move file: target not ready (task %d), retry later", task.ID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("move file: load target: %w", err)
+	}
+	log.Infof("move: user %d file %d -> bucket %d dir %q name %q (cross-bucket task %d, new id %d)",
+		userID, srcFileID, dstBucketID, dstDir, newName, task.ID, dst.ID)
+	return dst, nil
 }
 
 // moveFileSameBucket 同桶移动/重命名文件:单条元数据更新(FolderID + Name,对象 key = 主键不变)。

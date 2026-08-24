@@ -1,0 +1,35 @@
+[package]
+name = "smb-gateway"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "OrbitCloud SMB 网关 Rust 侧:基于 ixr-smb-server 接入 SMB 协议,经私有 TCP 帧协议转发到 Go 侧网关"
+license = "Apache-2.0"
+repository = "http://localhost/Bury/OrbitCloud"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+chrono = "0.4"
+hex = "0.4"
+hmac = "0.12"
+ixr-smb-server = { version = "0.5.1", default-features = false }
+rand = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+
+# 本地 vendor 补丁:ConfigHandle 增加 add_user_nt_hash / clear_users
+# (用户表直写 NT hash,OrbitCloud 权威源只下发 hash 不下发明文密码)。
+# 补丁源码位于本目录 patched-ixr/(随仓库提交,克隆即可构建)。
+[patch.crates-io]
+ixr-smb-server = { path = "./patched-ixr" }
+
+[profile.release]
+lto = true
+strip = true

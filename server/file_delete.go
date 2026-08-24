@@ -90,37 +90,32 @@ type DeleteDirArg struct {
 }
 
 // DeleteDir 删除文件夹:置 Isable=false(立即不可达)→ 落 DeleteTask{DirID} →
-// 同步触发 processDeleteDirTask 物理清理(失败不阻断,启动/cron 续跑)。
-// 错误语义:目录不存在 → ErrNotFound;桶禁用 → ErrForbidden。
-func DeleteDir(ctx context.Context, arg DeleteDirArg) error {
+// 返回任务 ID;任务执行(物理清理)由 api 层经全局协程池提交,不在此同步执行。
+// 中断残留由启动扫描 / cron 续跑。错误语义:目录不存在 → ErrNotFound;桶禁用 → ErrForbidden。
+func DeleteDir(ctx context.Context, arg DeleteDirArg) (uint, error) {
 	userID, bucketID, dirID := arg.UserID, arg.BucketID, arg.DirID
 	// 桶对象状态(存在 + Status==1)
 	if _, err := CheckBucketUsable(ctx, CheckBucketUsableArg{BucketID: bucketID}); err != nil {
-		return err
+		return 0, err
 	}
 
 	// 查目录
 	if _, err := loadFolder(ctx, bucketID, dirID); err != nil {
-		return err
+		return 0, err
 	}
 
 	// 置 Isable=false:子树即刻不可达(读路径 404)
 	if err := core.DB.WithContext(ctx).Model(&model.Folder{}).
 		Where("id = ?", dirID).Update("isable", false).Error; err != nil {
-		return fmt.Errorf("delete dir %d: disable: %w", dirID, err)
+		return 0, fmt.Errorf("delete dir %d: disable: %w", dirID, err)
 	}
 
 	// 落删除任务(DirID>0 目录删除,DirID=0 桶删除)
 	task := &model.DeleteTask{BucketID: bucketID, DirID: dirID, Status: 0}
 	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
-		return fmt.Errorf("delete dir %d: create delete task: %w", dirID, err)
-	}
-
-	// 同步触发处理(尽力而为,失败由启动/cron 续跑)
-	if err := processDeleteDirTask(ctx, task.ID); err != nil {
-		log.Errorf("delete dir %d: process task %d: %v", dirID, task.ID, err)
+		return 0, fmt.Errorf("delete dir %d: create delete task: %w", dirID, err)
 	}
 
 	log.Infof("delete dir: user %d bucket %d dir %d (isable=false, task %d queued)", userID, bucketID, dirID, task.ID)
-	return nil
+	return task.ID, nil
 }

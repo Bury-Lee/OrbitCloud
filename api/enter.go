@@ -14,7 +14,7 @@ import (
 // claimsKey 鉴权 Claims 在 gin context 中的存取键。
 const claimsKey = "orbitcloud.claims"
 
-// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download),
+// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download/Pprof),
 // 各次级接口均为无状态空结构体,配合全局单例 App 使用。
 type AppGroup struct {
 	Auth     AuthAPI
@@ -24,12 +24,19 @@ type AppGroup struct {
 	Share    ShareAPI
 	Group    GroupAPI
 	Download DownloadAPI
+	Pprof    PprofAPI
 }
 
 // App 是 api 层的全局单例,零值即可用。
 var App AppGroup
 
 // Router 注册全部模块路由并返回 *gin.Engine(实现 http.Handler,供 main.go 直接使用)。
+// 中间件挂载策略(设计点:慢流与短请求隔离):
+//   - 非流式接口(authed 组)→ 全局 ExecPoolMiddleware,经 core.ExecPool 执行,
+//     池有界队列满时 SubmitCtx 阻塞 → 自然背压;
+//   - 流式接口(streamAuthed 组 + 公开分享下载)→ 不经过执行池,handler 原地执行,
+//     仅挂 StreamingPoolMiddleware 做准入令牌控制,防止慢流占满 ExecPool worker
+//     挤占短请求(修复:原先全局挂载使慢下载仍占用执行池 worker)。
 func Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
@@ -43,17 +50,23 @@ func Router() *gin.Engine {
 
 	// 公开路由组(无需鉴权):
 	pub := r.Group("/api/v1")
-	// 鉴权路由组:登录校验在各路由上显式挂载,避免每个请求重复验两次 JWT。
+	// 鉴权路由组:非流式接口经执行池(池满背压);流式接口单独分组,不占执行池。
 	authed := r.Group("/api/v1")
+	authed.Use(ExecPoolMiddleware)
+	// 流式接口组(下载/预览/流媒体/批量下载):handler 原地执行,
+	// 仅由各路由上的 StreamingPoolMiddleware 做准入令牌控制。
+	streamAuthed := r.Group("/api/v1")
 
 	// 各模块路由注册(路由清单见对应 router_*.go):
 	AuthRouter(pub, authed)
 	UserRouter(authed)
 	GroupRouter(authed)
 	BucketRouter(authed)
-	FileRouter(authed)
+	FileRouter(authed, streamAuthed)
 	ShareRouter(pub, authed)
 	DownloadRouter(authed)
+	// pprof 管理接口(管理员,按需采样):走 streamAuthed 组,不占执行池
+	PprofRouter(streamAuthed)
 	return r
 }
 

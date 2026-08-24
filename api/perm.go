@@ -11,7 +11,7 @@ import (
 )
 
 // canAccess 权限等级判定(数值越小权限越高):userPerm <= needPerm 即可访问。
-func canAccess(userPerm, needPerm int8) bool { return userPerm <= needPerm }
+func canAccess(userPerm, needPerm model.PermissionLevel) bool { return userPerm <= needPerm }
 
 // permUserActive 校验用户存在且状态正常(Status==1),返回用户供后续判定复用。
 func permUserActive(ctx context.Context, userID uint) (*model.User, error) {
@@ -57,7 +57,7 @@ func ensurePermUser(ctx context.Context, userID uint, user **model.User) (*model
 }
 
 // permItemAccessWith 条目级可见性判定(带用户/组成员懒加载缓存):
-// 空可见组不限制;上传者本人或管理员(权限<=1)可见;其余按 server.ItemVisibleRule 判定。
+// 空可见组不限制;管理员(IsAdmin)可见;其余按 server.ItemVisibleRule 判定。
 func permItemAccessWith(ctx context.Context, userID uint, user **model.User, groups *[]uint, visibleToGroups string, uploadedBy uint) error {
 	if strings.TrimSpace(visibleToGroups) == "" {
 		return nil // 空 = 不限制
@@ -66,10 +66,7 @@ func permItemAccessWith(ctx context.Context, userID uint, user **model.User, gro
 	if err != nil {
 		return err
 	}
-	if uploadedBy == userID {
-		return nil
-	}
-	if u.PermissionLevel <= 1 {
+	if u.PermissionLevel.IsAdmin() {
 		return nil // 管理员可见一切(含受限条目)
 	}
 	// 组内成员判定(懒加载,一次查询)
@@ -106,7 +103,7 @@ func permAncestorsAccessWith(ctx context.Context, userID uint, user **model.User
 	return nil
 }
 
-// permOwnerOrAdmin 归属校验:userID 为 ownerID 或操作者为管理员(权限 <= 1)时通过。
+// permOwnerOrAdmin 归属校验:userID 为 ownerID 或操作者为管理员(IsAdmin)时通过。
 func permOwnerOrAdmin(ctx context.Context, userID, ownerID uint) error {
 	if userID == ownerID {
 		return nil
@@ -115,14 +112,16 @@ func permOwnerOrAdmin(ctx context.Context, userID, ownerID uint) error {
 	if err != nil {
 		return err
 	}
-	if user.PermissionLevel <= 1 {
+	if user.PermissionLevel.IsAdmin() {
 		return nil // 管理员放行
 	}
 	return server.ErrForbidden
 }
 
 // permCanManageBucket 桶管理权限(UpdateBucket/DeleteBucket 共用):
-// owner 直接通过;管理员(权限<=1)可代管任意桶;其余要求操作者权限不高于 owner。
+// owner 直接通过;管理员(IsAdmin)可代管任意桶;
+// 其余按桶管理等级判定:管理等级 <= 0 视为跟随访问等级。
+// 只要满足权限要求即可管理,不依赖 owner 是否仍存在。
 func permCanManageBucket(ctx context.Context, operatorID uint, bucket *model.Bucket) error {
 	if bucket.OwnerID == operatorID {
 		return nil
@@ -131,26 +130,26 @@ func permCanManageBucket(ctx context.Context, operatorID uint, bucket *model.Buc
 	if err != nil {
 		return err
 	}
-	if op.PermissionLevel <= 1 {
+	if op.PermissionLevel.IsAdmin() {
 		return nil // 管理员无视 owner/桶权限,直接代管
 	}
-	owner, err := server.GetUser(ctx, server.GetUserArg{ID: bucket.OwnerID})
-	if err != nil {
-		return err // owner 已被删除 → 非管理员无法操作其桶
+	need := bucket.ManagePermissionLevel
+	if need <= model.SuperAdmin {
+		need = bucket.PermissionLevel // 0 = 跟随访问等级(兼容旧数据)
 	}
-	if op.PermissionLevel > owner.PermissionLevel {
-		return server.ErrForbidden // 权限低于 owner,不可代管
+	if !canAccess(op.PermissionLevel, need) {
+		return server.ErrForbidden // 权限不足
 	}
 	return nil
 }
 
-// permGroupVisible 组成员可见性:管理员(权限<=1)或本人为组内成员时通过。
+// permGroupVisible 组成员可见性:管理员(IsAdmin)或本人为组内成员时通过。
 func permGroupVisible(ctx context.Context, userID, groupID uint) error {
 	user, err := permUserActive(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if user.PermissionLevel <= 1 {
+	if user.PermissionLevel.IsAdmin() {
 		return nil // 管理员可见一切组
 	}
 	groups, err := server.UserGroupIDs(ctx, server.UserGroupIDsArg{UserID: userID})

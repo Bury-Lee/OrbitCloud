@@ -1,8 +1,8 @@
-﻿package cron
+package cron
 
 // Package cron 定时任务:周期清理过期数据(日志/刷新令牌/分享/下载任务),
 // 并周期续跑删除/复制任务表(扫描任务表 → 委托 server.ProcessDeleteTask /
-// server.ProcessCopyFolderTask,单任务内任务级锁保证并发安全)。
+// server.ProcessCopyTask,单任务内任务级锁保证并发安全)。
 
 import (
 	"context"
