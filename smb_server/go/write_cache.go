@@ -170,7 +170,7 @@ func (c *WriteBackCache) FlushToStorage(ctx context.Context, st core.ObjectStora
 	if err := st.Put(ctx, bucket, key, bytes.NewReader(buf.Bytes()), int64(buf.Len())); err != nil { // 整体覆盖对象
 		return err // 失败上抛(段表保留,可重试)
 	}
-	log.Infof("smb_gateway: 写回冲刷 桶=%s 键=%s 共=%d 字节(%d 段,截断=%d)", bucket, key, buf.Len(), len(segments), spec.truncateAt) // 记录整体冲刷(桶/键/大小/段数/截断点)
+	log.Debugf("smb_gateway: 写回冲刷 桶=%s 键=%s 共=%d 字节(%d 段,截断=%d)", bucket, key, buf.Len(), len(segments), spec.truncateAt) // 记录整体冲刷(桶/键/大小/段数/截断点)
 	// 成功:清段表与脏标记。
 	c.mu.Lock() // 锁段表
 	c.ranges = nil // 清段表

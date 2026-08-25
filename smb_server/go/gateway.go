@@ -111,7 +111,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 		return fmt.Errorf("smb_gateway: listen %s: %w", g.listenAddr, err) // 绑定失败:带地址报错
 	}
 	defer listener.Close() // 退出时关闭监听器
-	log.Infof("smb_gateway: 正在监听 %s", g.listenAddr) // 记录监听地址
+	log.Debugf("smb_gateway: 正在监听 %s", g.listenAddr) // 记录监听地址
 
 	// 连接计数:用于等待所有处理协程退出(优雅停机)。
 	var wg sync.WaitGroup // 等待组:统计每个连接处理协程
@@ -183,7 +183,7 @@ func (g *Gateway) handleConn(ctx context.Context, conn net.Conn) error {
 	ctx = context.WithValue(ctx, connIDKey{}, connID) // 把连接 ID 塞入上下文(句柄归属判定)
 	connCtx, cancel := context.WithCancel(ctx) // 本连接子上下文(停机时取消)
 	defer cancel() // 连接结束时取消心跳等子协程
-	log.Infof("smb_gateway: 连接 %s 建立(连接ID=%d)", conn.RemoteAddr(), connID) // 记录新连接建立
+	log.Debugf("smb_gateway: 连接 %s 建立(连接ID=%d)", conn.RemoteAddr(), connID) // 记录新连接建立
 
 	// ---- 1. 握手阶段超时(防慢速攻击) ----
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil { // 10s 握手超时
@@ -193,7 +193,7 @@ func (g *Gateway) handleConn(ctx context.Context, conn net.Conn) error {
 	if err := g.handshake(conn); err != nil { // 共享密钥挑战应答
 		return fmt.Errorf("handshake: %w", err) // 鉴权失败:上层记录后关闭
 	}
-	log.Infof("smb_gateway: 连接 %s 握手成功(连接ID=%d)", conn.RemoteAddr(), connID) // 记录握手通过
+	log.Debugf("smb_gateway: 连接 %s 握手成功(连接ID=%d)", conn.RemoteAddr(), connID) // 记录握手通过
 	// ---- 3. 握手完成:清除截止时间(进入正常读写),注册连接 + 心跳 ----
 	if err := conn.SetDeadline(time.Time{}); err != nil { // 清除握手超时(零值 = 无截止)
 		return err
@@ -379,7 +379,7 @@ func (g *Gateway) pushToAll(entry AclEntry) {
 		conns = append(conns, c)
 	}
 	g.mu.Unlock() // 尽快解锁
-	log.Infof("smb_gateway: 推送 操作=%s 类型=%s 广播到 %d 个连接", entry.Op, entry.Kind, len(conns)) // 记录推送广播(操作/类型/连接数)
+	log.Debugf("smb_gateway: 推送 操作=%s 类型=%s 广播到 %d 个连接", entry.Op, entry.Kind, len(conns)) // 记录推送广播(操作/类型/连接数)
 
 	for _, c := range conns { // 逐个连接推送
 		// 单向推送:seq=0,不需要响应。

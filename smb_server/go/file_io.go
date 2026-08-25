@@ -136,7 +136,7 @@ func (f *FileOpsService) readInner(ctx context.Context, h *remoteHandle, offset 
 	if int64(len(out)) > int64(length) { // 超长保护(理论不会)?
 		out = out[:length] // 裁剪到请求长度
 	}
-	log.Infof("smb_gateway: 读取 句柄=%d 偏移=%d 期望=%d 实得=%d", h.handleID, offset, length, len(out)) // 记录读请求(句柄/偏移/期望/实得)
+	log.Debugf("smb_gateway: 读取 句柄=%d 偏移=%d 期望=%d 实得=%d", h.handleID, offset, length, len(out)) // 记录读请求(句柄/偏移/期望/实得)
 	return out, nil // 返回拼装结果
 }
 
@@ -173,7 +173,7 @@ func (f *FileOpsService) Write(ctx context.Context, handleID uint64, offset uint
 		}
 		h.truncateAt = -1 // 截断已随冲刷固化
 	}
-	log.Infof("smb_gateway: 写入 句柄=%d 偏移=%d 长度=%d(缓存=%d 字节)", h.handleID, offset, len(data), total) // 记录写请求(句柄/偏移/长度/缓存总量)
+	log.Debugf("smb_gateway: 写入 句柄=%d 偏移=%d 长度=%d(缓存=%d 字节)", h.handleID, offset, len(data), total) // 记录写请求(句柄/偏移/长度/缓存总量)
 	return uint32(len(data)), nil // 实际写入 = 入缓存长度
 }
 
@@ -205,7 +205,7 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 		return err // 上传失败上抛
 	}
 	h.truncateAt = -1 // 截断已固化到对象,复位
-	log.Infof("smb_gateway: 冲刷句柄=%d 已上传 大小=%d", h.handleID, h.size) // 记录冲刷成功(句柄/大小)
+	log.Debugf("smb_gateway: 冲刷句柄=%d 已上传 大小=%d", h.handleID, h.size) // 记录冲刷成功(句柄/大小)
 	return f.syncFileMeta(ctx, h) // 同步元数据(大小 + 桶用量)
 }
 
@@ -286,7 +286,7 @@ func (f *FileOpsService) Stat(ctx context.Context, handleID uint64) (*FileInfo, 
 		h.mu.Unlock() // 解锁
 	}
 	us := uint64(size) // 转无符号
-	log.Infof("smb_gateway: 查询信息 句柄=%d → 名称=%q 大小=%d 目录=%v", h.handleID, file.Name, us, false) // 记录元信息结果
+	log.Debugf("smb_gateway: 查询信息 句柄=%d → 名称=%q 大小=%d 目录=%v", h.handleID, file.Name, us, false) // 记录元信息结果
 	return &FileInfo{ // 组装文件 FileInfo
 		Name:           file.Name, // 文件名
 		EndOfFile:      us, // 文件大小
@@ -340,6 +340,6 @@ func (f *FileOpsService) Truncate(ctx context.Context, handleID uint64, length u
 	if h.writeCache == nil { // 无缓存?
 		h.writeCache = NewWriteBackCache() // 补建(截断冲刷需要)
 	}
-	log.Infof("smb_gateway: 截断 句柄=%d 长度=%d", h.handleID, length) // 记录截断(句柄/目标长度)
+	log.Debugf("smb_gateway: 截断 句柄=%d 长度=%d", h.handleID, length) // 记录截断(句柄/目标长度)
 	return nil
 }

@@ -44,7 +44,7 @@ func (r *HandleRegistry) Alloc(h *remoteHandle) uint64 {
 	r.nextID++ // 自增(单调,永不回用)
 	h.handleID = id // 回填句柄 ID
 	r.handles[id] = h // 登记
-	log.Infof("smb_gateway: 分配句柄 id=%d 路径=%q 目录=%v 连接=%d(共=%d)", id, h.smbPath, h.isDir, h.connID, len(r.handles)) // 记录句柄分配(ID/路径/类型/连接/总数)
+	log.Debugf("smb_gateway: 分配句柄 id=%d 路径=%q 目录=%v 连接=%d(共=%d)", id, h.smbPath, h.isDir, h.connID, len(r.handles)) // 记录句柄分配(ID/路径/类型/连接/总数)
 	return id // 返回新 ID
 }
 
@@ -61,7 +61,7 @@ func (r *HandleRegistry) Delete(id uint64) {
 	r.mu.Lock() // 写锁
 	defer r.mu.Unlock() // 解锁
 	delete(r.handles, id) // 移除登记
-	log.Infof("smb_gateway: 注销句柄 id=%d(剩余=%d)", id, len(r.handles)) // 记录句柄注销(剩余总数)
+	log.Debugf("smb_gateway: 注销句柄 id=%d(剩余=%d)", id, len(r.handles)) // 记录句柄注销(剩余总数)
 }
 
 // All 返回全部句柄快照(断连批量回收用,见 file_dir.go CloseAllByConn)。

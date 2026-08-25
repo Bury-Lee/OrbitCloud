@@ -99,7 +99,7 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeBadRequest, Message: err.Error()}) // 序列化坏请求错误
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 		}
-		log.Infof("smb_gateway: 请求 seq=%d 操作=%s 流=%d 字节", hdr.Seq, codeName(req.Code), len(stream)) // 记录请求(操作码/流段大小)
+		log.Debugf("smb_gateway: 请求 seq=%d 操作=%s 流=%d 字节", hdr.Seq, codeName(req.Code), len(stream)) // 记录请求(操作码/流段大小)
 		// 文件类操作:先解析操作者身份(userId → 用户信息,ristretto 60s 缓存),
 		// 注入 ctx 供 Handler 审查/落库;身份无效 → AccessDenied。
 		if isFileOpCode(req.Code) {
@@ -120,9 +120,9 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 		}
 		if resp != nil && resp.Err != nil { // 业务错误?
-			log.Infof("smb_gateway: 处理 seq=%d 操作=%s 错误码=%d 消息=%s", hdr.Seq, codeName(req.Code), resp.Err.Code, resp.Err.Message) // 记录业务错误(排查用)
+			log.Debugf("smb_gateway: 处理 seq=%d 操作=%s 错误码=%d 消息=%s", hdr.Seq, codeName(req.Code), resp.Err.Code, resp.Err.Message) // 记录业务错误(排查用)
 		} else {
-			log.Infof("smb_gateway: 响应 seq=%d 操作=%s 成功 输出流=%d 字节 耗时=%s", hdr.Seq, codeName(req.Code), len(streamOut), time.Since(start)) // 记录成功响应与耗时
+			log.Debugf("smb_gateway: 响应 seq=%d 操作=%s 成功 输出流=%d 字节 耗时=%s", hdr.Seq, codeName(req.Code), len(streamOut), time.Since(start)) // 记录成功响应与耗时
 		}
 		// ---- d. 组装响应 body(JSON + Read 流数据段) ----
 		respBody, err := marshalOperateBody(resp, streamOut) // [jsonLen]+JSON+流段

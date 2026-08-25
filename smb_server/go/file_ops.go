@@ -472,7 +472,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	if args.Write { // 请求写权限?
 		h.writeCache = NewWriteBackCache() // 附带写回缓存(随机写合并)
 	}
-	log.Infof("smb_gateway: 打开成功 共享=%q 路径=%q 意图=%s → 句柄=%d 文件=%d 目录=%v 大小=%d 已存在=%v", share.ShareName, path, args.Intent, h.handleID, fileID, h.isDir, size, exists) // 记录打开成功(共享/路径/意图/句柄)
+	log.Debugf("smb_gateway: 打开成功 共享=%q 路径=%q 意图=%s → 句柄=%d 文件=%d 目录=%v 大小=%d 已存在=%v", share.ShareName, path, args.Intent, h.handleID, fileID, h.isDir, size, exists) // 记录打开成功(共享/路径/意图/句柄)
 	return &OpenResult{ // 返回打开结果
 		HandleID:  f.handles.Alloc(h), // 登记句柄并取 ID
 		EndOfFile: uint64(size), // 文件大小(stat 预取)

@@ -74,7 +74,7 @@ func (a *AuthService) QueryUser(ctx context.Context, username string) (*UserCred
 		return nil, nil // 禁用账号按不存在处理(认证方 LOGON_FAILURE)
 	}
 	cred := userCredFrom(&u) // 行 → UserCred
-	log.Infof("smb_gateway: 认证查询用户 %q 命中(权限=%d)", username, cred.PermissionLevel) // 记录查询命中(含权限级别)
+	log.Debugf("smb_gateway: 认证查询用户 %q 命中(权限=%d)", username, cred.PermissionLevel) // 记录查询命中(含权限级别)
 	return cred, nil
 }
 
@@ -239,12 +239,12 @@ func (a *AuthService) WatchAndPush(ctx context.Context) {
 			// 文件/文件夹变更检测:指纹(count + max updated_at)变化 →
 			// 推送 dir 通知(Rust 侧完成挂起的 CHANGE_NOTIFY,客户端重枚举)。
 			if a.dirFingerprintChanged(ctx) { // 文件/文件夹表有变更?
-				log.Infof("smb_gateway: 目录指纹变化,通知目录") // 记录目录变更通知
+				log.Debugf("smb_gateway: 目录指纹变化,通知目录") // 记录目录变更通知
 				push(AclEntry{Op: "notify", Kind: "dir"}) // 推送目录变更通知
 			}
 			// 首次:全量 upsert
 			if last == nil { // 首次运行?
-				log.Infof("smb_gateway: 监听首次运行,推送全量快照(%d 用户,%d 共享)", len(snap.Users), len(snap.Shares)) // 记录全量推送
+				log.Debugf("smb_gateway: 监听首次运行,推送全量快照(%d 用户,%d 共享)", len(snap.Users), len(snap.Shares)) // 记录全量推送
 				for i := range snap.Users { // 全量推送用户
 					push(AclEntry{Op: "upsert", Kind: "user", User: &snap.Users[i]}) // 逐条 upsert(幂等)
 				}
@@ -301,7 +301,7 @@ func (a *AuthService) WatchAndPush(ctx context.Context) {
 				}
 			}
 			if userUp+userDel+shareUp+shareDel > 0 { // 本轮有变更?
-				log.Infof("smb_gateway: 监听差异:用户 +%d -%d,共享 +%d -%d", userUp, userDel, shareUp, shareDel) // 记录本轮差异汇总
+				log.Debugf("smb_gateway: 监听差异:用户 +%d -%d,共享 +%d -%d", userUp, userDel, shareUp, shareDel) // 记录本轮差异汇总
 			}
 			last = snap // 记录本轮快照为下轮基准
 		}

@@ -202,7 +202,7 @@ func resolveSession(ctx context.Context, userID uint) (*SessionInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Infof("smb_gateway: 身份解析 userId=%d user=%q(权限=%d)", info.UserID, info.Username, info.PermissionLevel)
+	log.Debugf("smb_gateway: 身份解析 userId=%d user=%q(权限=%d)", info.UserID, info.Username, info.PermissionLevel)
 	return info, nil
 }
 

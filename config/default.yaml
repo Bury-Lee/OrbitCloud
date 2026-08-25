@@ -291,9 +291,11 @@ smb_gateway:
 # 9. 日志
 # ------------------------------------------------------------
 log:
-  # 日志级别
+  # 日志级别(覆盖 Go 侧全部组件,含 SMB 网关组件 smb_server/go)
   # 取值: debug | info | warn | error
-  level: info
+  # SMB 调试:统一 debug 便于链路排查(网关推送/认证/文件操作全量输出);
+  # 演示/压测期间日志量大,建议事后改回 info。
+  level: debug
 
   # 输出格式
   # 取值: json | text; 生产建议 json(便于采集解析)

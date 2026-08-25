@@ -70,7 +70,7 @@ func BuildGateway(cfg config.SmbGatewayConfig) (*Gateway, error) {
 	// 4. 网关实例(认证服务与网关绑定:变更推送直连 pushToAll)。
 	gw := NewGateway(cfg.ListenAddr, key, pool, auth, files) // 构造网关
 	auth.SetPushFunc(gw.pushToAll) // 注入推送函数(DB 变更 → 广播)
-	log.Infof("smb_gateway: 网关已装配 监听=%s 池=%d/%d 静态密钥=%v", cfg.ListenAddr, cfg.MaxConcurrent, cfg.ChannelBuffer, len(key) > 0) // 记录装配结果(监听/并发/队列/是否静态密钥)
+	log.Debugf("smb_gateway: 网关已装配 监听=%s 池=%d/%d 静态密钥=%v", cfg.ListenAddr, cfg.MaxConcurrent, cfg.ChannelBuffer, len(key) > 0) // 记录装配结果(监听/并发/队列/是否静态密钥)
 	return gw, nil // 返回装配完成的网关
 }
 

@@ -340,6 +340,6 @@ func wrapErrResp(code OperateCode, err error) *OperateResponse {
 	case errors.Is(err, server.ErrInvalidInput): // 输入非法
 		c = ErrCodeBadRequest // 映射:请求不合法
 	}
-	log.Infof("smb_gateway: 操作=%s 错误码=%d(%s)", codeName(code), c, msg) // 记录错误映射(操作/哨兵码/描述)
+	log.Debugf("smb_gateway: 操作=%s 错误码=%d(%s)", codeName(code), c, msg) // 记录错误映射(操作/哨兵码/描述)
 	return &OperateResponse{Code: code, Err: &ErrorEnvelope{Code: c, Message: msg}} // 组装错误响应(Code 回显)
 }
