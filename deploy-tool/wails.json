@@ -1,0 +1,16 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "OrbitCloudDeployTool",
+  "outputfilename": "OrbitCloudDeployTool",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "OrbitCloud"
+  },
+  "info": {
+    "productName": "OrbitCloud 部署运维工具",
+    "productVersion": "0.1.0"
+  }
+}

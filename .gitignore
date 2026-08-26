@@ -28,3 +28,11 @@ other_software/
 .VSCodeCounter/
 tem/
 dist/
+docker/
+# 部署运维工具产物
+OrbitCloudDeployTool.exe
+config.json
+deploy-tool/build/
+deploy-tool/frontend/dist/
+deploy-tool/frontend/wailsjs/
+deploy-tool/frontend/node_modules/

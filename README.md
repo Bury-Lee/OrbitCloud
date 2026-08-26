@@ -1,205 +1,232 @@
 # OrbitCloud
 
-OrbitCloud 是一个基于 **Go + Vue3** 的分布式网盘系统:元数据由 GORM 管理(SQLite 开发 / PostgreSQL 生产,支持读写分离),文件数据通过 **S3 协议** 写入对象存储(兼容 RustFS / MinIO 等),支持用户与权限、用户组、存储桶、目录树、文件管理、分享、批量操作与浏览器在线预览。
+> English | [简体中文](docs/README.zh.md)
 
-## 功能特性
+OrbitCloud is a **Go + Vue3** distributed cloud drive: metadata is managed by GORM (SQLite for dev / PostgreSQL for production, with read-write splitting), file data is written to object storage via the **S3 protocol** (compatible with RustFS / MinIO, etc.). It supports users & permissions, user groups, buckets, a directory tree, file management, sharing, batch operations, in-browser preview, and an **SMB gateway** (mount directly in Windows Explorer).
 
-- **账号与权限**:JWT 双令牌 + 刷新令牌轮换;注册/用户管理;分级权限模型(0 超级管理员 / 1 管理员 / 2 特殊用户预留 / 3 普通用户,可扩展);用户组 + 条目级可见性 ACL
-- **存储与文件**:桶管理;目录树模型(mkdir -p 自动建父链);上传/批量上传/流式下载/在线预览/重命名/移动/复制/删除;后台任务处理文件夹级联删除与复制(支持崩溃续跑);批量操作(≤100 条,逐条独立处理);桶容量配额;对象存储双驱动(`s3` / `local`)
-- **分享**:限时 / 限次 / 提取码,支持文件与文件夹
-- **平台能力**:配置驱动(内置 embed 默认配置);GORM AutoMigrate 自动建表;读写分离(dbresolver);日志轮转 + 可选入库;定时清理任务;全局协程池;优雅停机;命令行指令(`-initConfig` / `--add-superadmin` / `--version` / `--help`)
+## Features
 
-## 技术栈
+- **Accounts & Permissions**: JWT dual-token with refresh-token rotation; registration / user management; tiered permission model (0 super admin / 1 admin / 2 reserved / 3 normal user, extensible); user groups + item-level visibility ACL
+- **Storage & Files**: bucket management; directory tree (mkdir -p auto-creates parent chain); upload / batch upload / streaming download / online preview / rename / move / copy / delete; background tasks for cascading folder delete & copy (crash-resumable); batch operations (≤100 items, processed independently); bucket quota; dual object-storage drivers (`s3` / `local`)
+- **Sharing**: time-limited / count-limited / extraction-code shares, for files and folders
+- **SMB Access**: Rust SMB gateway (445) over a private frame protocol; share name = bucket name; mountable via Windows Explorer / `net use` / Linux cifs
+- **Platform**: config-driven (embedded default config); GORM AutoMigrate; read-write splitting (dbresolver); log rotation with optional DB persistence; scheduled cleanup tasks; global goroutine pool; graceful shutdown; CLI commands (`-initConfig` / `--add-superadmin` / `--version` / `--help`)
 
-| 层 | 选型 |
+## Tech Stack
+
+| Layer | Choice |
 |---|---|
-| 语言 | Go 1.25+ |
+| Language | Go 1.25+ / Rust 1.95+ (SMB gateway) |
 | HTTP | gin |
 | JWT | golang-jwt/jwt/v5 |
 | ORM | gorm + dbresolver |
-| 数据库 | SQLite(开发)/ PostgreSQL(生产) |
-| 对象存储 | minio-go/v7(S3)或本地目录驱动 |
-| 前端 | Vue 3 + Vite + TS + Element Plus + Pinia |
+| Database | SQLite (dev) / PostgreSQL (prod) |
+| Object storage | minio-go/v7 (S3) or local directory driver |
+| SMB | ixr-smb-server (Rust) |
+| Frontend | Vue 3 + Vite + TS + Element Plus + Pinia |
 
-## 文档
+## Quick Start (Recommended: Docker Compose with Prebuilt Binaries)
 
-| 文档 | 内容 |
-|---|---|
-| [部署指南](docs/部署指南.md) | 快速开始 / 生产部署(Linux systemd、Windows NSSM、Docker)/ 对象存储 / Nginx / 运维 |
-| [配置参考](docs/配置参考.md) | `config.yaml` 全字段说明、环境变量覆盖、生产最小改动清单 |
-| [API 参考](docs/API参考.md) | 全部端点、请求/响应示例、错误码与鉴权要点 |
-| [架构设计](docs/架构设计.md) | 分层、数据模型、权限模型、存储设计、关键流程 |
-| [构建与发布](docs/构建与发布.md) | 三系统交叉编译脚本用法、打包、版本管理 |
-| [开发指南](docs/开发指南.md) | 环境准备、分层铁律、新增 API 流程、测试与提交规范 |
+> The repo ships containerized deployment based on **prebuilt binaries** — no source build required; the full stack (backend + SMB gateway + RustFS + frontend) is up in minutes.
 
-## 构建(一键三系统)
+```powershell
+# 1. Prepare: copy binaries into build contexts + generate random-key configs (see docker/README.md)
+powershell -ExecutionPolicy Bypass -File docker\prep.ps1
 
-Windows 下执行(详见 [构建与发布](docs/构建与发布.md)),交叉编译 **Windows / Linux / macOS** 三平台二进制,产物在 `build/dist/`:
+# 2. Build and start
+docker compose -f docker\docker-compose.yml up -d --build
 
-```bat
-rem 默认:三系统 × amd64/arm64 后端
-build\build.bat
-rem 同步构建 Vue 前端(附带至各包 web/)
-build\build.bat -Frontend
-rem 完整发布:构建前端并打 zip/tar.gz 包
-build\build.bat -Frontend -Package
+# 3. Create the super admin (first run only)
+docker compose -f docker\docker-compose.yml exec orbitcloud /usr/local/bin/orbitcloud --add-superadmin admin <password≥8>
+
+# 4. Access
+#    Web   : http://127.0.0.1:18080
+#    API   : http://127.0.0.1:8080/api/v1
+#    SMB   : \\127.0.0.1\<bucket-name>(port from docker\.env PORT_SMB, default 1445)
 ```
 
-Linux / macOS 对等脚本:`./build/build.sh --frontend --package`。
+See [docker/README.md](docker/README.md) for architecture, keys, volumes, ops commands and known constraints.
 
-## 快速开始(本地开发)
+## Deployment Options
 
-环境要求:Go ≥ 1.25(零 CGO 可构建)、Node.js ≥ 18(前端,可选)。
+| Option | Description | Best for |
+|---|---|---|
+| **Docker Compose (binaries)** | No build; 4 containers, one command | Quick trial / private delivery |
+| systemd manual deploy | Traditional Linux deployment (backend + RustFS + SMB + Nginx) | Single production server |
+| Deploy Tool | Single-window desktop: audit → precheck → generate deterministic deploy scripts | Operations staff |
+
+### systemd (manual)
 
 ```bash
-go build -o orbitcloud .
-
-./orbitcloud -initConfig                    # 首次:生成 ./config.yaml(内置默认配置)
-./orbitcloud --add-superadmin admin <your-password>  # 创建超级管理员(仅一次)
-./orbitcloud                                # 默认监听 0.0.0.0:8080
+# Prepare Go ≥1.25 toolchain on the server, or use prebuilt dist/ binaries directly:
+sudo bash deploy/deploy.sh --superadmin admin <password>
+# Frontend (needs Nginx + Node): deploy/deploy.sh --only-frontend
 ```
 
-未启动对象存储时,修改 `config.yaml` 使用本地驱动即可跑通全流程:
+### Deploy Tool (deploy-tool)
 
-```yaml
-storage:
-  driver: local        # 对象直接写本地目录
-```
+`OrbitCloudDeployTool.exe` is a standalone single-window desktop tool (Go + WebView2, ~12MB, no install):
 
-启动前端(可选):
+- **Audit** (read-only): environment / services / ports / cross-side config consistency (shared_key, jwt.secret, log level, storage driver); auto-produces warnings and suggestions (checkable as todos)
+- **Precheck**: disk / toolchains / directories / health as PASS/WARN; **LSP-style live precheck** — edits debounce-triggered checks automatically
+- **Script generation**: parameterized form (dropdowns/inputs/toggles) → validation of inappropriate values (error blocks / warn hints) → deterministic `.sh` output (keys auto-generated and embedded; fully previewable / copyable / saveable)
+- **Native SSH**: built-in SSH channel (credentials compatible with sshbox.json), no external programs; deploy scripts embedded in the binary — fully self-contained
+
+See [deploy-tool/README.md](deploy-tool/README.md).
+
+## Documentation
+
+| Doc | Content |
+|---|---|
+| [Deployment Guide](docs/部署指南.md) | Quick start / production deploy (Linux systemd, Windows NSSM, Docker) / object storage / Nginx / ops |
+| [Deployment & Windows Mount Manual](docs/部署与Windows挂载手册.md) | One-click server deploy + Windows Explorer SMB mount walkthrough |
+| [Configuration Reference](docs/配置参考.md) | Full `OrbitCloud.yaml` fields, env-var overrides, minimal production changes |
+| [API Reference](docs/API参考.md) | All endpoints, request/response examples, error codes, auth notes |
+| [Architecture](docs/架构设计.md) | Layers, data model, permission model, storage design, key flows |
+| [Build & Release](docs/构建与发布.md) | Cross-compile scripts, packaging, versioning |
+| [Development Guide](docs/开发指南.md) | Environment setup, layering rules, adding an API, testing & commit conventions |
+
+## Build (Three Platforms in One Command)
+
+| Platform | Script | Output |
+|---|---|---|
+| Linux / macOS / WSL | `bash build/build.sh --all --frontend` | `build/dist/` |
+| Any (Git Bash) | See [Build & Release](docs/构建与发布.md) | — |
+
+Or use the **prebuilt artifacts** in `dist/` at the repo root: three-platform backend, two-platform SMB gateway, frontend `web/`, with `sha256sums.txt` checksums.
 
 ```bash
-cd frontend
-npm install
-npm run dev             # http://localhost:5173,Vite 代理 /api → 127.0.0.1:8080
+# Build backend + SMB gateway + frontend for the current platform (needs Go/Rust/Node)
+./build/build.sh --all --frontend
 ```
 
-## 配置
+## CLI Commands
 
-配置固定从工作目录 `./config.yaml` 读取;缺失时自动用内置默认配置生成,`-initConfig` 可强制覆盖。**不做缺省值兜底**——配置缺失/非法即启动报错。敏感项建议环境变量注入:`ORBITCLOUD_JWT_SECRET` / `ORBITCLOUD_DB_DSN` / `ORBITCLOUD_S3_ACCESS_KEY` / `ORBITCLOUD_S3_SECRET_KEY`。
-
-## 命令行指令
-
-| 指令 | 说明 |
+| Command | Description |
 |---|---|
-| `orbitcloud` | 正常启动服务 |
-| `orbitcloud -initConfig` | 用内置默认配置强制覆盖生成 `./config.yaml` 后退出 |
-| `orbitcloud --add-superadmin <username> <password>` | 创建权限 0 超级管理员后退出(仅此通道可创建;密码 ≥8 位;不幂等) |
-| `orbitcloud --version` | 打印版本号后退出 |
-| `orbitcloud --help` / `-h` | 打印帮助后退出 |
+| `orbitcloud` | Start the service |
+| `orbitcloud -initConfig` | Force-generate `./OrbitCloud.yaml` from embedded defaults and exit |
+| `orbitcloud --add-superadmin <username> <password>` | Create level-0 super admin and exit (only way; password ≥8 chars; not idempotent) |
+| `orbitcloud --version` | Print version and exit |
+| `orbitcloud --help` / `-h` | Print help and exit |
 
-## 目录结构
-
-```
-├── main.go                 # 入口:配置→初始化→HTTP 服务→后台任务→优雅停机
-├── config/                 # 配置结构 + 内置默认配置(default.yaml, embed)
-├── appinit/                # 初始化程序(配置/日志/DB/JWT/存储/协程池)
-├── core/                   # 全局单例 + JWT 服务 + 对象存储抽象
-├── common/                 # 哨兵错误/统一响应/分页/路径与名校验
-├── model/                  # GORM 模型定义
-├── server/                 # 业务层(包级函数)
-├── api/                    # HTTP 层(路由/handler/中间件)
-├── cron/                   # 定时任务
-├── flag/                   # 命令行指令
-├── log/                    # 日志封装(轮转、可选入库)
-├── utils/                  # 桶名编码/采样 MD5/范围解析
-├── frontend/               # Vue3 前端工程
-├── build/                  # 构建脚本(Windows 一键三系统交叉编译,产物在 build/dist/)
-├── docs/                   # 文档(部署/配置/API/架构/构建/开发)
-└── vendor/                 # Go 依赖(提交)
-```
-
-## 分层约定
+## Directory Layout
 
 ```
-main(启动/优雅停机) → appinit(初始化) → core(全局单例)
-api(HTTP 接入层:鉴权/校验/错误映射)
-server(业务层:包级函数)
-model(GORM 模型)  common(哨兵错误/分页/校验)  utils(桶名编码/采样 MD5)
+├── main.go                 # Entry: config → init → HTTP → background tasks → graceful shutdown
+├── config/                 # Config structs + embedded defaults (OrbitCloud.yaml)
+├── appinit/                # Initializers (config/log/DB/JWT/storage/pool)
+├── core/                   # Global singletons + JWT service + object-storage abstraction
+├── common/                 # Sentinel errors / unified response / paging / validation
+├── model/                  # GORM models
+├── server/                 # Business layer (package-level functions)
+├── api/                    # HTTP layer (routes/handlers/middleware)
+├── cron/                   # Scheduled tasks
+├── flag/                   # CLI commands
+├── log/                    # Log wrapper (rotation, optional DB persistence)
+├── utils/                  # Bucket-name encoding / sampled MD5 / range parsing
+├── smb_server/             # SMB gateway (go/ embedded component + rust/ standalone gateway)
+├── frontend/               # Vue3 frontend
+├── build/                  # Build scripts (cross-compilation)
+├── deploy/                 # Deploy scripts (systemd)
+├── docker/                 # Docker Compose deployment with prebuilt binaries (incl. README)
+├── deploy-tool/            # Deploy ops tool (single-window desktop, Go + WebView2)
+├── dist/                   # Prebuilt artifacts (3-platform backend / gateways + frontend web/)
+├── docs/                   # Documentation
+└── tem/                    # Temporary research & external sources (e.g. sshbox)
 ```
 
-- `core` 是最底层基础设施:只存放全局单例,不 import 上层业务包
-- `server` 层为包级函数,函数内直接访问 `core` 单例
-- `api` 层纯无状态:只做参数解析/鉴权/调用 server,把哨兵错误映射为 HTTP 状态码与统一响应体 `{code, data, message}`
-- 对象键设计:文件实体在对象存储中的 key = 文件记录主键 ID,桶名 = `utils.BucketEncoder(桶ID)`(36 进制编码),不依赖文件名/路径
+## Layering Convention
 
-## API 概览
+```
+main(startup/shutdown) → appinit(init) → core(global singletons)
+api(HTTP layer: auth/validation/error mapping)
+server(business layer: package-level functions)
+model(GORM models)  common(sentinel errors/paging/validation)  utils(bucket encoding/sampled MD5)
+```
 
-统一前缀 `/api/v1`;响应格式:成功 `{code:0, data:{...}, message:"ok"}`,错误 `{code:-1, message:"..."}`。
+- `core` is the lowest-level infrastructure: only global singletons, never imports business packages
+- `server` exposes package-level functions that access `core` singletons directly
+- `api` is stateless: parses params, authenticates, calls server, maps sentinel errors to HTTP codes and the unified body `{code, data, message}`
+- Object keys: file record primary ID; bucket name = `utils.BucketEncoder(bucketID)` (base-36), independent of file names/paths
 
-### 认证与用户
+## API Overview
 
-| 方法 | 路径 | 鉴权 | 说明 |
+Unified prefix `/api/v1`; success: `{code:0, data:{...}, message:"ok"}`, error: `{code:-1, message:"..."}`.
+
+### Auth & Users
+
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/auth/login` | 公开 | 登录,返回 access/refresh token + user |
-| POST | `/auth/refresh` | 公开 | 刷新令牌(轮换:旧令牌即刻失效) |
-| POST | `/auth/register` | 管理员 | 注册用户(权限 0 不可经 API 创建) |
-| POST | `/auth/logout` | 登录 | 吊销刷新令牌 |
-| GET/PUT | `/users/me` | 登录 | 当前用户信息 / 改密码·名字·邮箱 |
-| GET | `/users` | 管理员 | 用户分页列表 |
-| PUT/DELETE | `/users/:id` | 管理员 | 改他人(权限/状态)/ 删除(软删) |
+| POST | `/auth/login` | public | Login, returns access/refresh tokens + user |
+| POST | `/auth/refresh` | public | Refresh token (rotating: old token invalidated) |
+| POST | `/auth/register` | admin | Register user (level 0 cannot be created via API) |
+| POST | `/auth/logout` | logged-in | Revoke refresh token |
+| GET/PUT | `/users/me` | logged-in | Current user info / change password·name·email |
+| GET | `/users` | admin | Paginated user list |
+| PUT/DELETE | `/users/:id` | admin | Modify others (level/status) / delete (soft) |
 
-### 用户组
+### User Groups
 
-| 方法 | 路径 | 鉴权 | 说明 |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/users/me/groups` | 登录 | 我的组 |
-| POST/GET | `/groups`、`/groups/:id` | 管理员 | 组 CRUD |
-| POST/DELETE | `/groups/:id/members`、`/groups/:id/members/:uid` | 管理员 | 添加 / 移除成员 |
+| GET | `/users/me/groups` | logged-in | My groups |
+| POST/GET | `/groups`、`/groups/:id` | admin | Group CRUD |
+| POST/DELETE | `/groups/:id/members`、`/groups/:id/members/:uid` | admin | Add / remove members |
 
-### 桶
+### Buckets
 
-| 方法 | 路径 | 鉴权 | 说明 |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| POST/GET | `/buckets` | 登录 | 创建 / 列表 |
-| GET | `/buckets/:id` | 登录 | 桶详情(含配额/已用) |
-| PUT/DELETE | `/buckets/:id` | 登录 | 修改 / 删除(后台任务级联清理) |
+| POST/GET | `/buckets` | logged-in | Create / list |
+| GET | `/buckets/:id` | logged-in | Bucket detail (quota/used) |
+| PUT/DELETE | `/buckets/:id` | logged-in | Update / delete (cascading background cleanup) |
 
-### 文件
+### Files
 
-| 方法 | 路径 | 鉴权 | 说明 |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/buckets/:id/files` | 登录 | 上传(multipart 字段 `file`) |
-| POST | `/buckets/:id/files/batch` | 登录 | 批量上传(字段 `files`) |
-| GET | `/buckets/:id/files` | 登录 | 列表(分页) |
-| GET | `/buckets/:id/files/:fid` / `/dirs/:fid` | 登录 | 文件 / 文件夹元数据 |
-| GET | `/buckets/:id/files/:fid/download` | 登录 | 下载(流式) |
-| GET | `/buckets/:id/files/:fid/preview` | 登录 | 在线预览 |
-| POST | `/buckets/:id/files/:fid/copy` | 登录 | 复制文件 |
-| POST | `/buckets/:id/files/:fid/move` | 登录 | 移动/重命名文件 |
-| POST | `/buckets/:id/dirs/:fid/move` | 登录 | 移动/重命名文件夹 |
-| DELETE | `/buckets/:id/files/:fid` | 登录 | 删除文件 |
-| POST | `/buckets/:id/dirs` | 登录 | 新建文件夹(mkdir -p 建父链) |
-| DELETE | `/buckets/:id/dirs/:fid` | 登录 | 删除文件夹(后台深度优先清理) |
-| POST | `/buckets/:id/dirs/:fid/copy` | 登录 | 复制文件夹(落 CopyTask 后台处理) |
-| POST | `/buckets/:id/items/batch-delete` / `batch-copy` / `batch-move` | 登录 | 批量操作(≤100 条) |
-| GET | `/buckets/:id/items/batch-download` | 登录 | 批量下载(zip) |
-| PUT | `/buckets/:id/files/:fid/visibility` / `/dirs/:fid/visibility` | 登录 | 设置条目可见组 |
+| POST | `/buckets/:id/files` | logged-in | Upload (multipart field `file`) |
+| POST | `/buckets/:id/files/batch` | logged-in | Batch upload (field `files`) |
+| GET | `/buckets/:id/files` | logged-in | List (paginated) |
+| GET | `/buckets/:id/files/:fid` / `/dirs/:fid` | logged-in | File / folder metadata |
+| GET | `/buckets/:id/files/:fid/download` | logged-in | Download (streaming) |
+| GET | `/buckets/:id/files/:fid/preview` | logged-in | Online preview |
+| POST | `/buckets/:id/files/:fid/copy` | logged-in | Copy file |
+| POST | `/buckets/:id/files/:fid/move` | logged-in | Move/rename file |
+| POST | `/buckets/:id/dirs/:fid/move` | logged-in | Move/rename folder |
+| DELETE | `/buckets/:id/files/:fid` | logged-in | Delete file |
+| POST | `/buckets/:id/dirs` | logged-in | Create folder (mkdir -p) |
+| DELETE | `/buckets/:id/dirs/:fid` | logged-in | Delete folder (background DFS cleanup) |
+| POST | `/buckets/:id/dirs/:fid/copy` | logged-in | Copy folder (background CopyTask) |
+| POST | `/buckets/:id/items/batch-delete` / `batch-copy` / `batch-move` | logged-in | Batch operations (≤100) |
+| GET | `/buckets/:id/items/batch-download` | logged-in | Batch download (zip) |
+| PUT | `/buckets/:id/files/:fid/visibility` / `/dirs/:fid/visibility` | logged-in | Set item visibility groups |
 
-### 分享
+### Shares
 
-| 方法 | 路径 | 鉴权 | 说明 |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/share/:token` | 公开 | 分享解析 / 下载(提取码走请求参数) |
-| POST/GET | `/shares` | 登录 | 创建 / 列表 |
-| PUT/DELETE | `/shares/:id` | 登录 | 修改 / 删除(仅创建者) |
+| GET | `/share/:token` | public | Resolve / download share (extraction code via query param) |
+| POST/GET | `/shares` | logged-in | Create / list |
+| PUT/DELETE | `/shares/:id` | logged-in | Update / delete (creator only) |
 
-## 权限模型
+## Permission Model
 
-- `PermissionLevel` 数值越小权限越高;已定义 0 = 超级管理员、1 = 管理员、2 = 特殊用户(预留)、3 = 普通用户,可在 0~9 区间按需扩展更多档位
-- 管理员判定统一为 `PermissionLevel.IsAdmin()`(即 0 / 1)
-- 权限 0 只能经命令行 `--add-superadmin` 创建,HTTP API 一律归一为普通用户
-- 管理员改他人权限/状态/删除时,操作者权限须严格高于目标
-- 条目级可叠加用户组 ACL(`VisibleToGroups` JSON 组 ID 列表,空 = 不限制;非空 = 仅管理员/组内成员可见,上传者不自动放行)
-- 桶级:访问等级与管理等级独立(管理等级缺省跟随访问等级,管理要求不得松于访问);配置 `bucket.admin_create_only` 可限制仅管理员建桶
+- `PermissionLevel` — lower value = higher privilege; defined: 0 super admin, 1 admin, 2 reserved, 3 normal user; extensible within 0–9
+- Admin check is uniformly `PermissionLevel.IsAdmin()` (0 / 1)
+- Level 0 is only created via the CLI `--add-superadmin`; the HTTP API always normalizes to normal users
+- Admins must hold strictly higher privilege than the target when modifying/deleting others
+- Item-level group ACL is stackable (`VisibleToGroups` JSON list of group IDs; empty = unrestricted; non-empty = admins/group members only; uploader is not auto-granted)
+- Bucket-level: access level and manage level are independent (manage defaults to access; manage must not be looser than access); `bucket.admin_create_only` restricts bucket creation to admins
 
-## 后台任务与健壮性
+## Background Tasks & Robustness
 
-- 删除/复制任务:目标先置不可用 → 落任务表 → 后台深度优先处理,"边删边查",支持进程崩溃后启动续跑
-- 任务级乐观锁防重复处理;定时任务每小时清理过期日志/令牌/分享
-- 上传补偿:对象写失败删记录、元数据更新失败清对象,不留空洞/孤儿
-- 500 错误对外统一 "internal error";配置缺失/非法、存储不可用均启动即终止
+- Delete/copy tasks: mark target unavailable → persist task → background depth-first processing with crash-resume
+- Optimistic lock prevents duplicate processing; hourly cleanup of stale logs/tokens/shares
+- Upload compensation: remove record if object write fails; remove object if metadata update fails — no orphans
+- 500s map to a unified "internal error"; invalid/missing config or unavailable storage terminates startup
 
-## 许可
+## License
 
 [Apache License 2.0](LICENSE)
