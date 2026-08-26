@@ -98,8 +98,11 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 		return nil, fmt.Errorf("upload: compute sample md5: %w", err)
 	}
 
-	// 配额审查(写入前):桶超限直接拒绝(HTTP 413),不允许"先记账后超限"
+	// 配额审查(写入前):桶 + 用户两级,超限直接拒绝(HTTP 413),不允许"先记账后超限"
 	if err := CheckBucketQuota(ctx, bucketID, size); err != nil {
+		return nil, err
+	}
+	if err := CheckUserQuota(ctx, userID, size); err != nil {
 		return nil, err
 	}
 
@@ -143,10 +146,13 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 		return nil, err
 	}
 
-	// 更新桶 UsedSpace(SQL 原子自增防并发覆盖)
+	// 更新桶 UsedSpace + 用户 UsedSpace(SQL 原子自增防并发覆盖,同一事务)
 	err = core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Model(&model.Bucket{}).Where("id = ?", bucketID).
-			Update("used_space", gorm.Expr("used_space + ?", size)).Error
+		if err := tx.Model(&model.Bucket{}).Where("id = ?", bucketID).
+			Update("used_space", gorm.Expr("used_space + ?", size)).Error; err != nil {
+			return err
+		}
+		return addUserUsedSpace(tx, userID, size) // 用户用量入账(归属上传者)
 	})
 	if err != nil {
 		// 补偿:清理已写对象 + 硬删记录(不留孤儿)

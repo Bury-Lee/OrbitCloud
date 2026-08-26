@@ -52,7 +52,7 @@ func DeleteFile(ctx context.Context, arg DeleteFileArg) error {
 		log.Errorf("delete file %d: delete object: %v", fileID, err)
 	}
 
-	// 事务:硬删记录 + 归还桶 UsedSpace(钳制不为负)+ 级联清理分享
+	// 事务:硬删记录 + 归还桶 UsedSpace + 归还归属用户 UsedSpace(钳制不为负)+ 级联清理分享
 	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Unscoped().Delete(&model.File{}, fileID).Error; err != nil {
 			return err
@@ -73,7 +73,8 @@ func DeleteFile(ctx context.Context, arg DeleteFileArg) error {
 				return err
 			}
 		}
-		return nil
+		// 用户用量归还(按文件归属者 UploadedBy)
+		return returnUserUsedSpace(tx, file.UploadedBy, file.FileSize)
 	}); err != nil {
 		return err
 	}

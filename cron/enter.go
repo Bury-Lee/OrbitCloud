@@ -6,6 +6,7 @@ package cron
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	agilepool "github.com/Yiming1997/agilePool/v2"
@@ -45,6 +46,10 @@ func Start(cfg *config.Config, db *gorm.DB) {
 				if err := ResumeCopyTasks(context.Background()); err != nil {
 					log.Errorf("cron: resume copy tasks: %v", err)
 				}
+				// 用户用量对账:以 files 表为权威修正 users.used_space 漂移
+				// if _, err := ReconcileUserUsages(db); err != nil {
+				// 	log.Errorf("cron: reconcile user usages: %v", err)
+				// }
 				return nil
 			}))
 		}
@@ -126,8 +131,7 @@ func CleanExpiredShares(db *gorm.DB, batchSize int) (int64, error) {
 	return total, nil
 }
 
-// CleanExpiredDownloadTasks 物理清理超过保留期(默认 7 天)的下载任务。
-// 下载任务是断点续传的临时登记(断点权威在客户端本地),完成即 DELETE;
+// CleanExpiredDownloadTasks 物理清理超过保留期(默认 7 天)的下载任务。// 下载任务是断点续传的临时登记(断点权威在客户端本地),完成即 DELETE;
 // 未完成但超期未恢复的遗留行保留无意义,物理删除防表膨胀。
 // 被清理后客户端恢复下载不硬断:前端重新登记任务并续传。
 func CleanExpiredDownloadTasks(db *gorm.DB, retentionDays, batchSize int) (int64, error) {
@@ -153,4 +157,39 @@ func CleanExpiredDownloadTasks(db *gorm.DB, retentionDays, batchSize int) (int64
 	}
 	log.Infof("cron: cleaned %d expired download tasks (retention %d days)", total, retentionDays)
 	return total, nil
+}
+
+// 预备的函数
+// ReconcileUserUsages 用户用量对账:以 files 表为权威口径
+// (Unscoped 统计该用户全部文件记录,含回收站软删行——软删不归还用量,
+// 与 users.used_space 记账语义一致),逐用户比对并修正漂移。
+// 修正方式:直接 Update 覆盖(used_space 为冗余统计,对账即权威)。
+// 已知局限:新增占用按"行为者"记账(上传/复制/写回增长),跨所有者写回
+// (操作者 ≠ UploadedBy 扩展文件)时,对账口径(按 UploadedBy 求和)与记账存在
+// 偏差,对账会向所有者口径收敛——属可接受的兜底行为(阻止无界漂移)。
+// 返回:修正用户数;错误:任一步失败(记日志,不影响其他定时任务)。
+func ReconcileUserUsages(db *gorm.DB) (int, error) {
+	var users []model.User // 全部用户(仅取 id/用量)
+	if err := db.Select("id", "used_space").Find(&users).Error; err != nil {
+		return 0, fmt.Errorf("reconcile user usages: query users: %w", err)
+	}
+	fixed := 0 // 修正计数
+	for i := range users {
+		u := &users[i]     // 当前用户
+		var expected int64 // 期望用量(该用户全部记录大小和)
+		if err := db.Unscoped().Model(&model.File{}).
+			Where("uploaded_by = ?", u.ID).
+			Select("COALESCE(SUM(file_size), 0)").Scan(&expected).Error; err != nil {
+			return fixed, fmt.Errorf("reconcile user usages: sum user %d: %w", u.ID, err)
+		}
+		if expected != u.UsedSpace { // 漂移?
+			if err := db.Model(&model.User{}).
+				Where("id = ?", u.ID).Update("used_space", expected).Error; err != nil {
+				return fixed, fmt.Errorf("reconcile user usages: fix user %d: %w", u.ID, err)
+			}
+			fixed++ // 计数
+			log.Infof("cron: reconcile user %d used_space %d -> %d", u.ID, u.UsedSpace, expected)
+		}
+	}
+	return fixed, nil
 }

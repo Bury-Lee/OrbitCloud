@@ -121,8 +121,12 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 		}
 	}
 
-	// 配额审查(写入前):目标桶超限直接拒绝(413),复制任务/跨桶移动同路径生效
+	// 配额审查(写入前):目标桶 + 操作者用户两级,超限直接拒绝(413),
+	// 复制任务/跨桶移动同路径生效
 	if err := CheckBucketQuota(ctx, dstBucketID, srcFile.FileSize); err != nil {
+		return nil, err
+	}
+	if err := CheckUserQuota(ctx, userID, srcFile.FileSize); err != nil {
 		return nil, err
 	}
 
@@ -175,10 +179,13 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 		return nil, err
 	}
 
-	// 更新目标桶 UsedSpace;失败补偿:删新对象 + 删记录
+	// 更新目标桶 UsedSpace + 操作者用户 UsedSpace(同事务);失败补偿:删新对象 + 删记录
 	err = core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Model(&model.Bucket{}).Where("id = ?", dstBucketID).
-			Update("used_space", gorm.Expr("used_space + ?", srcFile.FileSize)).Error
+		if err := tx.Model(&model.Bucket{}).Where("id = ?", dstBucketID).
+			Update("used_space", gorm.Expr("used_space + ?", srcFile.FileSize)).Error; err != nil {
+			return err
+		}
+		return addUserUsedSpace(tx, userID, srcFile.FileSize) // 用户用量入账(归属操作者)
 	})
 	if err != nil {
 		_ = core.Storage.Delete(ctx, utils.BucketEncoder(dstBucket.ID), newKey)

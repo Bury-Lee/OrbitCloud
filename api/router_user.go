@@ -11,5 +11,6 @@ func UserRouter(authed *gin.RouterGroup) {
 	// 管理员专属(需 AuthMiddleware + AdminMiddleware):
 	authed.GET("/users", AuthMiddleware, AdminMiddleware, App.User.ListUsers)
 	authed.PUT("/users/:id", AuthMiddleware, AdminMiddleware, App.User.UpdateUser)
+	authed.PUT("/users/:id/quota", AuthMiddleware, AdminMiddleware, App.User.UpdateUserQuota)
 	authed.DELETE("/users/:id", AuthMiddleware, AdminMiddleware, App.User.DeleteUser)
 }

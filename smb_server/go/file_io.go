@@ -216,8 +216,11 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 	return f.syncFileMeta(ctx, h) // 同步元数据(大小 + 桶用量)
 }
 
-// checkWriteQuota 写回前配额审查:按"记录旧大小 → 句柄新大小"的差值增量,
-// 增量 > 0 时调 server.CheckBucketQuota;超限返回 ErrQuotaExceeded(→ STATUS_DISK_FULL)。
+// checkWriteQuota 写回前配额审查(桶 + 用户两级):按"记录旧大小 → 句柄新大小"的差值增量,
+// 增量 > 0 时依次调 server.CheckBucketQuota / server.CheckUserQuota;任一超限返回
+// ErrQuotaExceeded(→ STATUS_DISK_FULL)。
+// 用户口径:新增占用一律算**行为者**(操作者 h.userID),与上传/复制一致;
+// 归还(删除/清除)才按 UploadedBy 所有者(见 server.DeleteFile / trash 清除)。
 // 位置:Flush 与 Write 提前冲刷的落盘之前(不落对象,缓存保留可重试)。
 func (f *FileOpsService) checkWriteQuota(ctx context.Context, h *remoteHandle) error {
 	var old model.File // 旧记录(当前已固化大小)
@@ -228,11 +231,15 @@ func (f *FileOpsService) checkWriteQuota(ctx context.Context, h *remoteHandle) e
 	if delta <= 0 { // 无增量或缩小 → 无需审查
 		return nil // 放行
 	}
-	return server.CheckBucketQuota(ctx, h.bucketID, delta) // 桶配额审查(超限 → ErrQuotaExceeded)
+	if err := server.CheckBucketQuota(ctx, h.bucketID, delta); err != nil { // 桶配额审查
+		return err
+	}
+	return server.CheckUserQuota(ctx, h.userID, delta) // 用户配额审查(行为者)
 }
 
-// syncFileMeta 冲刷后同步元数据:文件记录大小与桶用量保持一致。
-// 说明:对象已与 h.size 一致;对比记录旧值,差值对称累加/扣减桶用量。
+// syncFileMeta 冲刷后同步元数据:文件记录大小、桶用量与**行为者**用户用量保持一致。
+// 说明:对象已与 h.size 一致;对比记录旧值,差值对称累加/扣减桶用量与
+// 行为者(h.userID)用户用量(正负通用;截断缩小同步归还行为者)。
 func (f *FileOpsService) syncFileMeta(ctx context.Context, h *remoteHandle) error {
 	var old model.File // 旧记录
 	if err := core.DB.WithContext(ctx).First(&old, h.fileID).Error; err == nil { // 读旧记录成功?
@@ -241,6 +248,10 @@ func (f *FileOpsService) syncFileMeta(ctx context.Context, h *remoteHandle) erro
 			_ = core.DB.WithContext(ctx).Model(&model.Bucket{}). // 对称更新桶用量
 				Where("id = ?", h.bucketID).
 				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error // used_space 累加差值(正负通用)
+			// 对称更新行为者用户用量(与桶同语义;失败仅记日志,对账兜底)
+			_ = core.DB.WithContext(ctx).Model(&model.User{}).
+				Where("id = ?", h.userID).
+				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error
 		}
 	}
 	return core.DB.WithContext(ctx).Model(&model.File{}).

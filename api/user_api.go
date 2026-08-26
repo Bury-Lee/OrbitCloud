@@ -66,7 +66,8 @@ func (UserAPI) ListUsers(c *gin.Context) {
 }
 
 // UpdateUser 管理员修改指定用户(PUT /users/:id)。
-// 请求体:{"password"?,"name"?,"email"?,"permission_level"?,"status"?}(指针字段才更新);
+// 请求体:{"password"?,"name"?,"email"?,"permission_level"?,"status"?,"quota"?}
+// (指针字段才更新);quota 三态:缺省 = 不更新,null = 置为不限,0 = 仅可读,>0 = 字节限额;
 // 不能操作同级或更高级用户。管理员判定由路由挂载的 AdminMiddleware 统一完成。
 func (UserAPI) UpdateUser(c *gin.Context) {
 	// 解析路径参数 :id
@@ -98,6 +99,7 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 		Email           string                 `json:"email"`
 		PermissionLevel *model.PermissionLevel `json:"permission_level"`
 		Status          *int                   `json:"status"`
+		Quota           *int64                 `json:"quota"` // 设置配额(0=仅可读,>0=限额;置回不限走 PUT /users/:id/quota)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
@@ -111,6 +113,7 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 		Email:           req.Email,
 		PermissionLevel: req.PermissionLevel,
 		Status:          req.Status,
+		Quota:           req.Quota,
 	}
 
 	user, err := server.UpdateUser(ctx, server.UpdateUserArg{OperatorID: operatorID, TargetID: uint(targetID), In: in})
@@ -119,6 +122,50 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 		return
 	}
 
+	common.Success(c, user)
+}
+
+// UpdateUserQuota 管理员设置用户配额(PUT /users/:id/quota)。
+// 请求体:{"quota": <int64|null>}(null = 不限;0 = 仅可读;>0 = 字节限额)。
+// 与 DB 语义一致:quota 即最终值;不能操作同级或更高级用户(AdminMiddleware 已保证管理员)。
+func (UserAPI) UpdateUserQuota(c *gin.Context) {
+	// 解析路径参数 :id
+	targetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || targetID == 0 {
+		respondError(c, server.ErrInvalidInput)
+		return
+	}
+	ctx := c.Request.Context()
+	operatorID := currentUser(c)
+	claims := ClaimsFrom(c)
+
+	// 目标存在,且操作者权限须严格高于目标
+	target, err := server.GetUser(ctx, server.GetUserArg{ID: uint(targetID)})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if claims.PermissionLevel >= target.PermissionLevel {
+		respondError(c, server.ErrForbidden)
+		return
+	}
+
+	// 请求体仅一个字段:null → nil(不限);0 → 仅可读;>0 → 限额
+	var req struct {
+		Quota *int64 `json:"quota"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, server.ErrInvalidInput)
+		return
+	}
+
+	user, err := server.UpdateUserQuota(ctx, server.UpdateUserQuotaArg{
+		OperatorID: operatorID, TargetID: uint(targetID), Quota: req.Quota,
+	})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
 	common.Success(c, user)
 }
 

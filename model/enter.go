@@ -36,6 +36,16 @@ type User struct {
 	// NtHash 密码的 NT hash(MD4(UTF-16LE(明文)) hex;仅经 SMB 网关私有通道下发,
 	// HTTP 接口永不返回;空 = 未设置(该用户无法经 SMB 登录)。
 	NtHash string `gorm:"type:varchar(32)"`
+	// Quota 用户容量配额(可空,三态语义):
+	//   nil = 不限(默认;NULL);0 = 仅可读(拒绝任何新增占用的写操作);
+	//   >0 = 具体字节限额。写入前审查:超出即拒绝上传/复制/写回增长
+	//   (HTTP 413 / SMB STATUS_DISK_FULL),与桶配额并行、任一超限即拒绝;
+	//   管理员经 PUT /users/:id 调整(null 置回不限,0 置为仅可读)。
+	Quota *int64 `gorm:"type:bigint"`
+	// UsedSpace 用户已用空间(字节;冗余统计,记账式维护):
+	// 上传/复制/写回增长(计入行为者)+;硬删/回收站清除(按文件 UploadedBy 归属者)-;
+	// 与桶 used_space 同语义,极端异常由 cron 对账修正。
+	UsedSpace int64 `gorm:"default:0"`
 }
 
 // PermissionLevel 权限等级类型(数值越小权限越高)。

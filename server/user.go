@@ -317,11 +317,12 @@ func UpdateMe(ctx context.Context, arg UpdateMeArg) (*model.User, error) {
 
 // UpdateUserInput 用户可更新字段(管理员改他人;指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
 type UpdateUserInput struct {
-	Password        string                // 非空则重置密码(bcrypt 哈希后落库)
-	Name            string                // 名字/昵称
-	Email           string                // 邮箱
+	Password        string                 // 非空则重置密码(bcrypt 哈希后落库)
+	Name            string                 // 名字/昵称
+	Email           string                 // 邮箱
 	PermissionLevel *model.PermissionLevel // 权限等级(不能设为 0;0 仅命令行添加)
-	Status          *int                  // 1 正常 / 0 禁用
+	Status          *int                   // 1 正常 / 0 禁用
+	Quota           *int64                 // 配额:0 = 仅可读;>0 = 字节限额;负数拒绝;nil = 不更新(置回不限走 UpdateUserQuota)
 }
 
 // UpdateUserArg 用户更新入参(管理员改他人)。
@@ -368,6 +369,12 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 		}
 		updates["status"] = *in.Status
 	}
+	if in.Quota != nil { // 设置配额(nil = 不更新;置回不限走 UpdateUserQuota)
+		if *in.Quota < 0 {
+			return nil, ErrInvalidInput // 配额不能为负
+		}
+		updates["quota"] = *in.Quota // 0 = 仅可读;>0 = 字节限额
+	}
 	if len(updates) == 0 {
 		return nil, ErrInvalidInput
 	}
@@ -380,6 +387,33 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 	// 重查并返回(已脱敏)
 	log.Infof("update user: operator %d updated user %d", operatorID, targetID)
 	return GetUser(ctx, GetUserArg{ID: targetID})
+}
+
+// UpdateUserQuotaArg 用户配额设置入参(专用接口,语义与 DB 一致)。
+type UpdateUserQuotaArg struct {
+	OperatorID uint   // 操作者 users.id(操作日志)
+	TargetID   uint   // 目标用户 users.id
+	Quota      *int64 // 最终配额值:nil = 不限;0 = 仅可读;>0 = 字节限额;负数拒绝
+}
+
+// UpdateUserQuota 设置用户配额(PUT /users/:id/quota;"不能操作同级/更高级"由 api 层预检)。
+// 入参与 DB 语义一致:Quota 即最终值(nil → NULL 不限;0 → 仅可读;>0 → 限额)。
+// 错误语义:目标不存在 → ErrNotFound;负数 → ErrInvalidInput。
+func UpdateUserQuota(ctx context.Context, arg UpdateUserQuotaArg) (*model.User, error) {
+	// 查目标(存在性)
+	if _, err := GetUser(ctx, GetUserArg{ID: arg.TargetID}); err != nil {
+		return nil, err
+	}
+	if arg.Quota != nil && *arg.Quota < 0 {
+		return nil, ErrInvalidInput // 配额不能为负
+	}
+	// 执行更新(nil → NULL 不限;0 → 仅可读;>0 → 限额)
+	if err := core.DB.WithContext(ctx).Model(&model.User{}).
+		Where("id = ?", arg.TargetID).Update("quota", arg.Quota).Error; err != nil {
+		return nil, fmt.Errorf("update user quota %d: %w", arg.TargetID, err)
+	}
+	log.Infof("update user quota: operator %d set user %d quota=%v", arg.OperatorID, arg.TargetID, arg.Quota)
+	return GetUser(ctx, GetUserArg{ID: arg.TargetID})
 }
 
 // DeleteUserArg 用户删除入参。

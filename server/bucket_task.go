@@ -225,6 +225,7 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 		}
 		allOK := true
 		var folderSize int64 // 本文件夹文件总大小
+		byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
 		for _, f := range files {
 			err := core.Storage.Delete(ctx, utils.BucketEncoder(task.BucketID), objectKeyForFile(f.ID))
 			if err != nil && !errors.Is(err, core.ErrObjectNotFound) {
@@ -232,12 +233,13 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 				allOK = false
 			}
 			folderSize += f.FileSize
+			byUser[f.UploadedBy] += f.FileSize
 		}
 		if !allOK {
 			return fmt.Errorf("process delete dir task %d: object delete failed, records retained", taskID)
 		}
 
-		// 事务:删文件记录 + 级联删分享 + 删文件夹自身 + 归还桶 UsedSpace
+		// 事务:删文件记录 + 级联删分享 + 删文件夹自身 + 归还桶/用户 UsedSpace
 		if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if len(files) > 0 {
 				ids := make([]uint, 0, len(files))
@@ -270,6 +272,12 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 					used = 0
 				}
 				if err := tx.Model(&model.Bucket{}).Where("id = ?", task.BucketID).Update("used_space", used).Error; err != nil {
+					return err
+				}
+			}
+			// 用户用量归还(按文件归属者分组)
+			for uid, sz := range byUser {
+				if err := returnUserUsedSpace(tx, uid, sz); err != nil {
 					return err
 				}
 			}
