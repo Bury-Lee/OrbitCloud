@@ -23,5 +23,8 @@ TODO.md
 smb_server/rust/target/
 tool/
 other_software/
-# VSCode ����ͳ�Ʋ������
+
+# 统计与杂项
 .VSCodeCounter/
+tem/
+dist/
