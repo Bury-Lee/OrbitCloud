@@ -7,18 +7,14 @@
 //   - Rename:复用 server 层 MoveFolder / MoveFile(目标已存在必须拒绝);
 //   - CloseAllByConn:断连时回收该连接的全部句柄。
 package smbgateway
-
 import (
 	"context"   // 上下文
-	"fmt"       // 格式化(对象 key)       // 服务日志(目录操作记录)
 	"strings"   // 错误文本匹配(416 判定)
 	"time"      // 句柄活动时间
 
-	"gorm.io/gorm" // ORM 表达式(桶用量扣减)
-
 	"orbitcloud/core"   // 对象存储/全局 DB
 	"orbitcloud/model"  // 数据模型
-	"orbitcloud/server" // server 层服务(DeleteFile/MoveFolder/MoveFile)
+	"orbitcloud/server" // server 层服务(DeleteFile/DeleteDir/MoveFolder/MoveFile)
 	"orbitcloud/utils"  // 桶名编码
 )
 
@@ -212,11 +208,20 @@ func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 		if err := checkAncestorsVisible(ctx, info, share.BucketID, fid); err != nil {
 			return err
 		}
-		// 目录:递归删除(SMB 删除文件夹语义:深度优先清空子项后删除自身;
-		// 硬删不占用唯一索引,同名可重建)。
-		if err := f.deleteFolderRecursive(ctx, share.BucketID, fid); err != nil { // 递归删树
+		// 目录:复用 server 层删除(DeleteDir 置 Isable=false 落删除任务 → 同步处理完成)。
+		// 与 Web 端同一套物理清理(深度优先删对象/记录/分享级联/归还桶与用户用量,
+		// 带任务锁与幂等续跑),不再在本层重复实现。
+		taskID, err := server.DeleteDir(ctx, server.DeleteDirArg{
+			UserID: userID, BucketID: share.BucketID, DirID: fid,
+		})
+		if err != nil {
 			smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d:%v", path, fid, err) // 记录目录删除失败
 			return err // 失败上抛
+		}
+		if err := server.ProcessDeleteTask(ctx, server.ProcessDeleteTaskArg{TaskID: taskID}); err != nil {
+			// 物理清理失败:任务保留(启动/cron 续跑),SMB 返回错误,客户端可重试
+			smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d 任务=%d:%v", path, fid, taskID, err)
+			return err
 		}
 		smbDebugf("smb_gateway: 删除目录成功 路径=%q 文件夹=%d", path, fid) // 记录目录删除成功
 		smbInfof("smb_gateway: 文件变更 删除目录 user=%d(%s) 目录=%d", userID, info.Username, fid) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
@@ -392,84 +397,6 @@ func (f *FileOpsService) CloseAllByConn(connID uint64) {
 		}
 	}
 	smbDebugf("smb_gateway: 连接 %d 关闭,回收 %d 个句柄", connID, closed) // 记录断连句柄回收汇总
-}
-
-// deleteFolderRecursive 递归删除目录树(SMB 语义,同步深度优先):
-//  1. 先递归删除子文件夹;2) 删除本目录下全部文件(对象 + 记录 + 桶用量/用户用量扣减);
-//  3. 硬删本目录行。所有删除为幂等,单条失败即中止(重试可续)。
-// 记录/用量/分享级联在单事务内原子完成(防部分删除后用量漂移),对象删除在事务外(幂等,
-// 失败忽略,记录为准)。
-func (f *FileOpsService) deleteFolderRecursive(ctx context.Context, bucketID, folderID uint) error {
-	// 子文件夹递归。
-	var subs []model.Folder // 子文件夹集合
-	if err := core.DB.WithContext(ctx).
-		Where("bucket_id = ? AND parent_id = ?", bucketID, folderID). // 查直接子文件夹
-		Find(&subs).Error; err != nil { // 查询
-		return err // 失败上抛
-	}
-	for i := range subs { // 逐个递归
-		if err := f.deleteFolderRecursive(ctx, bucketID, subs[i].ID); err != nil { // 深度优先
-			return err // 子树失败即中止(重试可续)
-		}
-	}
-	// 本目录文件:删对象(幂等,失败忽略,记录为准)。
-	var files []model.File // 本目录文件集合
-	if err := core.DB.WithContext(ctx).
-		Where("bucket_id = ? AND folder_id = ?", bucketID, folderID). // 查文件
-		Find(&files).Error; err != nil { // 查询
-		return err // 失败上抛
-	}
-	byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
-	var freed int64            // 累计释放空间(桶用量扣减)
-	for i := range files { // 逐个删对象
-		fl := &files[i] // 取行
-		_ = f.st.Delete(ctx, utils.BucketEncoder(bucketID), fmt.Sprintf("%d", fl.ID)) // 删对象(失败忽略,记录为准)
-		freed += fl.FileSize // 累计释放
-		byUser[fl.UploadedBy] += fl.FileSize
-	}
-	// 单事务:硬删文件记录 + 级联删分享 + 归还桶/用户用量 + 硬删目录行(原子)。
-	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if len(files) > 0 { // 有文件?
-			ids := make([]uint, 0, len(files)) // 文件 ID 集合
-			for i := range files {
-				ids = append(ids, files[i].ID)
-			}
-			if err := tx.Unscoped().Where("id IN ?", ids).Delete(&model.File{}).Error; err != nil { // 硬删记录
-				return err // 失败上抛(整体回滚)
-			}
-			// 级联:删除指向这些文件的分享
-			if err := tx.Unscoped().
-				Where("bucket_item_id IN ? AND item_type = 'file'", ids).
-				Delete(&model.ShareLink{}).Error; err != nil {
-				return err
-			}
-		}
-		// 级联:删除指向该目录的分享
-		if err := tx.Unscoped().
-			Where("bucket_item_id = ? AND item_type = 'folder'", folderID).
-			Delete(&model.ShareLink{}).Error; err != nil {
-			return err
-		}
-		// 归还桶用量(钳制不为负)
-		if freed > 0 {
-			if err := tx.Model(&model.Bucket{}).Where("id = ?", bucketID).
-				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space - ? < 0 THEN 0 ELSE used_space - ? END", freed, freed)).Error; err != nil {
-				return err
-			}
-		}
-		// 归还用户用量(按归属者,钳制不为负)
-		for uid, sz := range byUser {
-			if err := tx.Model(&model.User{}).Where("id = ?", uid).
-				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space - ? < 0 THEN 0 ELSE used_space - ? END", sz, sz)).Error; err != nil {
-				return err
-			}
-		}
-		// 硬删本目录行(幂等)。
-		return tx.Unscoped().Delete(&model.Folder{}, folderID).Error
-	}); err != nil {
-		return err // 失败上抛(事务回滚,重试可续)
-	}
-	return nil
 }
 
 // isRangeNotSatisfiable 判断对象存储范围读越界错误(S3 416)。

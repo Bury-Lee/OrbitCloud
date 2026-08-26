@@ -262,3 +262,81 @@ func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
 		t.Fatalf("user used = %d, want 300(200-200+300)", uu.UsedSpace)
 	}
 }
+
+// SMB 删除目录(Unlink)复用 server 层 DeleteDir + ProcessDeleteTask:
+// 目录树(含子目录/文件/分享)全部物理清理,桶与用户用量按归属者归还。
+func TestUnlinkDirUsesServerDelete(t *testing.T) {
+	db := newITDB(t)
+	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+
+	u := &model.User{Username: "unlink-admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, UsedSpace: 150}
+	if err := core.DB.Create(u).Error; err != nil {
+		t.Fatal(err)
+	}
+	b := &model.Bucket{Name: "unlink-b", PermissionLevel: model.SuperAdmin, OwnerID: u.ID, Status: 1, UsedSpace: 150}
+	if err := core.DB.Create(b).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 目录树:dir(f1=100B) / sub(f2=50B)
+	dir := &model.Folder{BucketID: b.ID, ParentID: 0, Name: "dir", UploadedBy: u.ID, Isable: true}
+	if err := core.DB.Create(dir).Error; err != nil {
+		t.Fatal(err)
+	}
+	sub := &model.Folder{BucketID: b.ID, ParentID: dir.ID, Name: "sub", UploadedBy: u.ID, Isable: true}
+	if err := core.DB.Create(sub).Error; err != nil {
+		t.Fatal(err)
+	}
+	f1 := &model.File{BucketID: b.ID, FolderID: dir.ID, Name: "f1.txt", FileSize: 100, UploadedBy: u.ID}
+	f2 := &model.File{BucketID: b.ID, FolderID: sub.ID, Name: "f2.txt", FileSize: 50, UploadedBy: u.ID}
+	if err := core.DB.Create(f1).Error; err != nil || core.DB.Create(f2).Error != nil {
+		t.Fatal("create files")
+	}
+	core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f1.ID)] = bytes.Repeat([]byte{'a'}, 100)
+	core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f2.ID)] = bytes.Repeat([]byte{'b'}, 50)
+	// 分享链接:指向 f1(文件)与 dir(目录)
+	s1 := &model.ShareLink{BucketItemID: f1.ID, ItemType: "file", CreatorID: u.ID, Token: "tk-file"}
+	s2 := &model.ShareLink{BucketItemID: dir.ID, ItemType: "folder", CreatorID: u.ID, Token: "tk-dir"}
+	if err := core.DB.Create(s1).Error; err != nil || core.DB.Create(s2).Error != nil {
+		t.Fatal("create share links")
+	}
+
+	sr, _ := NewSessionRegistry()
+	sessionRegistry = sr
+	svc := NewFileOpsService(core.Storage, NewHandleRegistry())
+	ctx := context.Background()
+	info, _ := resolveSession(ctx, u.ID)
+	ctx = withSession(ctx, info)
+
+	// Unlink 目录(复用 server.DeleteDir + ProcessDeleteTask 同步完成)
+	if err := svc.Unlink(ctx, &UnlinkArgs{BucketID: b.ID, Path: "/dir"}); err != nil {
+		t.Fatalf("unlink dir: %v", err)
+	}
+
+	// 目录树记录与对象全部删除
+	var cnt int64
+	for _, table := range []any{&model.Folder{}, &model.File{}} {
+		if err := core.DB.Unscoped().Model(table).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+			t.Fatalf("%T rows = %d, want 0", table, cnt)
+		}
+	}
+	// 分享级联删除
+	if err := core.DB.Unscoped().Model(&model.ShareLink{}).Where("creator_id = ?", u.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("share rows = %d, want 0(级联删除)", cnt)
+	}
+	// 用量归还(150-100-50=0)
+	var uu model.User
+	if err := core.DB.First(&uu, u.ID).Error; err != nil || uu.UsedSpace != 0 {
+		t.Fatalf("user used = %d, want 0", uu.UsedSpace)
+	}
+	var bb model.Bucket
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 0 {
+		t.Fatalf("bucket used = %d, want 0", bb.UsedSpace)
+	}
+	// 对象已删
+	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f1.ID)]; ok {
+		t.Fatal("f1 object should be deleted")
+	}
+	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f2.ID)]; ok {
+		t.Fatal("f2 object should be deleted")
+	}
+}
