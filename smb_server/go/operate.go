@@ -338,6 +338,8 @@ func wrapErrResp(code OperateCode, err error) *OperateResponse {
 		c = ErrCodeNotADir // 映射:不是目录
 	case errors.Is(err, server.ErrInvalidInput): // 输入非法
 		c = ErrCodeBadRequest // 映射:请求不合法
+	case errors.Is(err, server.ErrQuotaExceeded): // 配额超限
+		c = ErrCodeDiskFull // 映射:磁盘满(STATUS_DISK_FULL)
 	}
 	smbDebugf("smb_gateway: 操作=%s 错误码=%d(%s)", codeName(code), c, msg) // 记录错误映射(操作/哨兵码/描述)
 	return &OperateResponse{Code: code, Err: &ErrorEnvelope{Code: c, Message: msg}} // 组装错误响应(Code 回显)

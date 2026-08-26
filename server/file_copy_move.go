@@ -121,6 +121,11 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 		}
 	}
 
+	// 配额审查(写入前):目标桶超限直接拒绝(413),复制任务/跨桶移动同路径生效
+	if err := CheckBucketQuota(ctx, dstBucketID, srcFile.FileSize); err != nil {
+		return nil, err
+	}
+
 	// 先建新记录拿主键(可见组继承源,防复制后泄露给全桶)
 	f := &model.File{
 		BucketID:        dstBucketID,

@@ -46,6 +46,7 @@ fn gateway_err_maps_to_smb_error() {
         SmbError::NotADirectory
     ));
     assert!(matches!(map_gateway_err(ERR_IO), SmbError::Io(_))); // IO 错误 → Io
+    assert!(matches!(map_gateway_err(ERR_DISK_FULL), SmbError::DiskFull)); // 配额超限 → DiskFull
     assert!(matches!(map_gateway_err(0xFFFF), SmbError::Io(_))); // 未知码 → Io 兜底
 }
 

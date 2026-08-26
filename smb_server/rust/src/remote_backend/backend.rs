@@ -285,6 +285,7 @@ pub(super) fn map_gateway_err(code: u32) -> SmbError {
         ERR_GATEWAY_DOWN => io_err(), // 网关不可达 → IO 错误(上层负责重连)
         ERR_TIMEOUT => io_err(), // 请求超时 → IO 错误
         ERR_BAD_REQUEST => SmbError::NotSupported, // 请求不合法 → 不支持
+        ERR_DISK_FULL => SmbError::DiskFull, // 桶配额超限 → 磁盘满
         ERR_IO => io_err(), // 网关 IO 错误
         ERR_NOT_IMPL => SmbError::NotSupported, // 未实现 → 不支持
         _ => io_err(), // 未知错误码一律 IO 错误(STATUS_UNEXPECTED_IO_ERROR)

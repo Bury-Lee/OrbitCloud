@@ -98,6 +98,11 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 		return nil, fmt.Errorf("upload: compute sample md5: %w", err)
 	}
 
+	// 配额审查(写入前):桶超限直接拒绝(HTTP 413),不允许"先记账后超限"
+	if err := CheckBucketQuota(ctx, bucketID, size); err != nil {
+		return nil, err
+	}
+
 	// 先落库拿主键(对象键 = 主键 ID,须 Create 后才有自增 ID)
 	f := &model.File{
 		BucketID:   bucketID,

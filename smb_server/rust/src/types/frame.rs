@@ -53,6 +53,7 @@ pub const ERR_BAD_AUTH: u32 = 9; // STATUS_LOGON_FAILURE
 pub const ERR_GATEWAY_DOWN: u32 = 10; // 网关不可达
 pub const ERR_TIMEOUT: u32 = 11; // 请求超时
 pub const ERR_BAD_REQUEST: u32 = 12; // 请求不合法(Code=0 / 指针与 Code 不匹配)
+pub const ERR_DISK_FULL: u32 = 13; // 磁盘满(桶配额超限,拒绝写入)
 
 // ============================================================================
 // FrameHeader 帧头(与 Go 侧 FrameHeader 字段/顺序一致)

@@ -8,11 +8,10 @@
 //   - Stat:查文件/文件夹/桶记录组装 FileInfo(FILETIME 语义);
 //   - SetTimes / Truncate:时间戳与长度操作(截断走缓存截断标记)。
 package smbgateway
-
 import (
 	"context"   // 上下文
 	"errors"    // errors.Is(对象不存在/416)
-	"io"        // 流读取       // 服务日志(数据操作记录)
+	"io"        // 流读取
 	"time"      // 句柄活动时间
 
 	"gorm.io/gorm" // ORM 表达式(桶用量对称更新)
@@ -166,7 +165,10 @@ func (f *FileOpsService) Write(ctx context.Context, handleID uint64, offset uint
 		h.size = off // 扩展已知大小
 	}
 	if total >= h.writeCache.maxSize { // 缓存总量达阈值?
-		// 缓存超阈值 → 提前整体冲刷(防内存无限增长)。
+		// 缓存超阈值 → 提前整体冲刷(防内存无限增长);先做配额审查(写入前拦截)。
+		if err := f.checkWriteQuota(ctx, h); err != nil { // 桶超限 → 拒绝(STATUS_DISK_FULL)
+			return 0, err // 上抛
+		}
 		if err := h.writeCache.FlushToStorage(ctx, f.st, utils.BucketEncoder(h.bucketID), h.objectKey, h.flushSpec()); err != nil { // 整体上传
 			return 0, err // 上传失败上抛
 		}
@@ -199,6 +201,11 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 	if !spec.dirty { // 无变化?
 		return nil // 无需冲刷
 	}
+	// 配额审查(写入前):写回将增加桶用量 → 超限拒绝(STATUS_DISK_FULL),不落对象。
+	if err := f.checkWriteQuota(ctx, h); err != nil {
+		smbErrorf("smb_gateway: 冲刷句柄=%d 配额审查拒绝:%v", h.handleID, err) // 记录拒绝原因
+		return err // 上抛(客户端收到明确错误,缓存保留可重试)
+	}
 	if err := h.writeCache.FlushToStorage(ctx, f.st, utils.BucketEncoder(h.bucketID), h.objectKey, spec); err != nil { // 整体上传对象
 		smbErrorf("smb_gateway: 冲刷句柄=%d 失败:%v", h.handleID, err) // 记录冲刷失败
 		return err // 上传失败上抛
@@ -207,6 +214,21 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 	smbDebugf("smb_gateway: 冲刷句柄=%d 已上传 大小=%d", h.handleID, h.size) // 记录冲刷成功(句柄/大小)
 	smbInfof("smb_gateway: 文件变更 写回 user=%d(%s) 文件=%d", h.userID, h.session.Username, h.fileID) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 	return f.syncFileMeta(ctx, h) // 同步元数据(大小 + 桶用量)
+}
+
+// checkWriteQuota 写回前配额审查:按"记录旧大小 → 句柄新大小"的差值增量,
+// 增量 > 0 时调 server.CheckBucketQuota;超限返回 ErrQuotaExceeded(→ STATUS_DISK_FULL)。
+// 位置:Flush 与 Write 提前冲刷的落盘之前(不落对象,缓存保留可重试)。
+func (f *FileOpsService) checkWriteQuota(ctx context.Context, h *remoteHandle) error {
+	var old model.File // 旧记录(当前已固化大小)
+	if err := core.DB.WithContext(ctx).First(&old, h.fileID).Error; err != nil { // 查旧记录
+		return err // 失败上抛(读失败按 IO 错误处理)
+	}
+	delta := h.size - old.FileSize // 本次写回将带来的用量增量(可负:截断缩小)
+	if delta <= 0 { // 无增量或缩小 → 无需审查
+		return nil // 放行
+	}
+	return server.CheckBucketQuota(ctx, h.bucketID, delta) // 桶配额审查(超限 → ErrQuotaExceeded)
 }
 
 // syncFileMeta 冲刷后同步元数据:文件记录大小与桶用量保持一致。

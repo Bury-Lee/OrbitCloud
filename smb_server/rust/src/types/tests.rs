@@ -77,6 +77,7 @@ fn error_codes_are_distinct() {
         ERR_GATEWAY_DOWN,
         ERR_TIMEOUT,
         ERR_BAD_REQUEST,
+        ERR_DISK_FULL,
     ];
     let mut seen = std::collections::BTreeSet::new(); // 查重集合
     for c in codes { // 逐个检查

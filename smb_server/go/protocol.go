@@ -96,6 +96,7 @@ const (
 	ErrCodeGatewayDown  uint32 = 10 // 网关不可达(连接断开/超时)
 	ErrCodeTimeout      uint32 = 11 // 请求超时
 	ErrCodeBadRequest   uint32 = 12 // 请求不合法(Code=0 / 指针与 Code 不匹配)
+	ErrCodeDiskFull     uint32 = 13 // STATUS_DISK_FULL(桶配额超限,拒绝写入)
 )
 
 // ---------------------------------------------------------------------------
