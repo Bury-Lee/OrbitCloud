@@ -143,3 +143,122 @@ func TestTruncateOnlyIntegration(t *testing.T) {
 		t.Fatalf("len = %d, want 100(纯截断须落盘)", len(got))
 	}
 }
+
+// 覆盖打开(overwrite intent)对称记账:200B 旧文件覆盖为 50B 新内容 →
+// 记录/对象/桶用量/用户用量按新旧差值精确入账,不再虚增旧大小;
+// 且打开时记录与对象保持旧值(崩溃/断连不丢数据)。
+func TestOverwriteOpenSymmetricAccounting(t *testing.T) {
+	db := newITDB(t)
+	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+
+	q := int64(1000)
+	u := &model.User{Username: "ow-admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, Quota: &q, UsedSpace: 200}
+	if err := core.DB.Create(u).Error; err != nil {
+		t.Fatal(err)
+	}
+	b := &model.Bucket{Name: "ow-b", PermissionLevel: model.SuperAdmin, OwnerID: u.ID, Status: 1, UsedSpace: 200}
+	if err := core.DB.Create(b).Error; err != nil {
+		t.Fatal(err)
+	}
+	f := &model.File{BucketID: b.ID, FolderID: 0, Name: "f.txt", FileSize: 200, UploadedBy: u.ID}
+	if err := core.DB.Create(f).Error; err != nil {
+		t.Fatal(err)
+	}
+	core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f.ID)] = bytes.Repeat([]byte{'E'}, 200)
+
+	sr, _ := NewSessionRegistry()
+	sessionRegistry = sr
+	svc := NewFileOpsService(core.Storage, NewHandleRegistry())
+	ctx := context.Background()
+	info, _ := resolveSession(ctx, u.ID)
+	ctx = withSession(ctx, info)
+	share := ShareInfo{BucketID: b.ID, ShareName: "ow-b", Mode: "readwrite"}
+
+	// 覆盖打开:记录与对象保持旧值(不预清空)
+	open, err := svc.Open(ctx, &OpenArgs{BucketID: b.ID, Path: "f.txt", Write: true, Intent: "overwrite_or_create"}, share, 1)
+	if err != nil {
+		t.Fatalf("open overwrite: %v", err)
+	}
+	var rec model.File
+	if err := core.DB.First(&rec, f.ID).Error; err != nil || rec.FileSize != 200 {
+		t.Fatalf("record size = %d, want 200(打开时不预清零)", rec.FileSize)
+	}
+	if len(core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f.ID)]) != 200 {
+		t.Fatalf("object preemptively deleted at open(崩溃会丢数据)")
+	}
+
+	// 写新内容 50B(旧数据整体作废)
+	if _, err := svc.Write(ctx, open.HandleID, 0, bytes.Repeat([]byte{'F'}, 50)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := svc.Close(ctx, open.HandleID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// 对象 = F*50(truncateAt=0 裁剪,旧数据不复活)
+	got := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f.ID)]
+	if !bytes.Equal(got, bytes.Repeat([]byte{'F'}, 50)) {
+		t.Fatalf("object = %q, want F*50(旧数据作废)", got)
+	}
+	if err := core.DB.First(&rec, f.ID).Error; err != nil || rec.FileSize != 50 {
+		t.Fatalf("record size = %d, want 50", rec.FileSize)
+	}
+	// 对称记账:200 - 200 + 50 = 50(此前会虚增为 250)
+	var uu model.User
+	if err := core.DB.First(&uu, u.ID).Error; err != nil || uu.UsedSpace != 50 {
+		t.Fatalf("user used = %d, want 50(对称记账)", uu.UsedSpace)
+	}
+	var bb model.Bucket
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 50 {
+		t.Fatalf("bucket used = %d, want 50(对称记账)", bb.UsedSpace)
+	}
+}
+
+// 覆盖打开扩大内容(200→300):配额审查按真实增量(100)而非全量(300),未超额放行。
+func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
+	db := newITDB(t)
+	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+
+	q := int64(400)
+	u := &model.User{Username: "ow-grow", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, Quota: &q, UsedSpace: 200}
+	if err := core.DB.Create(u).Error; err != nil {
+		t.Fatal(err)
+	}
+	b := &model.Bucket{Name: "ow-b2", PermissionLevel: model.SuperAdmin, OwnerID: u.ID, Status: 1, UsedSpace: 200}
+	if err := core.DB.Create(b).Error; err != nil {
+		t.Fatal(err)
+	}
+	f := &model.File{BucketID: b.ID, FolderID: 0, Name: "f.txt", FileSize: 200, UploadedBy: u.ID}
+	if err := core.DB.Create(f).Error; err != nil {
+		t.Fatal(err)
+	}
+	core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f.ID)] = bytes.Repeat([]byte{'E'}, 200)
+
+	sr, _ := NewSessionRegistry()
+	sessionRegistry = sr
+	svc := NewFileOpsService(core.Storage, NewHandleRegistry())
+	ctx := context.Background()
+	info, _ := resolveSession(ctx, u.ID)
+	ctx = withSession(ctx, info)
+	share := ShareInfo{BucketID: b.ID, ShareName: "ow-b2", Mode: "readwrite"}
+
+	// 配额 400,已用 200;覆盖增长 100(300 总量)→ 未超额,放行
+	open, err := svc.Open(ctx, &OpenArgs{BucketID: b.ID, Path: "f.txt", Write: true, Intent: "overwrite_or_create"}, share, 1)
+	if err != nil {
+		t.Fatalf("open overwrite: %v", err)
+	}
+	if _, err := svc.Write(ctx, open.HandleID, 0, bytes.Repeat([]byte{'G'}, 300)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := svc.Close(ctx, open.HandleID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	got := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f.ID)]
+	if !bytes.Equal(got, bytes.Repeat([]byte{'G'}, 300)) {
+		t.Fatalf("object len = %d, want 300", len(got))
+	}
+	var uu model.User
+	if err := core.DB.First(&uu, u.ID).Error; err != nil || uu.UsedSpace != 300 {
+		t.Fatalf("user used = %d, want 300(200-200+300)", uu.UsedSpace)
+	}
+}

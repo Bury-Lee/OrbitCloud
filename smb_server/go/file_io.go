@@ -241,6 +241,9 @@ func (f *FileOpsService) checkWriteQuota(ctx context.Context, h *remoteHandle) e
 // syncFileMeta 冲刷后同步元数据:文件记录大小、桶用量与**行为者**用户用量保持一致。
 // 说明:对象已与 h.size 一致;对比记录旧值,差值对称累加/扣减桶用量与
 // 行为者(h.userID)用户用量(正负通用;截断缩小同步归还行为者)。
+// 用户用量钳制不为负:跨所有者截断/缩小(操作者 ≠ UploadedBy)时,行为者
+// 并未为旧大小全额入账,直接相减会打成负数,负用量会使"已超额"判断永不成立
+// (绕过配额闸门),故与 server.returnUserUsedSpace 同款 CASE 钳制。
 func (f *FileOpsService) syncFileMeta(ctx context.Context, h *remoteHandle) error {
 	var old model.File // 旧记录
 	if err := core.DB.WithContext(ctx).First(&old, h.fileID).Error; err == nil { // 读旧记录成功?
@@ -249,10 +252,10 @@ func (f *FileOpsService) syncFileMeta(ctx context.Context, h *remoteHandle) erro
 			_ = core.DB.WithContext(ctx).Model(&model.Bucket{}). // 对称更新桶用量
 				Where("id = ?", h.bucketID).
 				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error // used_space 累加差值(正负通用)
-			// 对称更新行为者用户用量(与桶同语义;失败仅记日志,对账兜底)
+			// 对称更新行为者用户用量(钳制不为负;失败仅记日志,对账兜底)
 			_ = core.DB.WithContext(ctx).Model(&model.User{}).
 				Where("id = ?", h.userID).
-				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error
+				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space + ? < 0 THEN 0 ELSE used_space + ? END", delta, delta)).Error
 		}
 	}
 	return core.DB.WithContext(ctx).Model(&model.File{}).

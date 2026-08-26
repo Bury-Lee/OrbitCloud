@@ -390,6 +390,8 @@ func (f *FileOpsService) CloseAllByConn(connID uint64) {
 // deleteFolderRecursive 递归删除目录树(SMB 语义,同步深度优先):
 //  1. 先递归删除子文件夹;2) 删除本目录下全部文件(对象 + 记录 + 桶用量/用户用量扣减);
 //  3. 硬删本目录行。所有删除为幂等,单条失败即中止(重试可续)。
+// 记录/用量/分享级联在单事务内原子完成(防部分删除后用量漂移),对象删除在事务外(幂等,
+// 失败忽略,记录为准)。
 func (f *FileOpsService) deleteFolderRecursive(ctx context.Context, bucketID, folderID uint) error {
 	// 子文件夹递归。
 	var subs []model.Folder // 子文件夹集合
@@ -403,36 +405,64 @@ func (f *FileOpsService) deleteFolderRecursive(ctx context.Context, bucketID, fo
 			return err // 子树失败即中止(重试可续)
 		}
 	}
-	// 本目录文件:删对象 + 删记录 + 扣减桶用量与归属用户用量。
+	// 本目录文件:删对象(幂等,失败忽略,记录为准)。
 	var files []model.File // 本目录文件集合
 	if err := core.DB.WithContext(ctx).
 		Where("bucket_id = ? AND folder_id = ?", bucketID, folderID). // 查文件
 		Find(&files).Error; err != nil { // 查询
 		return err // 失败上抛
 	}
-	var freed int64             // 累计释放空间(桶用量扣减)
 	byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
-	for i := range files { // 逐个删除
+	var freed int64            // 累计释放空间(桶用量扣减)
+	for i := range files { // 逐个删对象
 		fl := &files[i] // 取行
 		_ = f.st.Delete(ctx, utils.BucketEncoder(bucketID), fmt.Sprintf("%d", fl.ID)) // 删对象(失败忽略,记录为准)
-		if err := core.DB.WithContext(ctx).Unscoped().Delete(&model.File{}, fl.ID).Error; err != nil { // 硬删记录(不占唯一索引,同名可重建)
-			return err // 失败上抛
-		}
 		freed += fl.FileSize // 累计释放
 		byUser[fl.UploadedBy] += fl.FileSize
 	}
-	if freed > 0 { // 有释放空间?
-		_ = core.DB.WithContext(ctx).Model(&model.Bucket{}).
-			Where("id = ?", bucketID).
-			UpdateColumn("used_space", gorm.Expr("used_space - ?", freed)).Error // 桶用量扣减
-		// 用户用量归还(按文件归属者;钳制不为负)
-		for uid, sz := range byUser {
-			_ = core.DB.WithContext(ctx).Model(&model.User{}).Where("id = ?", uid).
-				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space - ? < 0 THEN 0 ELSE used_space - ? END", sz, sz)).Error
+	// 单事务:硬删文件记录 + 级联删分享 + 归还桶/用户用量 + 硬删目录行(原子)。
+	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(files) > 0 { // 有文件?
+			ids := make([]uint, 0, len(files)) // 文件 ID 集合
+			for i := range files {
+				ids = append(ids, files[i].ID)
+			}
+			if err := tx.Unscoped().Where("id IN ?", ids).Delete(&model.File{}).Error; err != nil { // 硬删记录
+				return err // 失败上抛(整体回滚)
+			}
+			// 级联:删除指向这些文件的分享
+			if err := tx.Unscoped().
+				Where("bucket_item_id IN ? AND item_type = 'file'", ids).
+				Delete(&model.ShareLink{}).Error; err != nil {
+				return err
+			}
 		}
+		// 级联:删除指向该目录的分享
+		if err := tx.Unscoped().
+			Where("bucket_item_id = ? AND item_type = 'folder'", folderID).
+			Delete(&model.ShareLink{}).Error; err != nil {
+			return err
+		}
+		// 归还桶用量(钳制不为负)
+		if freed > 0 {
+			if err := tx.Model(&model.Bucket{}).Where("id = ?", bucketID).
+				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space - ? < 0 THEN 0 ELSE used_space - ? END", freed, freed)).Error; err != nil {
+				return err
+			}
+		}
+		// 归还用户用量(按归属者,钳制不为负)
+		for uid, sz := range byUser {
+			if err := tx.Model(&model.User{}).Where("id = ?", uid).
+				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space - ? < 0 THEN 0 ELSE used_space - ? END", sz, sz)).Error; err != nil {
+				return err
+			}
+		}
+		// 硬删本目录行(幂等)。
+		return tx.Unscoped().Delete(&model.Folder{}, folderID).Error
+	}); err != nil {
+		return err // 失败上抛(事务回滚,重试可续)
 	}
-	// 硬删本目录。
-	return core.DB.WithContext(ctx).Unscoped().Delete(&model.Folder{}, folderID).Error // 硬删目录行(幂等)
+	return nil
 }
 
 // isRangeNotSatisfiable 判断对象存储范围读越界错误(S3 416)。

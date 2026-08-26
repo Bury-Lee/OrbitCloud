@@ -330,3 +330,116 @@ func TestUpdateUserQuota(t *testing.T) {
 	}
 }
 
+// TestProcessDeleteTaskReturnsUserUsage 整桶删除(DeleteTask,DirID=0)按归属者归还用户用量:
+// 此前收尾事务只删记录/桶/分享,从不归还 → 用户用量永久虚高(与 processDeleteDirTask 不一致)。
+func TestProcessDeleteTaskReturnsUserUsage(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "dt-admin", model.Admin)
+	quota := int64(1000)
+	u1 := mkUserQuota(t, "dt-u1", &quota, 200) // 有配额用户(200 已用,含桶内 120)
+	u2 := mkUserQuota(t, "dt-u2", nil, 100)    // 无限用户(100 已用,含桶内 80)
+	b := mkBucketP0(t, "dt-bucket", model.NormalUser, admin.ID)
+	setUsed(t, b.ID, 200)
+
+	// 桶内两个文件(对象 + 记录),分别归属 u1/u2
+	f1 := mkFileP0(t, b.ID, 0, "a.txt", 120)
+	core.DB.Model(&model.File{}).Where("id = ?", f1.ID).Update("uploaded_by", u1.ID)
+	putMemObject(t, b.ID, f1.ID, strings.Repeat("x", 120))
+	f2 := mkFileP0(t, b.ID, 0, "b.txt", 80)
+	core.DB.Model(&model.File{}).Where("id = ?", f2.ID).Update("uploaded_by", u2.ID)
+	putMemObject(t, b.ID, f2.ID, strings.Repeat("y", 80))
+
+	// 落整桶删除任务并同步处理
+	task := &model.DeleteTask{BucketID: b.ID, DirID: 0, Status: 0}
+	if err := core.DB.Create(task).Error; err != nil {
+		t.Fatalf("create delete task: %v", err)
+	}
+	if err := ProcessDeleteTask(ctx, ProcessDeleteTaskArg{TaskID: task.ID}); err != nil {
+		t.Fatalf("ProcessDeleteTask: %v", err)
+	}
+
+	// 用量按归属者归还(200-120=80;100-80=20)
+	if got := userUsed(t, u1.ID); got != 80 {
+		t.Fatalf("u1 used = %d, want 80(整桶删除归还 120)", got)
+	}
+	if got := userUsed(t, u2.ID); got != 20 {
+		t.Fatalf("u2 used = %d, want 20(整桶删除归还 80)", got)
+	}
+	// 桶与任务已硬删
+	var cnt int64
+	if err := core.DB.Unscoped().Model(&model.Bucket{}).Where("id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("bucket rows = %d, want 0", cnt)
+	}
+	if err := core.DB.Unscoped().Model(&model.DeleteTask{}).Where("id = ?", task.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("task rows = %d, want 0", cnt)
+	}
+}
+
+// TestCopyFolderOverQuotaRejected 已超额操作者发起文件夹复制 → 直接 ErrQuotaExceeded,
+// 不建目标目录、不落任务(此前会落任务后逐文件失败,永久卡死)。
+func TestCopyFolderOverQuotaRejected(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "cq-admin", model.Admin)
+	quota := int64(100)
+	over := mkUserQuota(t, "cq-over", &quota, 110) // 已超额
+	src := mkBucketP0(t, "cq-src", model.NormalUser, admin.ID)
+	dst := mkBucketP0(t, "cq-dst", model.NormalUser, admin.ID)
+	srcFolder := mkFolderP0(t, src.ID, 0, over.ID, "sub")
+	f := mkFileP0(t, src.ID, srcFolder.ID, "a.txt", 20)
+	putMemObject(t, src.ID, f.ID, strings.Repeat("a", 20))
+
+	if _, err := CopyFolder(ctx, CopyFolderArg{
+		UserID: over.ID, SrcBucketID: src.ID, SrcFolderID: srcFolder.ID,
+		DstBucketID: dst.ID, DstDirPath: "",
+	}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("over-quota CopyFolder: want ErrQuotaExceeded, got %v", err)
+	}
+	// 无任务、目标桶无任何目录
+	var cnt int64
+	if err := core.DB.Model(&model.CopyTask{}).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("copy task rows = %d, want 0", cnt)
+	}
+	if err := core.DB.Model(&model.Folder{}).Where("bucket_id = ?", dst.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("dst folder rows = %d, want 0", cnt)
+	}
+}
+
+// TestCopyTaskQuotaAbandoned 存量复制任务遇配额拒绝 → 任务放弃(硬删),防每轮无限重试;
+// 已复制部分保留(目标无新增残留文件)。
+func TestCopyTaskQuotaAbandoned(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "ca-admin", model.Admin)
+	quota := int64(100)
+	over := mkUserQuota(t, "ca-over", &quota, 110) // 已超额
+	src := mkBucketP0(t, "ca-src", model.NormalUser, admin.ID)
+	dst := mkBucketP0(t, "ca-dst", model.NormalUser, admin.ID)
+	srcFolder := mkFolderP0(t, src.ID, 0, over.ID, "sub")
+	dstFolder := mkFolderP0(t, dst.ID, 0, over.ID, "sub-copy")
+	f := mkFileP0(t, src.ID, srcFolder.ID, "a.txt", 20)
+	putMemObject(t, src.ID, f.ID, strings.Repeat("a", 20))
+
+	task := &model.CopyTask{
+		BucketID: src.ID, SourceFolderID: srcFolder.ID,
+		DstBucketID: dst.ID, DstFolderID: dstFolder.ID,
+		DstDirPath: "", DstName: "sub-copy", UploadedBy: over.ID, Status: 0,
+	}
+	if err := core.DB.Create(task).Error; err != nil {
+		t.Fatalf("create copy task: %v", err)
+	}
+	if err := ProcessCopyTask(ctx, ProcessCopyTaskArg{TaskID: task.ID}); err == nil {
+		t.Fatal("over-quota copy task: want error, got nil")
+	}
+	// 任务已硬删(不再续跑)
+	var cnt int64
+	if err := core.DB.Unscoped().Model(&model.CopyTask{}).Where("id = ?", task.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("copy task rows = %d, want 0", cnt)
+	}
+	// 目标目录下无新增文件
+	if err := core.DB.Model(&model.File{}).Where("bucket_id = ? AND folder_id = ?", dst.ID, dstFolder.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("dst file rows = %d, want 0", cnt)
+	}
+}
+

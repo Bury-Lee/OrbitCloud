@@ -107,13 +107,21 @@ func processDeleteTask(ctx context.Context, taskID uint) error {
 		return nil // 锁被抢占,放弃本轮
 	}
 
-	// 收尾(单事务硬删除):条目记录 + 桶 + 任务 + 级联删分享
+	// 收尾(单事务硬删除):条目记录 + 桶 + 任务 + 级联删分享 + 归还用户用量
 	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 先取全部条目 ID(share_links 无 bucket 列,按条目 ID 匹配;须在删记录前查)
-		var fileIDs, folderIDs []uint
-		if err := tx.Model(&model.File{}).Where("bucket_id = ?", task.BucketID).Pluck("id", &fileIDs).Error; err != nil {
+		// 先取全部文件记录(用量归还按 UploadedBy 分组;须在删记录前查;
+		// share_links 无 bucket 列,按条目 ID 匹配)。
+		var files []model.File
+		if err := tx.Model(&model.File{}).Where("bucket_id = ?", task.BucketID).Find(&files).Error; err != nil {
 			return err
 		}
+		fileIDs := make([]uint, 0, len(files))
+		byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
+		for i := range files {
+			fileIDs = append(fileIDs, files[i].ID)
+			byUser[files[i].UploadedBy] += files[i].FileSize
+		}
+		var folderIDs []uint
 		if err := tx.Model(&model.Folder{}).Where("bucket_id = ?", task.BucketID).Pluck("id", &folderIDs).Error; err != nil {
 			return err
 		}
@@ -143,6 +151,12 @@ func processDeleteTask(ctx context.Context, taskID uint) error {
 		}
 		if err := tx.Unscoped().Delete(&model.DeleteTask{}, taskID).Error; err != nil {
 			return err
+		}
+		// 用户用量归还(按文件归属者分组;整桶删除释放全部占用,钳制不为负)
+		for uid, sz := range byUser {
+			if err := returnUserUsedSpace(tx, uid, sz); err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {

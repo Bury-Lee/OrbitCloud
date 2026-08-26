@@ -233,6 +233,11 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 	if dstBucket.Status != 1 {
 		return nil, ErrForbidden
 	}
+	// 用户配额审查(写入前):已超额用户直接拒绝发起复制,不建任何目录/任务;
+	// 软限额下未超额可发起,允许复制过程越过限额(中途超额由任务放弃语义兜底)。
+	if err := CheckUserQuota(ctx, userID); err != nil {
+		return nil, err
+	}
 
 	// 目标父目录规范化 + 解析(建父链)
 	dstDir, err := common.NormalizeDirPath(dstDirPath)

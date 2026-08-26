@@ -24,7 +24,6 @@ import (
 	"orbitcloud/core"   // 对象存储抽象与全局 DB
 	"orbitcloud/model"  // 数据模型(File/Folder/Bucket/User)
 	"orbitcloud/server" // server 层业务服务(GetBucket/CreateDir 等)
-	"orbitcloud/utils"  // 工具(桶名编码)
 )
 
 // FileOpsService 文件操作服务:实现全部文件类操作的落库/落对象逻辑。
@@ -409,7 +408,8 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	}
 
 	// ---- 5. 按 Intent 处理创建处置 ----
-	created := false // 本次是否新建了文件记录(变更日志用)
+	created := false    // 本次是否新建了文件记录(变更日志用)
+	truncAt := int64(-1) // 截断点(默认无截断;覆盖打开已存在文件 → 0:旧数据整体作废)
 	switch args.Intent { // 创建处置语义分发
 	case "open": // 只打开
 		if !exists { // 文件不存在?
@@ -443,14 +443,13 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 			}
 			created = true // 标记新建(变更日志)
 			size = 0 // 新文件大小 0
-		} else { // 已存在 → 清空
-			// 截断:更新记录大小并删对象(下一次 Flush 整体重传)。
-			if err := core.DB.WithContext(ctx).Model(&model.File{}).
-				Where("id = ?", fileID).Update("file_size", 0).Error; err != nil { // 记录大小清零
-				return nil, err // 失败上抛
-			}
-			_ = f.st.Delete(ctx, utils.BucketEncoder(share.BucketID), fmt.Sprintf("%d", fileID)) // 删对象(内容清空)
-			size = 0 // 句柄大小清零
+		} else { // 已存在 → 清空(对称记账:保留记录与对象,冲刷时按新旧差值记账)
+			// 不再清零记录/删对象:冲刷快照 truncateAt=0 使旧数据整体作废(零填充),
+			// syncFileMeta 按 delta = 新大小 - 旧大小 对称入账(归还旧占用、计入新占用),
+			// 配额审查亦按真实增量(此前按"新大小-0"虚增旧占用);打开后未冲刷即崩溃/
+			// 断连时记录与对象保持旧内容,不丢数据(此前打开即删对象、清零记录)。
+			size = 0    // 句柄大小清零(逻辑 EOF)
+			truncAt = 0 // 截断点:旧对象数据作废(冲刷时零填充,flushSpec 视为脏)
 		}
 	default: // 未知意图
 		return nil, fmt.Errorf("open: unknown intent %q", args.Intent) // 协议不兼容:报错
@@ -468,7 +467,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		fileID:        fileID, // 文件记录
 		objectKey:     fmt.Sprintf("%d", fileID), // 对象 key = 记录 ID 字符串
 		size:          size, // 已知大小
-		truncateAt:    -1, // 无截断(默认)
+		truncateAt:    truncAt, // 截断点(覆盖打开已存在文件 = 0)
 		deleteOnClose: args.DeleteOnClose, // 关闭即删标记
 		userID:        userID, // 操作者
 		session:       info, // 身份(可见性过滤用)

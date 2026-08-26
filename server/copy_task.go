@@ -106,6 +106,12 @@ func processCopyFileTask(ctx context.Context, taskID uint) error {
 		DstFilename: task.DstName,
 		DstFolderID: task.DstFolderID,
 	}); err != nil && !errors.Is(err, ErrConflict) {
+		// 配额拒绝:放弃任务(保留已复制部分,用户可自行清理),防每轮无限重试卡死
+		if errors.Is(err, ErrQuotaExceeded) {
+			_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+			log.Errorf("process copy file task %d: quota exceeded, task aborted", taskID)
+			return fmt.Errorf("process copy file task %d: copy: %w", taskID, err)
+		}
 		return fmt.Errorf("process copy file task %d: copy: %w", taskID, err)
 	}
 
@@ -261,6 +267,13 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 				if cerr != nil {
 					if errors.Is(cerr, ErrConflict) {
 						continue // 目标已存在 = 上轮已复制,跳过(幂等)
+					}
+					// 配额拒绝:放弃任务(保留已复制部分,用户可自行清理),
+					// 防每轮无限重试卡死在同一个文件
+					if errors.Is(cerr, ErrQuotaExceeded) {
+						_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+						log.Errorf("process copy task %d: copy file %d: quota exceeded, task aborted", taskID, sf.ID)
+						return fmt.Errorf("process copy task %d: copy file %d: %w", taskID, sf.ID, cerr)
 					}
 					return fmt.Errorf("process copy task %d: copy file %d: %w", taskID, sf.ID, cerr)
 				}
