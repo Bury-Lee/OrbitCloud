@@ -61,7 +61,6 @@ pub async fn handle(
         // Go 侧 Close 审查拒绝时数据未落盘,静默吞错会让客户端误以为保存成功,
         // 留下 0 字节幽灵文件(数据丢失且无提示)。
         if let Err(e) = h.close().await {
-            eprintln!("[CLOSE-ERR] path={} close failed: {e}", path);
             return HandlerResponse::err(e.to_nt_status());
         }
     }
