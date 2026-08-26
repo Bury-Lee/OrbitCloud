@@ -57,7 +57,12 @@ pub async fn handle(
         None
     };
     if let Some(h) = handle {
-        let _ = h.close().await;
+        // 关闭错误(如写回配额超限 STATUS_DISK_FULL)必须上报客户端:
+        // Go 侧 Close 审查拒绝时数据未落盘,静默吞错会让客户端误以为保存成功,
+        // 留下 0 字节幽灵文件(数据丢失且无提示)。
+        if let Err(e) = h.close().await {
+            return HandlerResponse::err(e.to_nt_status());
+        }
     }
     if delete_on_close {
         let tree = tree_arc.read().await;
