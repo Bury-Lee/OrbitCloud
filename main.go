@@ -25,8 +25,11 @@ import (
 )
 
 func main() {
-	defer func() { // 发生 panic 时打印堆栈后崩溃,不恢复
-		fmt.Printf("\norbitcloud panic stack:\n%s\n", string(utils.Stack(1)))
+	defer func() { // 仅真正 panic 时打印堆栈后崩溃(不恢复);正常退出不触发
+		if r := recover(); r != nil {
+			fmt.Printf("\norbitcloud panic: %v\nstack:\n%s\n", r, string(utils.Stack(1)))
+			log.Fatalf("orbitcloud panic: %v\n%s", r, string(utils.Stack(1)))
+		}
 	}()
 	// 0. 先处理无需初始化的指令(flag.RunPreInit):-initConfig 用内置默认配置强制覆盖
 	//    生成 ./OrbitCloud.yaml 后退出;必须在 appinit 初始化之前执行。
