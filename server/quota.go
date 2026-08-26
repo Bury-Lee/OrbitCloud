@@ -25,7 +25,7 @@ func CheckBucketQuota(ctx context.Context, bucketID uint, delta int64) error {
 	if delta <= 0 { // 无增量(如覆盖写回持平)→ 无需审查
 		return nil
 	}
-	var b model.Bucket // 桶记录(配额/已用)
+	var b model.Bucket                                                         // 桶记录(配额/已用)
 	if err := core.DB.WithContext(ctx).First(&b, bucketID).Error; err != nil { // 查桶
 		return err // 失败上抛(调用方按原语义处理)
 	}
@@ -39,17 +39,20 @@ func CheckBucketQuota(ctx context.Context, bucketID uint, delta int64) error {
 }
 
 // CheckUserQuota 用户配额审查(写入前)。配额三态语义:
-//   nil(不限)→ 放行;0(仅可读)→ 拒绝任何新增占用(delta > 0);
-//   >0 → used_space + delta > quota 即拒绝。
-// 与桶配额并行:上传/复制/SMB 写回需桶、用户两级配额同时通过,任一超限即拒绝。
 //
-// 入参:ctx 上下文;userID 行为者 users.id;delta 本次写入将增加的字节数(须 > 0)
-// 返回:ErrQuotaExceeded(超限/仅可读)| nil(放行);查用户失败原样上抛
-func CheckUserQuota(ctx context.Context, userID uint, delta int64) error {
-	if delta <= 0 { // 无增量 → 无需审查
-		return nil
-	}
-	var u model.User // 用户记录(配额/已用)
+//	nil(不限)→ 放行;0(仅可读)→ 拒绝任何新增占用;
+//	>0 → 软限额:未超额(used_space <= quota)时放行,允许本次写入越过限额
+//	     ("最后一个文件"可超);已超额(used_space > quota)后拒绝一切新增占用,
+//	     直至用量回落到限额内。
+//
+// 与桶配额并行:上传/复制/SMB 写回需桶、用户两级配额同时通过,任一拒绝即失败。
+// 调用契约:仅"新增占用"路径(delta > 0)调用本函数;释放/持平路径
+// (删除/截断缩小/覆盖写回持平,delta <= 0)无需审查,由调用方先行跳过。
+//
+// 入参:ctx 上下文;userID 行为者 users.id
+// 返回:ErrQuotaExceeded(仅可读/已超额)| nil(放行);查用户失败原样上抛
+func CheckUserQuota(ctx context.Context, userID uint) error {
+	var u model.User                                                         // 用户记录(配额/已用)
 	if err := core.DB.WithContext(ctx).First(&u, userID).Error; err != nil { // 查用户
 		return err // 失败上抛(调用方按原语义处理)
 	}
@@ -59,7 +62,7 @@ func CheckUserQuota(ctx context.Context, userID uint, delta int64) error {
 	if *u.Quota == 0 { // 0 = 仅可读
 		return ErrQuotaExceeded // 拒绝任何新增占用
 	}
-	if u.UsedSpace+delta > *u.Quota { // 写入后超限?
+	if u.UsedSpace > *u.Quota { // 已超额 → 拒绝新增占用(未超额时单次写入允许越过限额)
 		return ErrQuotaExceeded // 拒绝
 	}
 	return nil // 放行

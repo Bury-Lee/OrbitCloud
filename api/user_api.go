@@ -67,7 +67,7 @@ func (UserAPI) ListUsers(c *gin.Context) {
 
 // UpdateUser 管理员修改指定用户(PUT /users/:id)。
 // 请求体:{"password"?,"name"?,"email"?,"permission_level"?,"status"?,"quota"?}
-// (指针字段才更新);quota 三态:缺省 = 不更新,null = 置为不限,0 = 仅可读,>0 = 字节限额;
+// (指针字段才更新);quota 三态:缺省 = 不更新,null = 置为不限,0 = 仅可读,>0 = 软字节限额;
 // 不能操作同级或更高级用户。管理员判定由路由挂载的 AdminMiddleware 统一完成。
 func (UserAPI) UpdateUser(c *gin.Context) {
 	// 解析路径参数 :id
@@ -126,7 +126,7 @@ func (UserAPI) UpdateUser(c *gin.Context) {
 }
 
 // UpdateUserQuota 管理员设置用户配额(PUT /users/:id/quota)。
-// 请求体:{"quota": <int64|null>}(null = 不限;0 = 仅可读;>0 = 字节限额)。
+// 请求体:{"quota": <int64|null>}(null = 不限;0 = 仅可读;>0 = 软字节限额)。
 // 与 DB 语义一致:quota 即最终值;不能操作同级或更高级用户(AdminMiddleware 已保证管理员)。
 func (UserAPI) UpdateUserQuota(c *gin.Context) {
 	// 解析路径参数 :id

@@ -322,7 +322,7 @@ type UpdateUserInput struct {
 	Email           string                 // 邮箱
 	PermissionLevel *model.PermissionLevel // 权限等级(不能设为 0;0 仅命令行添加)
 	Status          *int                   // 1 正常 / 0 禁用
-	Quota           *int64                 // 配额:0 = 仅可读;>0 = 字节限额;负数拒绝;nil = 不更新(置回不限走 UpdateUserQuota)
+	Quota           *int64                 // 配额:0 = 仅可读;>0 = 软字节限额(未超额放行,已超额拒绝);负数拒绝;nil = 不更新(置回不限走 UpdateUserQuota)
 }
 
 // UpdateUserArg 用户更新入参(管理员改他人)。
@@ -393,7 +393,7 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 type UpdateUserQuotaArg struct {
 	OperatorID uint   // 操作者 users.id(操作日志)
 	TargetID   uint   // 目标用户 users.id
-	Quota      *int64 // 最终配额值:nil = 不限;0 = 仅可读;>0 = 字节限额;负数拒绝
+	Quota      *int64 // 最终配额值:nil = 不限;0 = 仅可读;>0 = 软字节限额;负数拒绝
 }
 
 // UpdateUserQuota 设置用户配额(PUT /users/:id/quota;"不能操作同级/更高级"由 api 层预检)。

@@ -126,7 +126,7 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 	if err := CheckBucketQuota(ctx, dstBucketID, srcFile.FileSize); err != nil {
 		return nil, err
 	}
-	if err := CheckUserQuota(ctx, userID, srcFile.FileSize); err != nil {
+	if err := CheckUserQuota(ctx, userID); err != nil {
 		return nil, err
 	}
 

@@ -124,9 +124,19 @@ func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 	var flushErr error // 冲刷错误记录(delete_on_close 时优先返回删除错误)
 	if !h.isDir && h.writeCache != nil { // 文件句柄且有写回缓存?
 		h.mu.Lock() // 锁句柄
-		flushErr = h.writeCache.FlushToStorage(ctx, f.st, utils.BucketEncoder(h.bucketID), h.objectKey, h.flushSpec()) // 整体上传(快照拼装)
-		if flushErr == nil {
-			h.truncateAt = -1 // 截断已固化
+		spec := h.flushSpec() // 冲刷快照(逻辑 EOF/截断点/写段,一次性取出)
+		if spec.dirty { // 有变化?
+			// 配额审查(写入前):与 Flush/提前冲刷一致,超限拒绝(STATUS_DISK_FULL);
+			// 此前 Close 直接冲刷绕过审查,已超额用户可经此持续增长,此处补齐。
+			flushErr = f.checkWriteQuota(ctx, h)
+			if flushErr == nil { // 审查通过?
+				flushErr = h.writeCache.FlushToStorage(ctx, f.st, utils.BucketEncoder(h.bucketID), h.objectKey, spec) // 整体上传(快照拼装)
+				if flushErr == nil {
+					h.truncateAt = -1 // 截断已固化
+				}
+			} else {
+				smbErrorf("smb_gateway: 关闭句柄=%d 配额审查拒绝:%v", h.handleID, flushErr) // 记录拒绝原因
+			}
 		}
 		h.mu.Unlock() // 解锁
 		if flushErr == nil { // 上传成功?

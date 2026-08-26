@@ -102,7 +102,7 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 	if err := CheckBucketQuota(ctx, bucketID, size); err != nil {
 		return nil, err
 	}
-	if err := CheckUserQuota(ctx, userID, size); err != nil {
+	if err := CheckUserQuota(ctx, userID); err != nil {
 		return nil, err
 	}
 

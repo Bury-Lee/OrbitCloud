@@ -1,7 +1,8 @@
 // quota_test.go —— 桶配额 + 用户配额审查与记账测试:
-//   - CheckBucketQuota / CheckUserQuota:不限 / 未超 / 超限 / 临界 / 零负增量;
-//   - 上传链路:超用户配额拒绝(413 语义)、记账归属上传者、与桶用量同事务;
-//   - 复制链路:操作者记账 + 超限拒绝;
+//   - CheckBucketQuota:不限 / 未超 / 超限 / 临界 / 零负增量(桶为硬限额);
+//   - CheckUserQuota:不限 / 仅可读 / 未超放行 / 越过限额放行(软限额)/ 已超额拒绝;
+//   - 上传链路:已超额拒绝(413 语义)、记账归属上传者、与桶用量同事务;
+//   - 复制链路:操作者记账 + 已超额拒绝;
 //   - 删除链路:按文件归属者归还用户用量;
 //   - 管理员改配额(UpdateUser.Quota)。
 // 基于内存 SQLite + 内存存储 mock(与 p0_acl_test.go 同环境)。
@@ -123,38 +124,47 @@ func TestCheckUserQuota(t *testing.T) {
 
 	t.Run("nil_quota_unlimited_passes", func(t *testing.T) {
 		u := mkUserQuota(t, "uq-unlimited", nil, 100) // nil = 不限
-		if err := CheckUserQuota(ctx, u.ID, 1<<30); err != nil {
+		if err := CheckUserQuota(ctx, u.ID); err != nil {
 			t.Fatalf("nil quota should pass, got %v", err)
 		}
 	})
 	t.Run("zero_quota_readonly_rejects", func(t *testing.T) {
 		zero := int64(0)
 		u := mkUserQuota(t, "uq-readonly", &zero, 0) // 0 = 仅可读
-		if err := CheckUserQuota(ctx, u.ID, 1); !errors.Is(err, ErrQuotaExceeded) {
+		if err := CheckUserQuota(ctx, u.ID); !errors.Is(err, ErrQuotaExceeded) {
 			t.Fatalf("quota=0 should reject any growth, got %v", err)
-		}
-		// 无增量放行(覆盖写持平不算新增占用)
-		if err := CheckUserQuota(ctx, u.ID, 0); err != nil {
-			t.Fatalf("delta=0 should pass, got %v", err)
 		}
 	})
 	t.Run("within_passes", func(t *testing.T) {
 		quota := int64(1000)
 		u := mkUserQuota(t, "uq-within", &quota, 400)
-		if err := CheckUserQuota(ctx, u.ID, 600); err != nil {
-			t.Fatalf("used+delta == quota should pass, got %v", err)
+		if err := CheckUserQuota(ctx, u.ID); err != nil {
+			t.Fatalf("under quota should pass, got %v", err)
 		}
 	})
-	t.Run("exceeds_rejected", func(t *testing.T) {
+	t.Run("crossing_allowed", func(t *testing.T) {
 		quota := int64(1000)
-		u := mkUserQuota(t, "uq-exceed", &quota, 400)
-		if err := CheckUserQuota(ctx, u.ID, 601); !errors.Is(err, ErrQuotaExceeded) {
-			t.Fatalf("want ErrQuotaExceeded, got %v", err)
+		u := mkUserQuota(t, "uq-cross", &quota, 400)
+		if err := CheckUserQuota(ctx, u.ID); err != nil {
+			t.Fatalf("not over quota yet: crossing write should pass, got %v", err)
+		}
+	})
+	t.Run("over_quota_rejected", func(t *testing.T) {
+		quota := int64(1000)
+		u := mkUserQuota(t, "uq-over", &quota, 1100) // 已超额
+		if err := CheckUserQuota(ctx, u.ID); !errors.Is(err, ErrQuotaExceeded) {
+			t.Fatalf("over quota should reject any growth, got %v", err)
+		}
+		// 恰好等于配额 = 未超额 → 放行
+		at := int64(1000)
+		u2 := mkUserQuota(t, "uq-at", &at, 1000)
+		if err := CheckUserQuota(ctx, u2.ID); err != nil {
+			t.Fatalf("at quota exactly should pass, got %v", err)
 		}
 	})
 }
 
-// TestUserQuotaBlocksUpload 上传链路:超用户配额拒绝,记账归属上传者。
+// TestUserQuotaBlocksUpload 上传链路:未超额放行(可越过限额),已超额拒绝,记账归属上传者。
 func TestUserQuotaBlocksUpload(t *testing.T) {
 	newP0TestDB(t)
 	ctx := context.Background()
@@ -164,46 +174,53 @@ func TestUserQuotaBlocksUpload(t *testing.T) {
 	b := mkBucketP0(t, "uq-bucket", model.NormalUser, admin.ID)
 	setUsed(t, b.ID, 0)
 
-	// 超限:90 + 20 > 100 → 拒绝,无任何记账
+	// 未超额:允许上传并越过限额(90 + 20 = 110 > 100,软配额放行),记账 +20
 	if _, err := UploadFile(ctx, UploadFileArg{
 		UserID: u.ID, BucketID: b.ID, Filename: "big.txt", Reader: bytes.NewReader(make([]byte, 20)),
-	}); !errors.Is(err, ErrQuotaExceeded) {
-		t.Fatalf("upload over user quota: want ErrQuotaExceeded, got %v", err)
-	}
-	if got := userUsed(t, u.ID); got != 90 {
-		t.Fatalf("user used = %d, want 90(拒绝不应记账)", got)
-	}
-
-	// 临界:90 + 10 == 100 → 放行,记账 +10
-	if _, err := UploadFile(ctx, UploadFileArg{
-		UserID: u.ID, BucketID: b.ID, Filename: "ok.txt", Reader: bytes.NewReader(make([]byte, 10)),
 	}); err != nil {
-		t.Fatalf("upload at limit: %v", err)
+		t.Fatalf("upload crossing quota should pass (soft quota): %v", err)
 	}
-	if got := userUsed(t, u.ID); got != 100 {
-		t.Fatalf("user used = %d, want 100", got)
+	if got := userUsed(t, u.ID); got != 110 {
+		t.Fatalf("user used = %d, want 110(越过限额记账)", got)
 	}
 	// 桶用量同步入账
 	var bb model.Bucket
-	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 10 {
-		t.Fatalf("bucket used = %d, want 10", bb.UsedSpace)
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 20 {
+		t.Fatalf("bucket used = %d, want 20", bb.UsedSpace)
 	}
-	// 再上传 → 已满拒绝
+
+	// 已超额(110 > 100):再上传 → 拒绝,无记账
 	if _, err := UploadFile(ctx, UploadFileArg{
 		UserID: u.ID, BucketID: b.ID, Filename: "more.txt", Reader: bytes.NewReader([]byte("x")),
 	}); !errors.Is(err, ErrQuotaExceeded) {
-		t.Fatalf("upload after full: want ErrQuotaExceeded, got %v", err)
+		t.Fatalf("upload after over quota: want ErrQuotaExceeded, got %v", err)
+	}
+	if got := userUsed(t, u.ID); got != 110 {
+		t.Fatalf("user used = %d, want 110(拒绝不应记账)", got)
+	}
+
+	// 恰好等于配额 = 未超额 → 仍放行(允许越过)
+	u2 := mkUserQuota(t, "uq-atlimit", &quota, 100)
+	b2 := mkBucketP0(t, "uq-bucket2", model.NormalUser, admin.ID)
+	if _, err := UploadFile(ctx, UploadFileArg{
+		UserID: u2.ID, BucketID: b2.ID, Filename: "at.txt", Reader: bytes.NewReader([]byte("x")),
+	}); err != nil {
+		t.Fatalf("upload at exactly quota should pass: %v", err)
+	}
+	if got := userUsed(t, u2.ID); got != 101 {
+		t.Fatalf("user used = %d, want 101", got)
 	}
 }
 
-// TestUserQuotaOnCopy 复制链路:操作者记账 + 超限拒绝。
+// TestUserQuotaOnCopy 复制链路:操作者记账 + 已超额拒绝(软配额)。
 func TestUserQuotaOnCopy(t *testing.T) {
 	newP0TestDB(t)
 	ctx := context.Background()
 	admin := mkUserP0(t, "uq-copy-admin", model.Admin)
 	owner := mkUserQuota(t, "uq-owner", nil, 0) // 源文件归属者(不限)
 	quota := int64(100)
-	operator := mkUserQuota(t, "uq-operator", &quota, 90)
+	overOperator := mkUserQuota(t, "uq-over-operator", &quota, 110)   // 已超额
+	normalOperator := mkUserQuota(t, "uq-operator", &quota, 90)       // 未超额
 	b1 := mkBucketP0(t, "uq-src", model.NormalUser, admin.ID)
 	b2 := mkBucketP0(t, "uq-dst", model.NormalUser, admin.ID)
 
@@ -211,21 +228,32 @@ func TestUserQuotaOnCopy(t *testing.T) {
 	f := mkFileP0(t, b1.ID, 0, "a.txt", 20)
 	putMemObject(t, b1.ID, f.ID, "01234567890123456789")
 
-	// 复制 → 操作者超限(90+20>100)拒绝
+	// 已超额操作者(110 > 100)→ 复制拒绝,无记账
 	if _, err := CopyFile(ctx, CopyFileArg{
-		UserID: operator.ID, SrcBucketID: b1.ID, SrcFileID: f.ID,
+		UserID: overOperator.ID, SrcBucketID: b1.ID, SrcFileID: f.ID,
 		DstBucketID: b2.ID, DstDirPath: "", DstFilename: "copy.txt",
 	}); !errors.Is(err, ErrQuotaExceeded) {
-		t.Fatalf("copy over user quota: want ErrQuotaExceeded, got %v", err)
+		t.Fatalf("copy by over-quota operator: want ErrQuotaExceeded, got %v", err)
 	}
-	if got := userUsed(t, operator.ID); got != 90 {
-		t.Fatalf("operator used = %d, want 90", got)
+	if got := userUsed(t, overOperator.ID); got != 110 {
+		t.Fatalf("over operator used = %d, want 110", got)
+	}
+
+	// 未超额操作者(90/100)→ 放行(允许越过限额),记账给操作者 → 110
+	if _, err := CopyFile(ctx, CopyFileArg{
+		UserID: normalOperator.ID, SrcBucketID: b1.ID, SrcFileID: f.ID,
+		DstBucketID: b2.ID, DstDirPath: "", DstFilename: "copy2.txt",
+	}); err != nil {
+		t.Fatalf("copy by under-quota operator: %v", err)
+	}
+	if got := userUsed(t, normalOperator.ID); got != 110 {
+		t.Fatalf("operator used = %d, want 110(越过限额记账)", got)
 	}
 
 	// 源归属者操作(owner 不限配额)→ 成功,记账给 owner
 	if _, err := CopyFile(ctx, CopyFileArg{
 		UserID: owner.ID, SrcBucketID: b1.ID, SrcFileID: f.ID,
-		DstBucketID: b2.ID, DstDirPath: "", DstFilename: "copy2.txt",
+		DstBucketID: b2.ID, DstDirPath: "", DstFilename: "copy3.txt",
 	}); err != nil {
 		t.Fatalf("copy by unlimited user: %v", err)
 	}

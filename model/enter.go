@@ -38,9 +38,10 @@ type User struct {
 	NtHash string `gorm:"type:varchar(32)"`
 	// Quota 用户容量配额(可空,三态语义):
 	//   nil = 不限(默认;NULL);0 = 仅可读(拒绝任何新增占用的写操作);
-	//   >0 = 具体字节限额。写入前审查:超出即拒绝上传/复制/写回增长
-	//   (HTTP 413 / SMB STATUS_DISK_FULL),与桶配额并行、任一超限即拒绝;
-	//   管理员经 PUT /users/:id 调整(null 置回不限,0 置为仅可读)。
+	//   >0 = 软限额:未超额(used_space <= quota)时放行,允许单次写入越过限额
+	//        (可上传"最后一个文件");已超额(used_space > quota)后拒绝一切
+	//        新增占用的写操作(HTTP 413 / SMB STATUS_DISK_FULL),与桶配额并行、
+	//        任一拒绝即失败;管理员经 PUT /users/:id 调整(null 置回不限,0 置为仅可读)。
 	Quota *int64 `gorm:"type:bigint"`
 	// UsedSpace 用户已用空间(字节;冗余统计,记账式维护):
 	// 上传/复制/写回增长(计入行为者)+;硬删/回收站清除(按文件 UploadedBy 归属者)-;

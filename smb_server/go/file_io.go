@@ -217,8 +217,9 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 }
 
 // checkWriteQuota 写回前配额审查(桶 + 用户两级):按"记录旧大小 → 句柄新大小"的差值增量,
-// 增量 > 0 时依次调 server.CheckBucketQuota / server.CheckUserQuota;任一超限返回
-// ErrQuotaExceeded(→ STATUS_DISK_FULL)。
+// 增量 > 0 时依次调 server.CheckBucketQuota / server.CheckUserQuota;任一拒绝返回
+// ErrQuotaExceeded(→ STATUS_DISK_FULL)。用户配额为软限额:未超额放行(允许本次写回
+// 越过限额),已超额(used_space > quota)后拒绝任何增长。
 // 用户口径:新增占用一律算**行为者**(操作者 h.userID),与上传/复制一致;
 // 归还(删除/清除)才按 UploadedBy 所有者(见 server.DeleteFile / trash 清除)。
 // 位置:Flush 与 Write 提前冲刷的落盘之前(不落对象,缓存保留可重试)。
@@ -234,7 +235,7 @@ func (f *FileOpsService) checkWriteQuota(ctx context.Context, h *remoteHandle) e
 	if err := server.CheckBucketQuota(ctx, h.bucketID, delta); err != nil { // 桶配额审查
 		return err
 	}
-	return server.CheckUserQuota(ctx, h.userID, delta) // 用户配额审查(行为者)
+	return server.CheckUserQuota(ctx, h.userID) // 用户配额审查(行为者)
 }
 
 // syncFileMeta 冲刷后同步元数据:文件记录大小、桶用量与**行为者**用户用量保持一致。
