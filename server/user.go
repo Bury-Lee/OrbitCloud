@@ -115,8 +115,10 @@ func Login(ctx context.Context, arg LoginArg) (*LoginResult, error) {
 		return nil, ErrUnauthorized
 	}
 
-	// 更新 last_login(失败不阻断登录)
-	_ = core.DB.Model(&user).Update("last_login", time.Now()).Error
+	// 更新 last_login(失败不阻断登录,但记录日志)
+	if err := core.DB.Model(&user).Update("last_login", time.Now()).Error; err != nil {
+		log.Debugf("login: update last_login for user %d: %v", user.ID, err)
+	}
 
 	// 签发令牌对
 	result, err := issueTokens(ctx, &user, core.DB)

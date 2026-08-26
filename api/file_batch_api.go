@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/core"
+	"orbitcloud/log"
 	"orbitcloud/server"
 )
 
@@ -237,7 +238,7 @@ func (FileAPI) BatchDownload(c *gin.Context) {
 	// zip 为流式响应:失败项无法回写 JSON,仅记录日志
 	for _, r := range results {
 		if r.Error != "" {
-			_ = r.Error // 失败项:zip 内缺失该条目(客户端可见)
+			log.Warnf("batch zip: item %s failed: %s", r.Name, r.Error) // 失败项:zip 内缺失该条目(客户端可见)
 		}
 	}
 }

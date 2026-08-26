@@ -137,12 +137,16 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 	// 写对象存储(key = 记录主键 ID)
 	objectKey := objectKeyForFile(f.ID)
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID)
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil {
+			log.Errorf("upload: cleanup record %d: %v", f.ID, derr)
+		}
 		return nil, fmt.Errorf("upload: seek temp file: %w", err)
 	}
 	if err := core.Storage.Put(ctx, utils.BucketEncoder(bucket.ID), objectKey, tmp, size); err != nil {
 		log.Errorf("upload: storage put %s/%s (bucket %d): %v", utils.BucketEncoder(bucket.ID), objectKey, bucketID, err)
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID) // 补偿:不留空洞
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil { // 补偿:不留空洞
+			log.Errorf("upload: cleanup record %d: %v", f.ID, derr)
+		}
 		return nil, err
 	}
 
@@ -156,8 +160,12 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 	})
 	if err != nil {
 		// 补偿:清理已写对象 + 硬删记录(不留孤儿)
-		_ = core.Storage.Delete(ctx, utils.BucketEncoder(bucket.ID), objectKey)
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID)
+		if derr := core.Storage.Delete(ctx, utils.BucketEncoder(bucket.ID), objectKey); derr != nil {
+			log.Errorf("upload: cleanup object %s/%s: %v", utils.BucketEncoder(bucket.ID), objectKey, derr)
+		}
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil {
+			log.Errorf("upload: cleanup record %d: %v", f.ID, derr)
+		}
 		return nil, fmt.Errorf("upload: finalize record: %w", err)
 	}
 

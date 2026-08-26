@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/common"
+	"orbitcloud/log"
 	"orbitcloud/model"
 	"orbitcloud/utils"
 )
@@ -33,7 +34,9 @@ func serveFileStream(c *gin.Context, rc io.ReadCloser, meta *model.File, disposi
 	if br == nil {
 		c.Header("Content-Length", strconv.FormatInt(meta.FileSize, 10))
 		c.Status(http.StatusOK)
-		_, _ = io.Copy(c.Writer, rc)
+		if _, err := io.Copy(c.Writer, rc); err != nil {
+			log.Errorf("stream: copy file %d (200): %v", meta.ID, err) // 客户端中断/写失败:记录
+		}
 		return
 	}
 
@@ -41,7 +44,9 @@ func serveFileStream(c *gin.Context, rc io.ReadCloser, meta *model.File, disposi
 	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", br.Start, br.End, meta.FileSize))
 	c.Header("Content-Length", strconv.FormatInt(br.Length(), 10))
 	c.Status(http.StatusPartialContent)
-	_, _ = io.Copy(c.Writer, rc)
+	if _, err := io.Copy(c.Writer, rc); err != nil {
+		log.Errorf("stream: copy file %d (206): %v", meta.ID, err) // 客户端中断/写失败:记录
+	}
 }
 
 // writeRangeNotSatisfiable 写出 416(ParseRange 失败/区间越界时调用),

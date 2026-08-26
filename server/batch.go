@@ -448,11 +448,15 @@ func zipFolderTree(ctx context.Context, userID, bucketID, folderID uint, zw *zip
 			}
 			w, werr := zw.Create(fr.prefix + "/" + meta.Name)
 			if werr != nil {
-				_ = rc.Close()
+				if cerr := rc.Close(); cerr != nil {
+					log.Warnf("batch download: close stream file %d: %v", files[i].ID, cerr)
+				}
 				return werr
 			}
 			_, cperr := io.Copy(w, rc)
-			_ = rc.Close()
+			if cerr := rc.Close(); cerr != nil {
+				log.Warnf("batch download: close stream file %d: %v", files[i].ID, cerr)
+			}
 			if cperr != nil {
 				return cperr
 			}

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/common"
+	"orbitcloud/log"
 	"orbitcloud/model"
 	"orbitcloud/server"
 	"orbitcloud/utils"
@@ -139,7 +140,9 @@ func (FileAPI) UploadFiles(c *gin.Context) {
 	}
 	for _, it := range items {
 		if closer, ok := it.Reader.(interface{ Close() error }); ok {
-			_ = closer.Close()
+			if cerr := closer.Close(); cerr != nil {
+				log.Warnf("upload: close temp file: %v", cerr)
+			}
 		}
 	}
 

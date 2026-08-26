@@ -136,8 +136,12 @@ func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 				// 且未写入过时删记录防幽灵文件;覆盖已有文件时旧数据仍在,保留记录)
 				var rec model.File
 				if err := core.DB.WithContext(ctx).First(&rec, h.fileID).Error; err == nil && rec.FileSize == 0 {
-					_ = core.DB.WithContext(ctx).Unscoped().Delete(&model.File{}, h.fileID).Error
-					_ = f.st.Delete(ctx, utils.BucketEncoder(h.bucketID), h.objectKey) // 幂等
+					if derr := core.DB.WithContext(ctx).Unscoped().Delete(&model.File{}, h.fileID).Error; derr != nil {
+						smbErrorf("smb_gateway: 关闭句柄=%d 清理幽灵记录 %d 失败:%v", h.handleID, h.fileID, derr)
+					}
+					if derr := f.st.Delete(ctx, utils.BucketEncoder(h.bucketID), h.objectKey); derr != nil { // 幂等
+						smbErrorf("smb_gateway: 关闭句柄=%d 清理幽灵对象 %s/%s 失败:%v", h.handleID, utils.BucketEncoder(h.bucketID), h.objectKey, derr)
+					}
 				}
 			}
 		}
@@ -392,7 +396,9 @@ func (f *FileOpsService) CloseAllByConn(connID uint64) {
 	closed := 0 // 关闭计数(汇总日志)
 	for _, h := range f.handles.All() { // 遍历全部句柄
 		if h.connID == connID { // 属于该连接?
-			_ = f.Close(context.Background(), h.handleID) // 逐个关闭(触发上传/删除;错误忽略,断连场景尽力而为)
+			if cerr := f.Close(context.Background(), h.handleID); cerr != nil { // 逐个关闭(触发上传/删除)
+				smbDebugf("smb_gateway: 断连回收 句柄=%d 关闭失败:%v", h.handleID, cerr) // 断连场景尽力而为,记录
+			}
 			closed++ // 计数
 		}
 	}

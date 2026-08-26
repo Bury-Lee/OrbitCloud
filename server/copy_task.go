@@ -83,15 +83,19 @@ func processCopyFileTask(ctx context.Context, taskID uint) error {
 	// 后台任务不随 HTTP 请求取消;defer 释放锁(仅当仍持有,防误清新持有者)
 	ctx = context.WithoutCancel(ctx)
 	defer func() {
-		_ = core.DB.WithContext(ctx).Model(&model.CopyTask{}).
+		if err := core.DB.WithContext(ctx).Model(&model.CopyTask{}).
 			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
-			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error
+			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error; err != nil {
+			log.Errorf("process copy file task %d: release lock: %v", taskID, err)
+		}
 	}()
 
 	// 源文件存在性(已删 → 目标侧已复制过,移动完成,删任务)
 	if _, err := loadFile(ctx, task.BucketID, task.SourceFileID); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+			if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+				log.Errorf("process copy file task %d: delete task (source gone): %v", taskID, derr)
+			}
 			return nil
 		}
 		return fmt.Errorf("process copy file task %d: load source: %w", taskID, err)
@@ -108,7 +112,9 @@ func processCopyFileTask(ctx context.Context, taskID uint) error {
 	}); err != nil && !errors.Is(err, ErrConflict) {
 		// 配额拒绝:放弃任务(保留已复制部分,用户可自行清理),防每轮无限重试卡死
 		if errors.Is(err, ErrQuotaExceeded) {
-			_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+			if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+				log.Errorf("process copy file task %d: delete task (quota aborted): %v", taskID, derr)
+			}
 			log.Errorf("process copy file task %d: quota exceeded, task aborted", taskID)
 			return fmt.Errorf("process copy file task %d: copy: %w", taskID, err)
 		}
@@ -160,9 +166,11 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 	// 后台任务不随 HTTP 请求取消;defer 释放锁(仅当仍持有,防误清新持有者)
 	ctx = context.WithoutCancel(ctx)
 	defer func() {
-		_ = core.DB.WithContext(ctx).Model(&model.CopyTask{}).
+		if err := core.DB.WithContext(ctx).Model(&model.CopyTask{}).
 			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
-			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error
+			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error; err != nil {
+			log.Errorf("process copy task %d: release lock: %v", taskID, err)
+		}
 	}()
 
 	// 目标父目录解析(建父链,拿 folderID)
@@ -174,7 +182,9 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 	// 4. 源根文件夹(不存在 → 任务作废:删任务记录返回)
 	srcRoot, err := loadFolderByID(ctx, task.SourceFolderID)
 	if err != nil {
-		_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+		if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+			log.Errorf("process copy task %d: delete task (source folder gone): %v", taskID, derr)
+		}
 		return fmt.Errorf("process copy task %d: load source folder: %w", taskID, err)
 	}
 	_ = srcRoot // 仅用于校验存在
@@ -271,7 +281,9 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 					// 配额拒绝:放弃任务(保留已复制部分,用户可自行清理),
 					// 防每轮无限重试卡死在同一个文件
 					if errors.Is(cerr, ErrQuotaExceeded) {
-						_ = core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error
+						if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+							log.Errorf("process copy task %d: delete task (quota aborted): %v", taskID, derr)
+						}
 						log.Errorf("process copy task %d: copy file %d: quota exceeded, task aborted", taskID, sf.ID)
 						return fmt.Errorf("process copy task %d: copy file %d: %w", taskID, sf.ID, cerr)
 					}

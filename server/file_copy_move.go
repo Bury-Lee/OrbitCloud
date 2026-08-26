@@ -165,7 +165,9 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 	// 对象复制(Get 源 → Put 新 key;失败补偿:删记录)
 	rc, err := core.Storage.Get(ctx, utils.BucketEncoder(srcBucket.ID), objectKeyForFile(srcFile.ID))
 	if err != nil {
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID)
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil {
+			log.Errorf("copy file: cleanup record %d: %v", f.ID, derr)
+		}
 		if errors.Is(err, core.ErrObjectNotFound) {
 			return nil, ErrNotFound
 		}
@@ -175,7 +177,9 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 
 	newKey := objectKeyForFile(f.ID)
 	if err := core.Storage.Put(ctx, utils.BucketEncoder(dstBucket.ID), newKey, rc, srcFile.FileSize); err != nil {
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID)
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil {
+			log.Errorf("copy file: cleanup record %d: %v", f.ID, derr)
+		}
 		return nil, err
 	}
 
@@ -188,8 +192,12 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 		return addUserUsedSpace(tx, userID, srcFile.FileSize) // 用户用量入账(归属操作者)
 	})
 	if err != nil {
-		_ = core.Storage.Delete(ctx, utils.BucketEncoder(dstBucket.ID), newKey)
-		_ = core.DB.Unscoped().Delete(&model.File{}, f.ID)
+		if derr := core.Storage.Delete(ctx, utils.BucketEncoder(dstBucket.ID), newKey); derr != nil {
+			log.Errorf("copy file: cleanup object %s/%s: %v", utils.BucketEncoder(dstBucket.ID), newKey, derr)
+		}
+		if derr := core.DB.Unscoped().Delete(&model.File{}, f.ID).Error; derr != nil {
+			log.Errorf("copy file: cleanup record %d: %v", f.ID, derr)
+		}
 		return nil, fmt.Errorf("copy file: finalize record: %w", err)
 	}
 
@@ -299,7 +307,9 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 		Status:         0,
 	}
 	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
-		_ = core.DB.Unscoped().Delete(&model.Folder{}, topFolder.ID) // 补偿:删预建目录
+		if derr := core.DB.Unscoped().Delete(&model.Folder{}, topFolder.ID).Error; derr != nil { // 补偿:删预建目录
+			log.Errorf("copy folder: cleanup top folder %d: %v", topFolder.ID, derr)
+		}
 		return nil, fmt.Errorf("copy folder: create copy task: %w", err)
 	}
 

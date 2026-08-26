@@ -249,14 +249,22 @@ func (f *FileOpsService) syncFileMeta(ctx context.Context, h *remoteHandle) erro
 	if err := core.DB.WithContext(ctx).First(&old, h.fileID).Error; err == nil { // 读旧记录成功?
 		delta := h.size - old.FileSize // 大小差值
 		if delta != 0 { // 有差值?
-			_ = core.DB.WithContext(ctx).Model(&model.Bucket{}). // 对称更新桶用量
+			// 对称更新桶用量(used_space 累加差值,正负通用)
+			if err := core.DB.WithContext(ctx).Model(&model.Bucket{}).
 				Where("id = ?", h.bucketID).
-				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error // used_space 累加差值(正负通用)
-			// 对称更新行为者用户用量(钳制不为负;失败仅记日志,对账兜底)
-			_ = core.DB.WithContext(ctx).Model(&model.User{}).
+				UpdateColumn("used_space", gorm.Expr("used_space + ?", delta)).Error; err != nil {
+				smbErrorf("smb_gateway: 同步桶用量失败 桶=%d 增量=%d:%v", h.bucketID, delta, err)
+			}
+			// 对称更新行为者用户用量(钳制不为负;失败记录日志,对账兜底)
+			if err := core.DB.WithContext(ctx).Model(&model.User{}).
 				Where("id = ?", h.userID).
-				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space + ? < 0 THEN 0 ELSE used_space + ? END", delta, delta)).Error
+				UpdateColumn("used_space", gorm.Expr("CASE WHEN used_space + ? < 0 THEN 0 ELSE used_space + ? END", delta, delta)).Error; err != nil {
+				smbErrorf("smb_gateway: 同步用户用量失败 用户=%d 增量=%d:%v", h.userID, delta, err)
+			}
 		}
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 记录查询异常:记录日志(记录不存在 = 文件已被并发删除,正常语义不记)
+		smbErrorf("smb_gateway: 同步元数据读旧记录失败 文件=%d:%v", h.fileID, err)
 	}
 	return core.DB.WithContext(ctx).Model(&model.File{}).
 		Where("id = ?", h.fileID).Update("file_size", h.size).Error // 文件记录大小更新为句柄大小

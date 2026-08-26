@@ -75,16 +75,20 @@ func processDeleteTask(ctx context.Context, taskID uint) error {
 
 	// 取得锁后 defer 释放(仅当仍持有锁;完成路径任务记录已删,Update 影响 0 行无害)
 	defer func() {
-		_ = core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
+		if err := core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
 			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
-			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error
+			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error; err != nil {
+			log.Errorf("process delete task %d: release lock: %v", taskID, err)
+		}
 	}()
 
 	// 取桶(定位对象存储桶名;桶不存在 → 删任务记录返回,幂等)
 	bucket, err := GetBucket(ctx, GetBucketArg{ID: task.BucketID})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			_ = core.DB.Unscoped().Delete(&model.DeleteTask{}, taskID).Error
+			if derr := core.DB.Unscoped().Delete(&model.DeleteTask{}, taskID).Error; derr != nil {
+				log.Errorf("process delete task %d: delete task (bucket gone): %v", taskID, derr)
+			}
 			return nil
 		}
 		return err
@@ -201,9 +205,11 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 
 	ctx = context.WithoutCancel(ctx)
 	defer func() {
-		_ = core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
+		if err := core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
 			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
-			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error
+			Updates(map[string]any{"lock_owner": "", "lock_expires_at": nil}).Error; err != nil {
+			log.Errorf("process delete dir task %d: release lock: %v", taskID, err)
+		}
 	}()
 
 	// 深度优先逐文件夹删除

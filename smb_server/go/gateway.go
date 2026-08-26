@@ -162,7 +162,9 @@ func (g *Gateway) shutdownBroadcast(ctx context.Context) {
 		return // 序列化失败(理论不可能):放弃广播
 	}
 	for _, c := range conns { // 逐个连接发送
-		_ = g.writeFrame(c, FrameHeader{Flags: FlagResponse, MsgType: MSG_ERR_RESP, Seq: 0}, body) // 写停机帧(失败忽略:连接可能已断)
+		if werr := g.writeFrame(c, FrameHeader{Flags: FlagResponse, MsgType: MSG_ERR_RESP, Seq: 0}, body); werr != nil { // 写停机帧(失败记录:连接可能已断)
+			smbDebugf("smb_gateway: 广播停机帧失败:%v", werr)
+		}
 	}
 	_ = ctx // 保留参数签名(当前不依赖 ctx)
 }
@@ -287,7 +289,9 @@ func (g *Gateway) handshake(conn net.Conn) error {
 		smbErrorf("smb_gateway: 握手摘要不匹配:期望=%s 实得=%s 客户端=%q 随机数=%q", expect, hello.ChallengeDigest, hello.ClientID, hello.Nonce) // 记录不匹配详情(排查用)
 		// 失败也回一帧(语义明确),随后调用方关闭连接。
 		respBody, _ := json.Marshal(HelloResponse{OK: false, Error: "challenge digest mismatch"}) // 序列化失败应答
-		_ = g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_HELLO_ACK, Seq: hdr.Seq}, respBody) // 回显序号回失败帧
+		if werr := g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_HELLO_ACK, Seq: hdr.Seq}, respBody); werr != nil { // 回显序号回失败帧
+			smbDebugf("smb_gateway: 握手失败帧回写失败:%v", werr)
+		}
 		return errors.New("handshake: challenge digest mismatch") // 返回鉴权失败
 	}
 

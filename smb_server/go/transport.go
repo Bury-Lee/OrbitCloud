@@ -156,7 +156,9 @@ func (g *Gateway) handleRequest(ctx context.Context, conn net.Conn, hdr FrameHea
 			// 池满(reject 模式):回背压错误帧。
 			smbWarnf("smb_gateway: 请求池已满,拒绝 seq=%d", hdr.Seq) // 记录池满拒绝
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeTimeout, Message: "request pool full"}) // 序列化池满错误
-			_ = g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_ERR_RESP, Seq: hdr.Seq}, eb) // 回背压帧(seq 带回)
+			if werr := g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_ERR_RESP, Seq: hdr.Seq}, eb); werr != nil { // 回背压帧(seq 带回)
+				smbDebugf("smb_gateway: 背压帧回写失败 seq=%d:%v", hdr.Seq, werr)
+			}
 			return // 丢弃本请求(客户端会收到超时错误)
 		}
 		defer g.pool.Release() // 处理完释放令牌
@@ -167,7 +169,9 @@ func (g *Gateway) handleRequest(ctx context.Context, conn net.Conn, hdr FrameHea
 	if err != nil {
 		return // 分发层网络错误:忽略(连接由读循环负责关闭)
 	}
-	_ = g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: respType, Seq: hdr.Seq}, respBody) // 回写响应帧(seq 原样带回)
+	if werr := g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: respType, Seq: hdr.Seq}, respBody); werr != nil { // 回写响应帧(seq 原样带回)
+		smbDebugf("smb_gateway: 响应帧回写失败 seq=%d:%v", hdr.Seq, werr)
+	}
 }
 
 // ============================================================================
