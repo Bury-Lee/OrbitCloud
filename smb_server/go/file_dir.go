@@ -136,6 +136,13 @@ func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 				}
 			} else {
 				smbErrorf("smb_gateway: 关闭句柄=%d 配额审查拒绝:%v", h.handleID, flushErr) // 记录拒绝原因
+				// 清理新建文件的 0 字节残留(审查拒绝 = 本次内容未落盘;记录为新建
+				// 且未写入过时删记录防幽灵文件;覆盖已有文件时旧数据仍在,保留记录)
+				var rec model.File
+				if err := core.DB.WithContext(ctx).First(&rec, h.fileID).Error; err == nil && rec.FileSize == 0 {
+					_ = core.DB.WithContext(ctx).Unscoped().Delete(&model.File{}, h.fileID).Error
+					_ = f.st.Delete(ctx, utils.BucketEncoder(h.bucketID), h.objectKey) // 幂等
+				}
 			}
 		}
 		h.mu.Unlock() // 解锁
