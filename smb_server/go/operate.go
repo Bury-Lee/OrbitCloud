@@ -9,8 +9,7 @@ package smbgateway
 
 import (
 	"context" // 上下文(请求取消传播)
-	"errors"  // errors.Is 错误链判断
-	"orbitcloud/log"     // 服务日志(路由拒绝/错误映射记录)
+	"errors"  // errors.Is 错误链判断     // 服务日志(路由拒绝/错误映射记录)
 	"reflect" // 反射判空(类型化 nil 指针)
 
 	"gorm.io/gorm" // gorm.ErrRecordNotFound 映射
@@ -117,7 +116,7 @@ type OperateHandler interface {
 func (r *OperateRequest) Route(ctx context.Context, handler OperateHandler, stream []byte) (resp *OperateResponse, streamOut []byte, err error) {
 	// ---- 1. 哨兵校验:Code=0 视为根本没填写 JSON ----
 	if r.Code == CodeInvalid { // 操作码为 0?
-		log.Warnf("smb_gateway: 路由拒绝:code=0(JSON 未填充)") // 记录拒绝原因
+		smbWarnf("smb_gateway: 路由拒绝:code=0(JSON 未填充)") // 记录拒绝原因
 		return errResp(ErrCodeBadRequest, "operate: code is 0 (json not filled)"), nil, nil // 回"请求不合法"
 	}
 
@@ -129,7 +128,7 @@ func (r *OperateRequest) Route(ctx context.Context, handler OperateHandler, stre
 		CodeFileClose, CodeFileUnlink, CodeFileRename: // 生命周期类
 		// 已知操作码,继续。
 	default:
-		log.Warnf("smb_gateway: 路由拒绝:未知操作码 %d", r.Code) // 记录拒绝原因
+		smbWarnf("smb_gateway: 路由拒绝:未知操作码 %d", r.Code) // 记录拒绝原因
 		return errResp(ErrCodeNotImpl, "operate: unknown code"), nil, nil // 未知操作码:回"未实现"
 	}
 
@@ -184,13 +183,13 @@ func (r *OperateRequest) Route(ctx context.Context, handler OperateHandler, stre
 	}
 	// 本 Code 对应的指针必须非 nil。
 	if isNilPtr(codePtr(r.Code)) { // 对应参数未填写?
-		log.Warnf("smb_gateway: 路由拒绝:操作码 %d 参数未填充", r.Code) // 记录拒绝原因
+		smbWarnf("smb_gateway: 路由拒绝:操作码 %d 参数未填充", r.Code) // 记录拒绝原因
 		return errResp(ErrCodeBadRequest, "operate: args not filled for code"), nil, nil // 回"请求不合法"
 	}
 	// 其余指针必须全 nil(防误填)。
 	for _, fc := range fieldCodes { // 遍历全部字段
 		if fc.code != r.Code && !isNilPtr(fc.ptr) { // 非本操作码的字段被填了?
-			log.Warnf("smb_gateway: 路由拒绝:操作码 %d 多个参数被填充(额外操作码 %d)", r.Code, fc.code) // 记录误填详情
+			smbWarnf("smb_gateway: 路由拒绝:操作码 %d 多个参数被填充(额外操作码 %d)", r.Code, fc.code) // 记录误填详情
 			return errResp(ErrCodeBadRequest, "operate: multiple args filled"), nil, nil // 拒绝静默路由
 		}
 	}
@@ -340,6 +339,6 @@ func wrapErrResp(code OperateCode, err error) *OperateResponse {
 	case errors.Is(err, server.ErrInvalidInput): // 输入非法
 		c = ErrCodeBadRequest // 映射:请求不合法
 	}
-	log.Debugf("smb_gateway: 操作=%s 错误码=%d(%s)", codeName(code), c, msg) // 记录错误映射(操作/哨兵码/描述)
+	smbDebugf("smb_gateway: 操作=%s 错误码=%d(%s)", codeName(code), c, msg) // 记录错误映射(操作/哨兵码/描述)
 	return &OperateResponse{Code: code, Err: &ErrorEnvelope{Code: c, Message: msg}} // 组装错误响应(Code 回显)
 }

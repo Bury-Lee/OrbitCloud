@@ -25,6 +25,7 @@ import (
 //   - 主库 = sources[0](承担 AutoMigrate/审计日志);
 //   - 多写库或配置读库时注册 dbresolver:写走 sources(轮询)、读走 replicas(负载均衡);
 //   - 单一写库且无读库 → 不注册 resolver,读写全走主库。
+//
 // 连接不可用时将持续自动重试。
 func (d Database) InitDB(lg logger.Interface) (*gorm.DB, error) {
 	// 0. 校验写库列表非空及 sqlite 限制(单写库、无读库,遍历全部写库防混合列表绕过)
@@ -164,18 +165,19 @@ func (d Database) poolFor(conn DBConnConfig) (maxIdle, maxOpen int) {
 	return maxIdle, maxOpen
 }
 
-// InitConfig 加载 ./config.yaml(必须位于工作目录)。
+// InitConfig 加载 ./OrbitCloud.yaml(必须位于工作目录)。
 // 文件不存在时自动用内置默认配置(embed)生成;`orbitcloud -initConfig` 可强制覆盖。
 // 不做缺省值兜底——检查到问题则报错,按提示修改配置后重启。
 func (c Config) InitConfig() (*Config, error) {
-	const path = "./config.yaml"
+	const path = "./OrbitCloud.yaml"
 
-	// 1. 文件不存在 → 用内置默认配置(embed)生成 ./config.yaml
+	// 1. 文件不存在 → 用内置默认配置(embed)生成 ./OrbitCloud.yaml
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := WriteDefaultConfigFile(path); err != nil {
 			return nil, fmt.Errorf("config: %s missing and default config unreadable: %w", path, err)
 		}
 		log.Printf("config: 已生成 %s(内置默认配置),请按需修改后重新启动", path)
+		os.Exit(0)
 	}
 
 	// 2. 解析 YAML(os.ReadFile + yaml.Unmarshal)

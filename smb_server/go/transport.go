@@ -17,8 +17,7 @@ package smbgateway
 import (
 	"context"       // 上下文(请求取消传播)
 	"encoding/json" // JSON 编解码(错误帧/总操作)
-	"io"            // io.ReadFull 精确读满
-	"orbitcloud/log"           // 服务日志
+	"io"            // io.ReadFull 精确读满           // 服务日志
 	"net"           // TCP 连接
 	"time"          // 读截止时间(空闲超时)
 )
@@ -87,7 +86,7 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 		// ---- a. 拆控制面 body:JSON 段 + 流数据段 ----
 		jsonBytes, stream, err := splitOperateBody(body) // 解 [4B jsonLen] 布局
 		if err != nil { // 布局非法?
-			log.Errorf("smb_gateway: 分发拆分错误 seq=%d:%v", hdr.Seq, err) // 记录布局错误
+			smbErrorf("smb_gateway: 分发拆分错误 seq=%d:%v", hdr.Seq, err) // 记录布局错误
 			// 布局非法 → 协议级错误帧。
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeBadRequest, Message: err.Error()}) // 序列化坏请求错误
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
@@ -95,17 +94,17 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 		// ---- b. 单次反序列化总操作 JSON ----
 		var req OperateRequest // 总请求结构
 		if err := json.Unmarshal(jsonBytes, &req); err != nil { // 一次解析全部操作
-			log.Errorf("smb_gateway: 分发 JSON 解析错误 seq=%d:%v", hdr.Seq, err) // 记录反序列化错误
+			smbErrorf("smb_gateway: 分发 JSON 解析错误 seq=%d:%v", hdr.Seq, err) // 记录反序列化错误
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeBadRequest, Message: err.Error()}) // 序列化坏请求错误
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 		}
-		log.Debugf("smb_gateway: 请求 seq=%d 操作=%s 流=%d 字节", hdr.Seq, codeName(req.Code), len(stream)) // 记录请求(操作码/流段大小)
+		smbDebugf("smb_gateway: 请求 seq=%d 操作=%s 流=%d 字节", hdr.Seq, codeName(req.Code), len(stream)) // 记录请求(操作码/流段大小)
 		// 文件类操作:先解析操作者身份(userId → 用户信息,ristretto 60s 缓存),
 		// 注入 ctx 供 Handler 审查/落库;身份无效 → AccessDenied。
 		if isFileOpCode(req.Code) {
 			info, serr := resolveSession(ctx, req.UserID)
 			if serr != nil {
-				log.Warnf("smb_gateway: 文件操作身份无效 seq=%d code=%d userId=%d: %v",
+				smbWarnf("smb_gateway: 文件操作身份无效 seq=%d code=%d userId=%d: %v",
 					hdr.Seq, req.Code, req.UserID, serr)
 				eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeAccessDenied, Message: "invalid session user"})
 				return MSG_ERR_RESP, eb, nil
@@ -115,19 +114,19 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 		// ---- c. 路由并操作(业务错误进 OperateResponse.Err,不抛) ----
 		resp, streamOut, err := req.Route(ctx, g, stream) // 按 Code 路由到 Handler
 		if err != nil { // 路由层 Go error(网络/内部错误)
-			log.Errorf("smb_gateway: 路由处理错误 seq=%d:%v", hdr.Seq, err) // 记录内部错误
+			smbErrorf("smb_gateway: 路由处理错误 seq=%d:%v", hdr.Seq, err) // 记录内部错误
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeIO, Message: err.Error()}) // 序列化 IO 错误
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 		}
 		if resp != nil && resp.Err != nil { // 业务错误?
-			log.Debugf("smb_gateway: 处理 seq=%d 操作=%s 错误码=%d 消息=%s", hdr.Seq, codeName(req.Code), resp.Err.Code, resp.Err.Message) // 记录业务错误(排查用)
+			smbDebugf("smb_gateway: 处理 seq=%d 操作=%s 错误码=%d 消息=%s", hdr.Seq, codeName(req.Code), resp.Err.Code, resp.Err.Message) // 记录业务错误(排查用)
 		} else {
-			log.Debugf("smb_gateway: 响应 seq=%d 操作=%s 成功 输出流=%d 字节 耗时=%s", hdr.Seq, codeName(req.Code), len(streamOut), time.Since(start)) // 记录成功响应与耗时
+			smbDebugf("smb_gateway: 响应 seq=%d 操作=%s 成功 输出流=%d 字节 耗时=%s", hdr.Seq, codeName(req.Code), len(streamOut), time.Since(start)) // 记录成功响应与耗时
 		}
 		// ---- d. 组装响应 body(JSON + Read 流数据段) ----
 		respBody, err := marshalOperateBody(resp, streamOut) // [jsonLen]+JSON+流段
 		if err != nil { // 序列化失败?
-			log.Errorf("smb_gateway: 分发序列化错误 seq=%d:%v", hdr.Seq, err) // 记录序列化错误
+			smbErrorf("smb_gateway: 分发序列化错误 seq=%d:%v", hdr.Seq, err) // 记录序列化错误
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeIO, Message: err.Error()}) // 序列化 IO 错误
 			return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 		}
@@ -135,7 +134,7 @@ func (g *Gateway) dispatch(ctx context.Context, hdr FrameHeader, body []byte) (u
 
 	default: // 未知消息类型
 		// ---- 未知消息类型:协议级错误帧 ----
-		log.Warnf("smb_gateway: 分发未知消息类型=%#x seq=%d", hdr.MsgType, hdr.Seq) // 记录未知消息
+		smbWarnf("smb_gateway: 分发未知消息类型=%#x seq=%d", hdr.MsgType, hdr.Seq) // 记录未知消息
 		eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeNotImpl, Message: "unknown msgType"}) // 序列化未实现错误
 		return MSG_ERR_RESP, eb, nil // 回协议级错误帧
 	}
@@ -155,7 +154,7 @@ func (g *Gateway) handleRequest(ctx context.Context, conn net.Conn, hdr FrameHea
 	if g.pool != nil { // 启用了准入池?
 		if err := g.pool.Acquire(ctx); err != nil { // 申请令牌(并发满+队列满会失败)
 			// 池满(reject 模式):回背压错误帧。
-			log.Warnf("smb_gateway: 请求池已满,拒绝 seq=%d", hdr.Seq) // 记录池满拒绝
+			smbWarnf("smb_gateway: 请求池已满,拒绝 seq=%d", hdr.Seq) // 记录池满拒绝
 			eb, _ := json.Marshal(ErrorEnvelope{Code: ErrCodeTimeout, Message: "request pool full"}) // 序列化池满错误
 			_ = g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_ERR_RESP, Seq: hdr.Seq}, eb) // 回背压帧(seq 带回)
 			return // 丢弃本请求(客户端会收到超时错误)

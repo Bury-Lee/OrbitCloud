@@ -49,8 +49,8 @@ func (DownloadAPI) CreateDownloadTask(c *gin.Context) {
 		respondError(c, err)
 		return
 	}
-	log.Infof("download task: register user=%d bucket=%d folder=%d → task=%d path=%q",
-		userID, req.BucketID, req.FolderID, task.ID, task.FilePath)
+	log.Infof("download task: register user=%d bucket=%d folder=%d task=%d client_ip=%s",
+		userID, req.BucketID, req.FolderID, task.ID, c.ClientIP())
 
 	common.Success(c, task)
 }

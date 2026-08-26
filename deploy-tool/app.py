@@ -28,8 +28,8 @@ app = Flask(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OC_HOME = Path("/opt/orbitcloud")
-OC_CFG = OC_HOME / "config" / "config.yaml"
-GW_CFG = OC_HOME / "smb-gateway" / "config.yaml"
+OC_CFG = OC_HOME / "config" / "OrbitCloud.yaml"
+GW_CFG = OC_HOME / "smb-gateway" / "SMB.yaml"
 
 SERVICES = ["orbitcloud", "smb-gateway", "rustfs", "nginx"]
 PORTS = {8080: "后端 API", 445: "SMB", 9000: "对象存储", 9101: "网关内部", 80: "前端"}
@@ -96,7 +96,7 @@ def check_config():
     if "please-change" in jwt:
         issues.append("后端 jwt.secret 仍为默认占位值,建议通过 ORBITCLOUD_JWT_SECRET 注入")
     if not OC_CFG.exists():
-        issues.append("后端配置文件缺失: /opt/orbitcloud/config/config.yaml")
+        issues.append("后端配置文件缺失: /opt/orbitcloud/config/OrbitCloud.yaml")
     items["后端 jwt.secret"] = "已注入" if "please-change" not in jwt else "默认值(需改)"
     items["后端 smb_gateway.shared_key"] = yaml_get(OC_CFG, "shared_key") or "(未注入)"
 
@@ -105,7 +105,7 @@ def check_config():
     items["网关 log.level"] = yaml_get(GW_CFG, "level") or "(未读取)"
     items["网关监听"] = yaml_get(GW_CFG, "listen") or "(未读取)"
     if not GW_CFG.exists():
-        issues.append("SMB 网关配置文件缺失: /opt/orbitcloud/smb-gateway/config.yaml")
+        issues.append("SMB 网关配置文件缺失: /opt/orbitcloud/smb-gateway/SMB.yaml")
     elif gw_key and items["后端 smb_gateway.shared_key"] and gw_key != items["后端 smb_gateway.shared_key"]:
         issues.append("两侧 shared_key 不一致(后端/网关),SMB 握手将失败")
 

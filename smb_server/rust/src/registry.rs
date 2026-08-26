@@ -103,7 +103,7 @@ impl BucketRegistry {
             Some(inst) if inst.status == 1 => Some(inst.clone()), // 命中且状态正常:返回 Arc 副本
             _ => None, // 不存在或已禁用:返回 None(协议层拒绝连接)
         };
-        debugf!("注册表:解析共享 {share_name} → {}", &["注册表"], if hit.is_some() { "hit" } else { "miss" }); // 记录连接意图解析结果(命中/未命中)
+        debugf!("注册表:解析共享 {share_name} → {}", &["SMB"], if hit.is_some() { "hit" } else { "miss" }); // 记录连接意图解析结果(命中/未命中)
         hit
     }
 
@@ -152,7 +152,7 @@ impl BucketRegistry {
                     });
                     let mut map = self.inner.write().await; // 取写锁
                     map.insert(info.share_name.clone(), inst); // 覆盖写入(元数据生效)
-                    debugf!("注册表:共享 {} 元数据已刷新(定义未变)", &["注册表"], info.share_name); // 记录元数据刷新
+                    debugf!("注册表:共享 {} 元数据已刷新(定义未变)", &["SMB"], info.share_name); // 记录元数据刷新
                     return Ok(()); // 不触碰协议层:活跃连接保持不断
                 }
             }
@@ -206,7 +206,7 @@ impl BucketRegistry {
         }
         infof!(
             "注册表:共享 {} (桶 {}) 已上线,{} 个用户", // 记录 upsert 结果(便于排查)
-            &["注册表"], // 前缀标签
+            &["SMB"], // 前缀标签
             info.share_name,
             info.bucket_id,
             info.users.len()
@@ -227,7 +227,7 @@ impl BucketRegistry {
             let mut map = self.inner.write().await; // 取写锁
             map.remove(share_name); // 从注册表移除实例(此后 TREE_CONNECT 该名 → 未知共享被拒)
         }
-        infof!("注册表:共享 {} 已下线", &["注册表"], share_name); // 记录下线
+        infof!("注册表:共享 {} 已下线", &["SMB"], share_name); // 记录下线
         Ok(())
     }
 
@@ -257,7 +257,7 @@ impl BucketRegistry {
             }
             incoming.push(info.share_name.clone()); // 记入"应存在"集合
             if let Err(e) = self.upsert(info, conn, config).await { // 逐条 upsert(新增或覆盖更新)
-                warnf!("注册表:应用快照 upsert {} 失败:{}(仅告警)", &["注册表"], info.share_name, e); // 单条失败仅告警,不中断整体快照
+                warnf!("注册表:应用快照 upsert {} 失败:{}(仅告警)", &["SMB"], info.share_name, e); // 单条失败仅告警,不中断整体快照
             } // 未生效条目留待下次对账/增量推送再收敛
             upserted += 1; // 计数
         }
@@ -265,12 +265,12 @@ impl BucketRegistry {
         for name in &current { // 差集处理:旧实例中快照没有的
             if !incoming.contains(name) { // 不在"应存在"集合?
                 if let Err(e) = self.delete(name, config).await { // 一律下线(桶被删除/禁用)
-                    warnf!("注册表:应用快照删除 {} 失败:{}(仅告警)", &["注册表"], name, e); // 下线失败仅告警
+                    warnf!("注册表:应用快照删除 {} 失败:{}(仅告警)", &["SMB"], name, e); // 下线失败仅告警
                 }
                 deleted += 1; // 计数
             }
         }
-        infof!("注册表:快照已应用:{} 新增,{} 删除(原 {} 个)", &["注册表"], upserted, deleted, current.len()); // 记录快照应用汇总
+        infof!("注册表:快照已应用:{} 新增,{} 删除(原 {} 个)", &["SMB"], upserted, deleted, current.len()); // 记录快照应用汇总
         Ok(())
     }
 

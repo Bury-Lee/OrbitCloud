@@ -1,4 +1,4 @@
-﻿//! ============================================================================
+//! ============================================================================
 //! remote_backend/backend.rs —— RemoteBackend:实现库的 ShareBackend
 //! ============================================================================
 //!
@@ -110,7 +110,7 @@ impl ShareBackend for RemoteBackend {
         let user_id = self.user_id_of(user).await; // 会话用户 → users.id(操作帧身份)
         debugf!(
             "后端:打开请求 路径={} 意图={} 读={} 写={} 目录={} 共享={} 用户={}",
-            &["后端"], // 前缀标签
+            &["SMB"], // 前缀标签
             path.display_backslash(), // 目标路径
             intent_str(opts.intent), // 创建意图
             opts.read, // 读权限
@@ -142,7 +142,7 @@ impl ShareBackend for RemoteBackend {
         let r = resp.open.ok_or(SmbError::NotSupported)?; // 取打开结果(缺失 = 网关不支持)
         debugf!(
             "后端:打开成功 路径={} → 句柄={} 目录={} 大小={} 已存在={}(耗时 {}µs)",
-            &["后端"], // 前缀标签
+            &["SMB"], // 前缀标签
             path.display_backslash(), // 路径
             r.handle_id, // 分配的远程句柄
             r.is_dir, // 是否目录
@@ -184,7 +184,8 @@ impl ShareBackend for RemoteBackend {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关(无流段)
             .await
             .map_err(map_gateway_err)?; // 错误码映射(非空目录 → 目录非空错误)
-        debugf!("后端:删除成功 路径={}(耗时 {}µs)", &["后端"], path.display_backslash(), _t.elapsed().as_micros()); // 记录删除成功与耗时
+        debugf!("后端:删除成功 路径={}(耗时 {}µs)", &["SMB"], path.display_backslash(), _t.elapsed().as_micros()); // 记录删除成功与耗时
+        infof!("后端:文件变更 删除 user={} 路径={}", &["SMB"], user, path.display_backslash()); // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
         Ok(())
     }
 
@@ -220,7 +221,8 @@ impl ShareBackend for RemoteBackend {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关
             .await
             .map_err(map_gateway_err)?; // 错误由网关返回
-        debugf!("后端:重命名成功 {} → {}(耗时 {}µs)", &["后端"], from.display_backslash(), to.display_backslash(), _t.elapsed().as_micros()); // 记录重命名成功与耗时
+        debugf!("后端:重命名成功 {} → {}(耗时 {}µs)", &["SMB"], from.display_backslash(), to.display_backslash(), _t.elapsed().as_micros()); // 记录重命名成功与耗时
+        infof!("后端:文件变更 重命名 user={} {} → {}", &["SMB"], user, from.display_backslash(), to.display_backslash()); // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
         Ok(())
     }
 

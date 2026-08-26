@@ -10,8 +10,7 @@ package smbgateway
 
 import (
 	"context"   // 上下文
-	"fmt"       // 格式化(对象 key)
-	"orbitcloud/log"       // 服务日志(目录操作记录)
+	"fmt"       // 格式化(对象 key)       // 服务日志(目录操作记录)
 	"strings"   // 错误文本匹配(416 判定)
 	"time"      // 句柄活动时间
 
@@ -104,7 +103,7 @@ func (f *FileOpsService) ListDir(ctx context.Context, handleID uint64, pattern s
 			FileIndex:      uint64(fl.ID), // 索引
 		})
 	}
-	log.Debugf("smb_gateway: 列目录 句柄=%d 条目=%d(过滤后)", h.handleID, len(out)) // 记录列目录结果(句柄/条目数)
+	smbDebugf("smb_gateway: 列目录 句柄=%d 条目=%d(过滤后)", h.handleID, len(out)) // 记录列目录结果(句柄/条目数)
 	return out, nil // 返回条目列表
 }
 
@@ -136,13 +135,13 @@ func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 	}
 	if h.deleteOnClose { // 关闭即删?
 		if err := f.Unlink(ctx, &UnlinkArgs{BucketID: h.bucketID, Path: h.smbPath}); err != nil { // 删除路径
-			log.Debugf("smb_gateway: 关闭句柄=%d 关闭即删失败:%v", h.handleID, err) // 记录关闭即删失败
+			smbDebugf("smb_gateway: 关闭句柄=%d 关闭即删失败:%v", h.handleID, err) // 记录关闭即删失败
 			return err // 删除失败优先上报
 		}
-		log.Debugf("smb_gateway: 关闭句柄=%d 关闭即删已删除 路径=%q", h.handleID, h.smbPath) // 记录关闭即删成功
+		smbDebugf("smb_gateway: 关闭句柄=%d 关闭即删已删除 路径=%q", h.handleID, h.smbPath) // 记录关闭即删成功
 		return nil
 	}
-	log.Debugf("smb_gateway: 关闭句柄=%d 冲刷错误=%v", h.handleID, flushErr) // 记录句柄关闭(含冲刷结果)
+	smbDebugf("smb_gateway: 关闭句柄=%d 冲刷错误=%v", h.handleID, flushErr) // 记录句柄关闭(含冲刷结果)
 	return flushErr // 返回冲刷结果(无缓存时为 nil)
 }
 
@@ -199,10 +198,11 @@ func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 		// 目录:递归删除(SMB 删除文件夹语义:深度优先清空子项后删除自身;
 		// 硬删不占用唯一索引,同名可重建)。
 		if err := f.deleteFolderRecursive(ctx, share.BucketID, fid); err != nil { // 递归删树
-			log.Errorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d:%v", path, fid, err) // 记录目录删除失败
+			smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d:%v", path, fid, err) // 记录目录删除失败
 			return err // 失败上抛
 		}
-		log.Debugf("smb_gateway: 删除目录成功 路径=%q 文件夹=%d", path, fid) // 记录目录删除成功
+		smbDebugf("smb_gateway: 删除目录成功 路径=%q 文件夹=%d", path, fid) // 记录目录删除成功
+		smbInfof("smb_gateway: 文件变更 删除目录 user=%d(%s) 目录=%d", userID, info.Username, fid) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 		return nil
 	}
 	// 文件:复用 server 删除逻辑(先做条目级可见性校验,同 HTTP precheckFileRead)。
@@ -227,7 +227,8 @@ func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 	}); err != nil { // 删除失败
 		return err // 上抛
 	}
-	log.Debugf("smb_gateway: 删除文件成功 路径=%q 文件=%d", path, fileID) // 记录文件删除成功
+	smbDebugf("smb_gateway: 删除文件成功 路径=%q 文件=%d", path, fileID) // 记录文件删除成功
+	smbInfof("smb_gateway: 文件变更 删除文件 user=%d(%s) 文件=%d", userID, info.Username, fileID) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 	return nil
 }
 
@@ -337,7 +338,8 @@ func (f *FileOpsService) Rename(ctx context.Context, args *RenameArgs) error {
 		}); err != nil { // 移动失败
 			return err // 上抛
 		}
-		log.Debugf("smb_gateway: 重命名成功 %q → %q(目录=%d)", from, to, fid) // 记录目录重命名成功
+		smbDebugf("smb_gateway: 重命名成功 %q → %q(目录=%d)", from, to, fid) // 记录目录重命名成功
+		smbInfof("smb_gateway: 文件变更 重命名目录 user=%d(%s) 目录=%d %q → %q", userID, info.Username, fid, from, to) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 		return nil
 	}
 	fileID, _, exists, err := f.lookupFile(ctx, share.BucketID, fromFolderID, fromName) // 查源文件
@@ -354,7 +356,8 @@ func (f *FileOpsService) Rename(ctx context.Context, args *RenameArgs) error {
 	}); err != nil { // 移动失败
 		return err // 上抛
 	}
-	log.Debugf("smb_gateway: 重命名成功 %q → %q(文件=%d)", from, to, fileID) // 记录文件重命名成功
+	smbDebugf("smb_gateway: 重命名成功 %q → %q(文件=%d)", from, to, fileID) // 记录文件重命名成功
+	smbInfof("smb_gateway: 文件变更 重命名文件 user=%d(%s) 文件=%d %q → %q", userID, info.Username, fileID, from, to) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 	return nil
 }
 
@@ -371,7 +374,7 @@ func (f *FileOpsService) CloseAllByConn(connID uint64) {
 			closed++ // 计数
 		}
 	}
-	log.Debugf("smb_gateway: 连接 %d 关闭,回收 %d 个句柄", connID, closed) // 记录断连句柄回收汇总
+	smbDebugf("smb_gateway: 连接 %d 关闭,回收 %d 个句柄", connID, closed) // 记录断连句柄回收汇总
 }
 
 // deleteFolderRecursive 递归删除目录树(SMB 语义,同步深度优先):

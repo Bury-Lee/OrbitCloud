@@ -19,8 +19,7 @@ import (
 	"encoding/hex" // hex 编解码(摘要/nonce 字符串化)
 	"encoding/json" // JSON 编解码(握手/推送载荷)
 	"errors"       // 错误构造(握手失败)
-	"fmt"          // 格式化错误/日志
-	"orbitcloud/log"          // 服务日志
+	"fmt"          // 格式化错误/日志          // 服务日志
 	"net"          // TCP 连接/监听
 	"sync"         // 互斥锁(连接注册表/自增器保护)
 	"time"         // 超时/心跳定时
@@ -111,7 +110,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 		return fmt.Errorf("smb_gateway: listen %s: %w", g.listenAddr, err) // 绑定失败:带地址报错
 	}
 	defer listener.Close() // 退出时关闭监听器
-	log.Debugf("smb_gateway: 正在监听 %s", g.listenAddr) // 记录监听地址
+	smbDebugf("smb_gateway: 正在监听 %s", g.listenAddr) // 记录监听地址
 
 	// 连接计数:用于等待所有处理协程退出(优雅停机)。
 	var wg sync.WaitGroup // 等待组:统计每个连接处理协程
@@ -127,7 +126,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 				break // 停机中,退出循环
 			}
 			// 瞬时错误(如 fd 耗尽)短暂退避后继续。
-			log.Errorf("smb_gateway: 接受连接出错:%v", err) // 记录瞬时错误
+			smbErrorf("smb_gateway: 接受连接出错:%v", err) // 记录瞬时错误
 			time.Sleep(100 * time.Millisecond) // 退避 100ms 防忙循环
 			continue // 继续 accept
 		}
@@ -136,7 +135,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 			defer wg.Done() // 退出时计数 -1
 			// 握手失败等错误仅记日志,不影响其它连接。
 			if err := g.handleConn(connCtx, c); err != nil { // 处理连接完整生命周期
-				log.Warnf("smb_gateway: 连接 %s 关闭:%v", c.RemoteAddr(), err) // 记录连接结束原因
+				smbWarnf("smb_gateway: 连接 %s 关闭:%v", c.RemoteAddr(), err) // 记录连接结束原因
 			}
 		}(conn)
 	}
@@ -183,7 +182,7 @@ func (g *Gateway) handleConn(ctx context.Context, conn net.Conn) error {
 	ctx = context.WithValue(ctx, connIDKey{}, connID) // 把连接 ID 塞入上下文(句柄归属判定)
 	connCtx, cancel := context.WithCancel(ctx) // 本连接子上下文(停机时取消)
 	defer cancel() // 连接结束时取消心跳等子协程
-	log.Debugf("smb_gateway: 连接 %s 建立(连接ID=%d)", conn.RemoteAddr(), connID) // 记录新连接建立
+	smbDebugf("smb_gateway: 连接 %s 建立(连接ID=%d)", conn.RemoteAddr(), connID) // 记录新连接建立
 
 	// ---- 1. 握手阶段超时(防慢速攻击) ----
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil { // 10s 握手超时
@@ -193,7 +192,7 @@ func (g *Gateway) handleConn(ctx context.Context, conn net.Conn) error {
 	if err := g.handshake(conn); err != nil { // 共享密钥挑战应答
 		return fmt.Errorf("handshake: %w", err) // 鉴权失败:上层记录后关闭
 	}
-	log.Debugf("smb_gateway: 连接 %s 握手成功(连接ID=%d)", conn.RemoteAddr(), connID) // 记录握手通过
+	smbDebugf("smb_gateway: 连接 %s 握手成功(连接ID=%d)", conn.RemoteAddr(), connID) // 记录握手通过
 	// ---- 3. 握手完成:清除截止时间(进入正常读写),注册连接 + 心跳 ----
 	if err := conn.SetDeadline(time.Time{}); err != nil { // 清除握手超时(零值 = 无截止)
 		return err
@@ -285,7 +284,7 @@ func (g *Gateway) handshake(conn net.Conn) error {
 	// ---- 2. 校验客户端摘要(常量时间比较,防时序侧信道) ----
 	expect := hmacDigest(g.sharedKey, "HELLO:"+hello.ClientID+":"+hello.Nonce) // 用共享密钥重算期望摘要
 	if !constantEq(expect, hello.ChallengeDigest) { // 常量时间比较
-		log.Errorf("smb_gateway: 握手摘要不匹配:期望=%s 实得=%s 客户端=%q 随机数=%q", expect, hello.ChallengeDigest, hello.ClientID, hello.Nonce) // 记录不匹配详情(排查用)
+		smbErrorf("smb_gateway: 握手摘要不匹配:期望=%s 实得=%s 客户端=%q 随机数=%q", expect, hello.ChallengeDigest, hello.ClientID, hello.Nonce) // 记录不匹配详情(排查用)
 		// 失败也回一帧(语义明确),随后调用方关闭连接。
 		respBody, _ := json.Marshal(HelloResponse{OK: false, Error: "challenge digest mismatch"}) // 序列化失败应答
 		_ = g.writeFrame(conn, FrameHeader{Flags: FlagResponse, MsgType: MSG_HELLO_ACK, Seq: hdr.Seq}, respBody) // 回显序号回失败帧
@@ -369,7 +368,7 @@ func (g *Gateway) heartbeatLoop(ctx context.Context, conn net.Conn) {
 func (g *Gateway) pushToAll(entry AclEntry) {
 	body, err := json.Marshal(entry) // 序列化变更条目
 	if err != nil {
-		log.Errorf("smb_gateway: 推送序列化失败:%v", err) // 序列化失败:记日志丢弃
+		smbErrorf("smb_gateway: 推送序列化失败:%v", err) // 序列化失败:记日志丢弃
 		return
 	}
 	// 先快照连接列表(避免持锁写网络)。
@@ -379,12 +378,12 @@ func (g *Gateway) pushToAll(entry AclEntry) {
 		conns = append(conns, c)
 	}
 	g.mu.Unlock() // 尽快解锁
-	log.Debugf("smb_gateway: 推送 操作=%s 类型=%s 广播到 %d 个连接", entry.Op, entry.Kind, len(conns)) // 记录推送广播(操作/类型/连接数)
+	smbDebugf("smb_gateway: 推送 操作=%s 类型=%s 广播到 %d 个连接", entry.Op, entry.Kind, len(conns)) // 记录推送广播(操作/类型/连接数)
 
 	for _, c := range conns { // 逐个连接推送
 		// 单向推送:seq=0,不需要响应。
 		if err := g.writeFrame(c, FrameHeader{Flags: 0, MsgType: MSG_AUTH_PUSH, Seq: 0}, body); err != nil { // 发推送帧
-			log.Warnf("smb_gateway: 推送到 %s 失败:%v", c.RemoteAddr(), err) // 单连接失败仅记日志(不断连接)
+			smbWarnf("smb_gateway: 推送到 %s 失败:%v", c.RemoteAddr(), err) // 单连接失败仅记日志(不断连接)
 		}
 	}
 }

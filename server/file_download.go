@@ -47,8 +47,10 @@ func CheckFileDownload(ctx context.Context, arg CheckFileDownloadArg) (*model.Bu
 
 // DownloadFileArg 文件下载入参。
 type DownloadFileArg struct {
-	BucketID uint // 所属桶
-	FileID   uint // 文件 files.id
+	BucketID uint   // 所属桶
+	FileID   uint   // 文件 files.id
+	UserID   uint   // 操作者(日志留痕;api 层 currentUser 注入)
+	ClientIP string // 请求方 IP(日志留痕;api 层 c.ClientIP() 注入)
 }
 
 // DownloadFile 下载文件:可行性校验后经 core.Storage.Get 读对象流,
@@ -71,16 +73,18 @@ func DownloadFile(ctx context.Context, arg DownloadFileArg) (io.ReadCloser, *mod
 		return nil, nil, err
 	}
 
-	log.Infof("download: bucket %d file %d (%q) size %d", bucketID, fileID, file.Name, file.FileSize)
+	log.Infof("download: user=%d bucket=%d file=%d client_ip=%s", arg.UserID, bucketID, fileID, arg.ClientIP)
 	return rc, file, nil
 }
 
 // DownloadFileRangeArg 文件区间下载入参。
 type DownloadFileRangeArg struct {
-	BucketID uint  // 所属桶
-	FileID   uint  // 文件 files.id
-	Start    int64 // 区间起点(闭区间,含)
-	End      int64 // 区间终点(闭区间,含)
+	BucketID uint   // 所属桶
+	FileID   uint   // 文件 files.id
+	Start    int64  // 区间起点(闭区间,含)
+	End      int64  // 区间终点(闭区间,含)
+	UserID   uint   // 操作者(日志留痕;api 层 currentUser 注入)
+	ClientIP string // 请求方 IP(日志留痕;api 层 c.ClientIP() 注入)
 }
 
 // DownloadFileRange 下载文件指定字节区间(断点续传/音视频流式播放)。
@@ -112,8 +116,8 @@ func DownloadFileRange(ctx context.Context, arg DownloadFileRangeArg) (io.ReadCl
 		return nil, nil, err
 	}
 
-	log.Infof("download range: bucket %d file %d (%q) [%d,%d] size %d",
-		bucketID, fileID, file.Name, start, end, file.FileSize)
+	log.Infof("download range: user=%d bucket=%d file=%d [%d,%d] client_ip=%s",
+		arg.UserID, bucketID, fileID, start, end, arg.ClientIP)
 	return rc, file, nil
 }
 

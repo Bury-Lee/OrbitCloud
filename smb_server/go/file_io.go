@@ -12,8 +12,7 @@ package smbgateway
 import (
 	"context"   // 上下文
 	"errors"    // errors.Is(对象不存在/416)
-	"io"        // 流读取
-	"orbitcloud/log"       // 服务日志(数据操作记录)
+	"io"        // 流读取       // 服务日志(数据操作记录)
 	"time"      // 句柄活动时间
 
 	"gorm.io/gorm" // ORM 表达式(桶用量对称更新)
@@ -136,7 +135,7 @@ func (f *FileOpsService) readInner(ctx context.Context, h *remoteHandle, offset 
 	if int64(len(out)) > int64(length) { // 超长保护(理论不会)?
 		out = out[:length] // 裁剪到请求长度
 	}
-	log.Debugf("smb_gateway: 读取 句柄=%d 偏移=%d 期望=%d 实得=%d", h.handleID, offset, length, len(out)) // 记录读请求(句柄/偏移/期望/实得)
+	smbDebugf("smb_gateway: 读取 句柄=%d 偏移=%d 期望=%d 实得=%d", h.handleID, offset, length, len(out)) // 记录读请求(句柄/偏移/期望/实得)
 	return out, nil // 返回拼装结果
 }
 
@@ -173,7 +172,7 @@ func (f *FileOpsService) Write(ctx context.Context, handleID uint64, offset uint
 		}
 		h.truncateAt = -1 // 截断已随冲刷固化
 	}
-	log.Debugf("smb_gateway: 写入 句柄=%d 偏移=%d 长度=%d(缓存=%d 字节)", h.handleID, offset, len(data), total) // 记录写请求(句柄/偏移/长度/缓存总量)
+	smbDebugf("smb_gateway: 写入 句柄=%d 偏移=%d 长度=%d(缓存=%d 字节)", h.handleID, offset, len(data), total) // 记录写请求(句柄/偏移/长度/缓存总量)
 	return uint32(len(data)), nil // 实际写入 = 入缓存长度
 }
 
@@ -201,11 +200,12 @@ func (f *FileOpsService) Flush(ctx context.Context, handleID uint64) error {
 		return nil // 无需冲刷
 	}
 	if err := h.writeCache.FlushToStorage(ctx, f.st, utils.BucketEncoder(h.bucketID), h.objectKey, spec); err != nil { // 整体上传对象
-		log.Errorf("smb_gateway: 冲刷句柄=%d 失败:%v", h.handleID, err) // 记录冲刷失败
+		smbErrorf("smb_gateway: 冲刷句柄=%d 失败:%v", h.handleID, err) // 记录冲刷失败
 		return err // 上传失败上抛
 	}
 	h.truncateAt = -1 // 截断已固化到对象,复位
-	log.Debugf("smb_gateway: 冲刷句柄=%d 已上传 大小=%d", h.handleID, h.size) // 记录冲刷成功(句柄/大小)
+	smbDebugf("smb_gateway: 冲刷句柄=%d 已上传 大小=%d", h.handleID, h.size) // 记录冲刷成功(句柄/大小)
+	smbInfof("smb_gateway: 文件变更 写回 user=%d(%s) 文件=%d", h.userID, h.session.Username, h.fileID) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 	return f.syncFileMeta(ctx, h) // 同步元数据(大小 + 桶用量)
 }
 
@@ -286,7 +286,7 @@ func (f *FileOpsService) Stat(ctx context.Context, handleID uint64) (*FileInfo, 
 		h.mu.Unlock() // 解锁
 	}
 	us := uint64(size) // 转无符号
-	log.Debugf("smb_gateway: 查询信息 句柄=%d → 名称=%q 大小=%d 目录=%v", h.handleID, file.Name, us, false) // 记录元信息结果
+	smbDebugf("smb_gateway: 查询信息 句柄=%d → 名称=%q 大小=%d 目录=%v", h.handleID, file.Name, us, false) // 记录元信息结果
 	return &FileInfo{ // 组装文件 FileInfo
 		Name:           file.Name, // 文件名
 		EndOfFile:      us, // 文件大小
@@ -340,6 +340,6 @@ func (f *FileOpsService) Truncate(ctx context.Context, handleID uint64, length u
 	if h.writeCache == nil { // 无缓存?
 		h.writeCache = NewWriteBackCache() // 补建(截断冲刷需要)
 	}
-	log.Debugf("smb_gateway: 截断 句柄=%d 长度=%d", h.handleID, length) // 记录截断(句柄/目标长度)
+	smbDebugf("smb_gateway: 截断 句柄=%d 长度=%d", h.handleID, length) // 记录截断(句柄/目标长度)
 	return nil
 }

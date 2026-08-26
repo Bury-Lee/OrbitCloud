@@ -29,7 +29,7 @@ func main() {
 		fmt.Printf("\norbitcloud panic stack:\n%s\n", string(utils.Stack(1)))
 	}()
 	// 0. 先处理无需初始化的指令(flag.RunPreInit):-initConfig 用内置默认配置强制覆盖
-	//    生成 ./config.yaml 后退出;必须在 appinit 初始化之前执行。
+	//    生成 ./OrbitCloud.yaml 后退出;必须在 appinit 初始化之前执行。
 	if err := flag.RunPreInit(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrExit) {
 			os.Exit(0)
@@ -118,7 +118,7 @@ func main() {
 	//   4) go gw.Serve(ctx) —— 私有 Socket 服务,优雅停机随本函数第 5 步一并关闭。
 	//   密钥:cfg.SmbGateway.SharedKeyEnv 非空时经 smbgateway 读取并校验长度;
 	//   留空则握手后双方动态协商(接口后续实现)。
-	//   配置:config.yaml smb_gateway 分节(缺省内置默认,见 config.DefaultSmbGatewayConfig)。
+	//   配置:OrbitCloud.yaml smb_gateway 分节(缺省内置默认,见 config.DefaultSmbGatewayConfig)。
 	smbGW, err := smbgateway.BuildGateway(cfg.SmbGateway)
 	if err != nil {
 		log.Fatalf("main: 初始化 SMB 网关失败:%v", err)

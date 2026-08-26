@@ -1,4 +1,4 @@
-﻿//! ============================================================================
+//! ============================================================================
 //! remote_backend/client.rs —— GatewayClient:到 Go 网关的私有 TCP 客户端
 //! ============================================================================
 //!
@@ -75,7 +75,7 @@ impl GatewayClient {
         rpc_timeout: std::time::Duration, // 请求应答超时(配置 rpc_timeout_secs)
     ) -> std::io::Result<(Arc<Self>, tokio::sync::mpsc::Receiver<Vec<u8>>)> {
         // ---- 1. 建立 TCP 连接并开启 NODELAY ----
-        debugf!("网关客户端:正在连接 {addr}(客户端 {client_id},缓冲 {channel_buffer},超时 {rpc_timeout:?})", &["网关客户端"]); // 记录连接发起
+        debugf!("网关客户端:正在连接 {addr}(客户端 {client_id},缓冲 {channel_buffer},超时 {rpc_timeout:?})", &["SMB"]); // 记录连接发起
         let stream = tokio::net::TcpStream::connect(addr) // 异步 TCP 连接
             .await
             .map_err(|e| std::io::Error::new(e.kind(), format!("connect {addr}: {e}")))?; // 失败:带地址报错
@@ -98,7 +98,7 @@ impl GatewayClient {
         // ---- 3~5. 双向 HMAC 握手(使用整体流直接读写) ----
         let mut stream = stream; // 可变流(握手阶段直接读写)
         client.handshake(&mut stream, &client_id).await?; // 完成 HELLO→ACK→VERIFY 双向认证
-        infof!("网关客户端:握手成功(客户端 {client_id},地址 {addr})", &["网关客户端"]); // 记录握手成功
+        infof!("网关客户端:握手成功(客户端 {client_id},地址 {addr})", &["SMB"]); // 记录握手成功
 
         // ---- 6. 握手完成:拆分流并启动后台任务 ----
         let (reader, writer) = tokio::io::split(stream); // 拆成读半流/写半流(分别独占)
@@ -191,7 +191,7 @@ impl GatewayClient {
             &vbody,
         );
         stream.write_all(&vframe).await?; // 发出 VERIFY(服务端校验通过即完成握手)
-        debugf!("握手:已发送验证(seq 2,服务器随机数 {})", &["网关客户端"], ack.server_nonce); // 记录双向认证完成
+        debugf!("握手:已发送验证(seq 2,服务器随机数 {})", &["SMB"], ack.server_nonce); // 记录双向认证完成
         Ok(())
     }
 
@@ -246,7 +246,7 @@ impl GatewayClient {
             + 1; // 从 1 开始
         let (tx, rx) = tokio::sync::oneshot::channel(); // 一次性应答通道
         self.pending.lock().await.insert(seq, tx); // 登记:seq → 应答发送端
-        debugf!("网关客户端:请求 seq={seq} 消息类型={msg_type:#x} 正文={} 字节", &["网关客户端"], body.len()); // 记录请求发起(含序号关联)
+        debugf!("网关客户端:请求 seq={seq} 消息类型={msg_type:#x} 正文={} 字节", &["SMB"], body.len()); // 记录请求发起(含序号关联)
 
         // ---- 2. 投发送管道(需响应标记) ----
         let frame = encode_frame( // 组装请求帧
@@ -260,7 +260,7 @@ impl GatewayClient {
         );
         if self.send_queue.send(frame).await.is_err() { // 投管道失败?
             // 管道已关闭(writer 任务退出 = 连接断开)。
-            warnf!("网关客户端:请求 seq={seq} 发送队列已关闭(连接已断)", &["网关客户端"]); // 记录连接已断
+            warnf!("网关客户端:请求 seq={seq} 发送队列已关闭(连接已断)", &["SMB"]); // 记录连接已断
             self.pending.lock().await.remove(&seq); // 清理登记,防止泄漏
             return Err(ERR_GATEWAY_DOWN); // 返回"网关不可达"哨兵
         }
@@ -268,20 +268,20 @@ impl GatewayClient {
         // ---- 3~4. 等应答(超时 = 配置 rpc_timeout_secs,默认 30s) ----
         match tokio::time::timeout(self.rpc_timeout, rx).await { // 限时等待应答(大文件 Flush 可放宽)
             Ok(Ok(Ok(resp_body))) => { // 正常应答
-                debugf!("网关客户端:请求 seq={seq} 成功,响应={} 字节", &["网关客户端"], resp_body.len()); // 记录应答到达
+                debugf!("网关客户端:请求 seq={seq} 成功,响应={} 字节", &["SMB"], resp_body.len()); // 记录应答到达
                 Ok(resp_body)
             }
             Ok(Ok(Err(code))) => { // 应答为错误帧
-                debugf!("网关客户端:请求 seq={seq} 错误码={code}", &["网关客户端"]); // 记录网关业务错误
+                debugf!("网关客户端:请求 seq={seq} 错误码={code}", &["SMB"]); // 记录网关业务错误
                 Err(code)
             }
             Ok(Err(_)) => { // oneshot 发送端被丢弃
-                warnf!("网关客户端:请求 seq={seq} 等待期间连接断开", &["网关客户端"]); // 记录断线(reader 已退出)
+                warnf!("网关客户端:请求 seq={seq} 等待期间连接断开", &["SMB"]); // 记录断线(reader 已退出)
                 self.pending.lock().await.remove(&seq); // (reader 任务退出 = 断线)清理登记
                 Err(ERR_GATEWAY_DOWN) // 返回"网关不可达"
             }
             Err(_) => { // 30s 超时
-                warnf!("网关客户端:请求 seq={seq} 30 秒超时", &["网关客户端"]); // 记录超时
+                warnf!("网关客户端:请求 seq={seq} 30 秒超时", &["SMB"]); // 记录超时
                 self.pending.lock().await.remove(&seq); // 超时:移除登记
                 Err(ERR_TIMEOUT) // 返回"超时"哨兵
             }
@@ -318,7 +318,7 @@ impl GatewayClient {
                 .await
                 .is_err() // 发送失败?
             {
-                warnf!("网关客户端:心跳发送失败,连接已断开", &["网关客户端"]); // 记录心跳失败 = 连接断开
+                warnf!("网关客户端:心跳发送失败,连接已断开", &["SMB"]); // 记录心跳失败 = 连接断开
                 self.mark_dead(); // 管道关闭 = 连接已断,置死标志
                 break; // 退出心跳任务
             }
@@ -355,20 +355,20 @@ async fn reader_task(
         // ---- 读帧头 ----
         let mut head = [0u8; HEADER_LEN]; // 帧头缓冲(16B)
         if reader.read_exact(&mut head).await.is_err() { // 读帧头失败
-            debugf!("网关客户端:读取器 EOF(对端已关闭连接)", &["网关客户端"]); // 记录对端关闭
+            debugf!("网关客户端:读取器 EOF(对端已关闭连接)", &["SMB"]); // 记录对端关闭
             break; // 连接关闭:退出循环
         }
         let hdr = match decode_frame_header(&head) { // 解析并校验帧头
             Ok(h) => h, // 合法帧头
             Err(e) => { // 协议错误
-                warnf!("网关客户端:读取器协议错误:{e}", &["网关客户端"]); // 记录协议错误详情
+                warnf!("网关客户端:读取器协议错误:{e}", &["SMB"]); // 记录协议错误详情
                 break; // 退出(上层重连)
             }
         };
         // ---- 读 body ----
         let mut body = vec![0u8; hdr.body_len as usize]; // 按帧头长度分配 body 缓冲
         if reader.read_exact(&mut body).await.is_err() { // 读 body 失败
-            debugf!("网关客户端:读取器半途 EOF(连接已关闭)", &["网关客户端"]); // 记录中断
+            debugf!("网关客户端:读取器半途 EOF(连接已关闭)", &["SMB"]); // 记录中断
             break; // 连接关闭:退出
         }
 
@@ -377,22 +377,22 @@ async fn reader_task(
             if let Some(tx) = pending.lock().await.remove(&hdr.seq) { // 取出对应应答通道(seq 关联)
                 if hdr.msg_type == MSG_ERR_RESP { // 错误帧?
                     let code = GatewayClient::decode_error(&body); // 解出哨兵错误码
-                    debugf!("网关客户端:响应 seq={} 错误码={}", &["网关客户端"], hdr.seq, code); // 记录错误响应
+                    debugf!("网关客户端:响应 seq={} 错误码={}", &["SMB"], hdr.seq, code); // 记录错误响应
                     let _ = tx.send(Err(code)); // 投递错误结果
                 } else { // 正常响应
-                    debugf!("网关客户端:响应 seq={} 消息类型={:#x} 长度={} 字节", &["网关客户端"], hdr.seq, hdr.msg_type, body.len()); // 记录响应到达
+                    debugf!("网关客户端:响应 seq={} 消息类型={:#x} 长度={} 字节", &["SMB"], hdr.seq, hdr.msg_type, body.len()); // 记录响应到达
                     let _ = tx.send(Ok(body)); // 投递响应 body
                 }
             } // 未知 seq:通道已被超时清理,直接丢弃
         } else if hdr.msg_type == MSG_AUTH_PUSH { // 单向推送帧?
             // ---- 单向推送:转交 sync 模块 ----
-            debugf!("网关客户端:收到认证推送({} 字节)", &["网关客户端"], body.len()); // 记录变更推送
+            debugf!("网关客户端:收到认证推送({} 字节)", &["SMB"], body.len()); // 记录变更推送
             let _ = push_tx.send(body).await; // 转发推送 body(缓冲满则等待)
         }
         // 其余单向帧(心跳等)忽略。
     }
     // ---- 断线收尾:通知所有等待中的调用方 ----
-    warnf!("网关客户端:读取任务退出,{} 个挂起请求失败", &["网关客户端"], pending.lock().await.len()); // 记录断线收尾(带挂起请求数)
+    warnf!("网关客户端:读取任务退出,{} 个挂起请求失败", &["SMB"], pending.lock().await.len()); // 记录断线收尾(带挂起请求数)
     client.mark_dead(); // 置连接死亡标志(重连监督可见)
     let mut p = pending.lock().await; // 锁住应答表
     for (_, tx) in p.drain() { // 遍历并清空全部登记
@@ -412,7 +412,7 @@ async fn writer_task(
     use tokio::io::AsyncWriteExt; // 写原语(write_all)
     while let Some(frame) = rx.recv().await { // 等待管道中的帧(关闭则 None 退出)
         if writer.write_all(&frame).await.is_err() { // 写整帧到 socket
-            warnf!("网关客户端:写入失败,连接已断开", &["网关客户端"]); // 记录写失败 = 连接断开
+            warnf!("网关客户端:写入失败,连接已断开", &["SMB"]); // 记录写失败 = 连接断开
             break; // 写失败 = 连接断开
         }
     }

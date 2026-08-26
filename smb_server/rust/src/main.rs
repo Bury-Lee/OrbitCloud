@@ -47,7 +47,7 @@ use std::time::Duration; // 时长类型(退避等待/对账周期)
 
 use smb_server::SmbServer; // ixr-smb-server 的 SMB 服务端构建器
 
-use crate::core::enter::Config; // 全局配置结构(解析自 config.yaml)
+use crate::core::enter::Config; // 全局配置结构(解析自 SMB.yaml)
 use crate::registry::BucketRegistry; // 桶实例注册表
 use crate::remote_backend::GatewayClient; // Go 网关客户端(私有 TCP 长连接)
 use crate::sync::sync_loop; // 同步常驻任务(全量快照 + 增量推送 + 对账)
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 2. 日志初始化(与 Go 侧 orbitcloud/log 对齐)----
     // 文件按日期轮转 + 启动时刻命名、本地 SQLite 入库、定时清理过期记录
-    // (开关/保留天数/清理周期见 config.yaml log: 分节;RUST_LOG 可覆盖级别)。
+    // (开关/保留天数/清理周期见 SMB.yaml log: 分节;RUST_LOG 可覆盖级别)。
     log::init(&cfg.log)?; // 失败终止启动(文件/SQLite 不可用属致命错误)
 
     // ---- 3. 共享密钥(shared_key 配置直配优先;其次 shared_key_env 环境变量)----
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.gateway.channel_buffer, // 发送管道缓冲容量(设计点 6)
         rpc_timeout, // 请求应答超时(大文件 Flush 放宽)
     ).await?;
-    infof!("网关:已连接 {} (客户端 {})", &["网关"], cfg.gateway.addr, hostname()); // 记录连接成功
+    infof!("网关:已连接 {} (客户端 {})", &["SMB"], cfg.gateway.addr, hostname()); // 记录连接成功
 
     // ---- 5. 构建 SMB 服务器(初始无共享,全部动态注册)----
     let listen: std::net::SocketAddr = cfg
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             push_rx, // 增量推送接收端(MSG_AUTH_PUSH)
             interval, // 对账周期
         )));
-        infof!("同步任务已启动(每 {} 秒对账一次)", &["同步"], interval.as_secs()); // 记录同步任务启动
+        infof!("同步任务已启动(每 {} 秒对账一次)", &["SMB"], interval.as_secs()); // 记录同步任务启动
     }
     // 后台监督任务:每 2s 检查 is_alive;断线后重连,成功后重启同步任务
     tokio::spawn(async move {
@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 delay = 1; // 健康:退避归零
                 continue; // 继续下一轮轮询
             }
-            warnf!("网关:连接断开,正在重连...", &["网关"]); // 检测到断线
+            warnf!("网关:连接断开,正在重连...", &["SMB"]); // 检测到断线
             match GatewayClient::connect(&addr, key2.clone(), client_id2.clone(), chbuf, rpc_timeout2).await { // 重连+握手
                 Ok((new_conn, new_push_rx)) => { // 重连成功
                     current = Arc::clone(&new_conn); // 换用新连接(后续轮询检查它)
@@ -150,11 +150,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         new_push_rx, // 新推送接收端
                         interval, // 对账周期
                     ))); // 启动即全量快照:补回断线期间丢失的增量推送
-                    infof!("网关:已重新连接", &["网关"]); // 记录重连成功
+                    infof!("网关:已重新连接", &["SMB"]); // 记录重连成功
                     delay = 1; // 退避归零
                 }
                 Err(e) => { // 重连失败
-                    warnf!("网关:重连失败:{e};{delay} 秒后重试", &["网关"]); // 记录失败与下次等待
+                    warnf!("网关:重连失败:{e};{delay} 秒后重试", &["SMB"]); // 记录失败与下次等待
                     tokio::time::sleep(Duration::from_secs(delay)).await; // 退避等待
                     delay = (delay * 2).min(30); // 翻倍延时,封顶 30s 防高频重试
                 }
@@ -195,7 +195,7 @@ async fn connect_with_retry(
         match GatewayClient::connect(addr, key.clone(), client_id.clone(), channel_buffer, rpc_timeout).await { // 连接并完成双向握手
             Ok(pair) => return Ok(pair), // 成功:返回 (客户端, 推送接收端)
             Err(e) => { // 失败
-                warnf!("网关:连接 {} 失败:{e};{delay} 秒后重试", &["网关"], addr); // 记录失败与退避时长
+                warnf!("网关:连接 {} 失败:{e};{delay} 秒后重试", &["SMB"], addr); // 记录失败与退避时长
                 tokio::time::sleep(Duration::from_secs(delay)).await; // 退避等待
                 delay = (delay * 2).min(30); // 指数退避,封顶 30s(永不放弃,因 SMB 依赖网关)
             }

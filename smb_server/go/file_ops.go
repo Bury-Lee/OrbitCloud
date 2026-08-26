@@ -16,8 +16,7 @@ package smbgateway
 
 import (
 	"context"   // 上下文(查询取消传播)
-	"fmt"       // 格式化(对象 key/错误)
-	"orbitcloud/log"       // 服务日志(打开/拒绝记录)
+	"fmt"       // 格式化(对象 key/错误)       // 服务日志(打开/拒绝记录)
 	"strings"   // 字符串小写(缓存键规范化)
 	"sync"      // sync.Map(共享上下文缓存)
 	"time"      // 句柄活动时间
@@ -230,7 +229,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	// 缺失/无效 → ErrForbidden(防冒充)。
 	info := sessionFrom(ctx)
 	if info == nil {
-		log.Warnf("smb_gateway: 打开被拒:缺少操作者身份 路径=%q", args.Path)
+		smbWarnf("smb_gateway: 打开被拒:缺少操作者身份 路径=%q", args.Path)
 		return nil, server.ErrForbidden
 	}
 	// ---- 1. 解析共享上下文(优先级:路径缓存 → 路径查库 → BucketID 直传) ----
@@ -244,7 +243,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		share = f.shareByID(ctx, args.BucketID) // 按桶主键查库
 	}
 	if share.BucketID == 0 { // 三层都解析不到?
-		log.Warnf("smb_gateway: 打开失败:路径 %q 缺少共享上下文", args.Path) // 记录缺桶上下文
+		smbWarnf("smb_gateway: 打开失败:路径 %q 缺少共享上下文", args.Path) // 记录缺桶上下文
 		return nil, fmt.Errorf("open: missing share context for %q", args.Path) // 缺桶上下文:拒绝
 	}
 	// ---- 1.5 桶可用性 + 桶权限(同 HTTP 桶级校验:状态 + 权限等级/属主) ----
@@ -277,7 +276,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	}
 	// ---- 3. 只读共享拒绝写 intent ----
 	if args.Write && share.Mode == "readonly" { // 请求写且共享只读?
-		log.Warnf("smb_gateway: 打开被拒:只读共享 %q 写意图 路径=%q", share.ShareName, args.Path) // 记录只读拒绝
+		smbWarnf("smb_gateway: 打开被拒:只读共享 %q 写意图 路径=%q", share.ShareName, args.Path) // 记录只读拒绝
 		return nil, server.ErrForbidden // 拒绝访问
 	}
 
@@ -410,6 +409,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	}
 
 	// ---- 5. 按 Intent 处理创建处置 ----
+	created := false // 本次是否新建了文件记录(变更日志用)
 	switch args.Intent { // 创建处置语义分发
 	case "open": // 只打开
 		if !exists { // 文件不存在?
@@ -423,12 +423,14 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		if err != nil {
 			return nil, err // 失败上抛
 		}
+		created = true // 标记新建(变更日志)
 	case "open_or_create": // 打开或创建
 		if !exists { // 不存在?
 			fileID, err = f.createEmptyFile(ctx, userID, share.BucketID, folderID, name) // 创建
 			if err != nil {
 				return nil, err // 失败上抛
 			}
+			created = true // 标记新建(变更日志)
 		}
 	case "overwrite_or_create", "truncate": // 覆盖或截断
 		if args.Intent == "truncate" && !exists { // truncate 且不存在?
@@ -439,6 +441,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 			if err != nil {
 				return nil, err // 失败上抛
 			}
+			created = true // 标记新建(变更日志)
 			size = 0 // 新文件大小 0
 		} else { // 已存在 → 清空
 			// 截断:更新记录大小并删对象(下一次 Flush 整体重传)。
@@ -454,6 +457,9 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	}
 
 	// ---- 6. 组装句柄并登记(写句柄附带写回缓存) ----
+	if created { // 新建文件(create / open_or_create / overwrite_or_create 触发)
+		smbInfof("smb_gateway: 文件变更 新建 user=%d(%s) 文件=%d", userID, info.Username, fileID) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
+	}
 	h := &remoteHandle{ // 构造文件句柄
 		share:         share, // 桶上下文
 		smbPath:       path, // 路径
@@ -472,7 +478,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	if args.Write { // 请求写权限?
 		h.writeCache = NewWriteBackCache() // 附带写回缓存(随机写合并)
 	}
-	log.Debugf("smb_gateway: 打开成功 共享=%q 路径=%q 意图=%s → 句柄=%d 文件=%d 目录=%v 大小=%d 已存在=%v", share.ShareName, path, args.Intent, h.handleID, fileID, h.isDir, size, exists) // 记录打开成功(共享/路径/意图/句柄)
+	smbDebugf("smb_gateway: 打开成功 共享=%q 路径=%q 意图=%s → 句柄=%d 文件=%d 目录=%v 大小=%d 已存在=%v", share.ShareName, path, args.Intent, h.handleID, fileID, h.isDir, size, exists) // 记录打开成功(共享/路径/意图/句柄)
 	return &OpenResult{ // 返回打开结果
 		HandleID:  f.handles.Alloc(h), // 登记句柄并取 ID
 		EndOfFile: uint64(size), // 文件大小(stat 预取)

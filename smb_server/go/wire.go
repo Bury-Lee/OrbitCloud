@@ -22,8 +22,7 @@ import (
 	"context"       // 上下文(停机传播)
 	"encoding/json" // JSON 反序列化(-WithConfig)
 	"errors"        // 错误构造(配置缺失)
-	"fmt"           // 格式化错误
-	"orbitcloud/log"           // 服务日志(装配记录)
+	"fmt"           // 格式化错误           // 服务日志(装配记录)
 	"os"            // 环境变量(共享密钥)
 
 	"orbitcloud/config" // 配置类型(SmbGatewayConfig)
@@ -70,7 +69,7 @@ func BuildGateway(cfg config.SmbGatewayConfig) (*Gateway, error) {
 	// 4. 网关实例(认证服务与网关绑定:变更推送直连 pushToAll)。
 	gw := NewGateway(cfg.ListenAddr, key, pool, auth, files) // 构造网关
 	auth.SetPushFunc(gw.pushToAll) // 注入推送函数(DB 变更 → 广播)
-	log.Debugf("smb_gateway: 网关已装配 监听=%s 池=%d/%d 静态密钥=%v", cfg.ListenAddr, cfg.MaxConcurrent, cfg.ChannelBuffer, len(key) > 0) // 记录装配结果(监听/并发/队列/是否静态密钥)
+	smbDebugf("smb_gateway: 网关已装配 监听=%s 池=%d/%d 静态密钥=%v", cfg.ListenAddr, cfg.MaxConcurrent, cfg.ChannelBuffer, len(key) > 0) // 记录装配结果(监听/并发/队列/是否静态密钥)
 	return gw, nil // 返回装配完成的网关
 }
 
@@ -97,7 +96,7 @@ func resolveSharedKey(cfg config.SmbGatewayConfig) ([]byte, error) {
 	}
 	// 3. 两者皆空:跳过静态鉴权(动态协商 TODO;空密钥下 HMAC 双侧一致,
 	//    握手仍可通过,连接不受限)。
-	log.Warnf("smb_gateway: 未配置共享密钥(shared_key 与 shared_key_env 均空),跳过静态鉴权(动态协商后续实现)") // 提示降级
+	smbWarnf("smb_gateway: 未配置共享密钥(shared_key 与 shared_key_env 均空),跳过静态鉴权(动态协商后续实现)") // 提示降级
 	return nil, nil // 空密钥继续启动
 }
 

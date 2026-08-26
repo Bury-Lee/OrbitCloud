@@ -4,7 +4,7 @@
 #
 # 步骤:
 #   1. 安装二进制 /opt/orbitcloud/smb-gateway/smb-gateway
-#   2. 生成 config.yaml(gateway.addr 指向本机后端私有 Socket 9101;
+#   2. 生成 SMB.yaml(gateway.addr 指向本机后端私有 Socket 9101;
 #      shared_key 复用 deploy-backend.sh 生成的密钥, 两侧必须一致)
 #   3. 注册 systemd 服务并启动(监听 445, 需 root)
 #
@@ -19,7 +19,7 @@ DIST="$REPO_ROOT/build/dist"
 
 GW_HOME="/opt/orbitcloud/smb-gateway"
 GW_BIN="$GW_HOME/smb-gateway"
-GW_CFG="$GW_HOME/config.yaml"
+GW_CFG="$GW_HOME/SMB.yaml"
 KEY_FILE="/opt/orbitcloud/.smb-gateway-key"
 LISTEN="0.0.0.0:445"
 LOG_LEVEL="debug"
@@ -50,7 +50,7 @@ install -m 0755 "$DIST/smb-gateway" "$GW_BIN"
 ok "$GW_BIN"
 
 # ---------- 2. 配置 ----------
-step "2. 生成 config.yaml"
+step "2. 生成 SMB.yaml"
 cat > "$GW_CFG" <<EOF
 # OrbitCloud SMB 网关配置(deploy-smb-gateway.sh 自动生成)
 smb:

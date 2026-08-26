@@ -4,9 +4,9 @@
 #
 #  说明:
 #  · 本文件为开箱即用的默认配置, 覆盖全部可配置项;
-#  · 运行 `orbitcloud -initConfig` 可用本内置配置强制覆盖工作目录 ./config.yaml
-#    (若 ./config.yaml 不存在, 启动时也会自动生成);
-#  · 配置仅从工作目录 ./config.yaml 读取;
+#  · 运行 `orbitcloud -initConfig` 可用本内置配置强制覆盖工作目录 ./OrbitCloud.yaml
+#    (若 ./OrbitCloud.yaml 不存在, 启动时也会自动生成);
+#  · 配置仅从工作目录 ./OrbitCloud.yaml 读取;
 #  · 不做缺省值兜底——配置缺失/非法即启动报错。
 #
 #  ★ 生产必改项:
@@ -277,7 +277,7 @@ bucket:
 
 # ------------------------------------------------------------
 # 11. SMB 网关私有 Socket 配置(可选;缺省用内置默认值)
-#    仅本机 Rust SMB 网关访问,必须与 Rust 侧 config.yaml gateway: 分节对齐。
+#    仅本机 Rust SMB 网关访问,必须与 Rust 侧 SMB.yaml gateway: 分节对齐。
 #    deploy-backend.sh 会自动注入本分节(shared_key 随机生成),无需手工填写。
 # ------------------------------------------------------------
 smb_gateway:

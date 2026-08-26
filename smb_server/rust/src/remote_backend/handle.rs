@@ -92,10 +92,10 @@ impl Handle for RemoteHandle {
         let r = resp.read.ok_or(SmbError::NotSupported)?; // 取读结果
         if r.length as usize != stream.len() {
             // 网关声明长度 ≠ 流段实际长度?
-            errorf!("后端:读取长度不符 句柄={} 期望={} 实得={}", &["后端"], self.handle_id, r.length, stream.len()); // 协议错位:记录详情
+            errorf!("后端:读取长度不符 句柄={} 期望={} 实得={}", &["SMB"], self.handle_id, r.length, stream.len()); // 协议错位:记录详情
             return Err(SmbError::Io(std::io::Error::other("read length mismatch"))); // 防错位,报 IO 错误
         } // 长度契约校验通过
-        debugf!("后端:读取成功 句柄={} 偏移={} 长度={} → {} 字节(耗时 {}µs)", &["后端"], self.handle_id, offset, len, stream.len(), _t.elapsed().as_micros()); // 记录读结果与耗时
+        debugf!("后端:读取成功 句柄={} 偏移={} 长度={} → {} 字节(耗时 {}µs)", &["SMB"], self.handle_id, offset, len, stream.len(), _t.elapsed().as_micros()); // 记录读结果与耗时
         Ok(Bytes::from(stream)) // 流段即读到的数据
     }
 
@@ -129,7 +129,7 @@ impl Handle for RemoteHandle {
             .await
             .map_err(map_gateway_err)?; // 错误码映射
         let r = resp.write.ok_or(SmbError::NotSupported)?; // 取写结果
-        debugf!("后端:写入成功 句柄={} 偏移={} → {} 字节(耗时 {}µs)", &["后端"], self.handle_id, offset, r.written, _t.elapsed().as_micros()); // 记录写结果与耗时
+        debugf!("后端:写入成功 句柄={} 偏移={} → {} 字节(耗时 {}µs)", &["SMB"], self.handle_id, offset, r.written, _t.elapsed().as_micros()); // 记录写结果与耗时
         Ok(r.written) // 实际写入字节数
     }
 
@@ -156,7 +156,8 @@ impl Handle for RemoteHandle {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关(触发写回缓存上传)
             .await
             .map_err(map_gateway_err)?; // 错误码映射
-        debugf!("后端:冲刷成功 句柄={}(耗时 {}µs)", &["后端"], self.handle_id, _t.elapsed().as_micros()); // 记录冲刷成功与耗时
+        debugf!("后端:冲刷成功 句柄={}(耗时 {}µs)", &["SMB"], self.handle_id, _t.elapsed().as_micros()); // 记录冲刷成功与耗时
+        infof!("后端:文件变更 写回 user={} 句柄={}", &["SMB"], self.user_id, self.handle_id); // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
         Ok(())
     }
 
@@ -184,7 +185,7 @@ impl Handle for RemoteHandle {
             .await
             .map_err(map_gateway_err)?; // 错误码映射
         let r = resp.stat.ok_or(SmbError::NotSupported)?; // 取查询结果
-        debugf!("后端:查询信息成功 句柄={} 名称={} 大小={} 目录={}(耗时 {}µs)", &["后端"], self.handle_id, r.info.name, r.info.end_of_file, r.info.is_directory, _t.elapsed().as_micros()); // 记录元信息结果与耗时
+        debugf!("后端:查询信息成功 句柄={} 名称={} 大小={} 目录={}(耗时 {}µs)", &["SMB"], self.handle_id, r.info.name, r.info.end_of_file, r.info.is_directory, _t.elapsed().as_micros()); // 记录元信息结果与耗时
         Ok(FileInfo {
             // 帧协议 FileInfo → 库 FileInfo(字段一一对应直接搬运)
             name: r.info.name, // 显示名
@@ -226,7 +227,7 @@ impl Handle for RemoteHandle {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关
             .await
             .map_err(map_gateway_err)?; // 错误码映射
-        debugf!("后端:设置时间成功 句柄={}(耗时 {}µs)", &["后端"], self.handle_id, _t.elapsed().as_micros()); // 记录设置成功与耗时
+        debugf!("后端:设置时间成功 句柄={}(耗时 {}µs)", &["SMB"], self.handle_id, _t.elapsed().as_micros()); // 记录设置成功与耗时
         Ok(())
     }
 
@@ -254,7 +255,7 @@ impl Handle for RemoteHandle {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关
             .await
             .map_err(map_gateway_err)?; // 错误码映射
-        debugf!("后端:截断成功 句柄={} 长度={}(耗时 {}µs)", &["后端"], self.handle_id, len, _t.elapsed().as_micros()); // 记录截断成功与耗时
+        debugf!("后端:截断成功 句柄={} 长度={}(耗时 {}µs)", &["SMB"], self.handle_id, len, _t.elapsed().as_micros()); // 记录截断成功与耗时
         Ok(())
     }
 
@@ -288,7 +289,7 @@ impl Handle for RemoteHandle {
             .await
             .map_err(map_gateway_err)?; // 错误码映射
         let r = resp.list_dir.ok_or(SmbError::NotSupported)?; // 取条目列表
-        debugf!("后端:列目录成功 句柄={} 模式={:?} → {} 个条目(耗时 {}µs)", &["后端"], self.handle_id, pattern, r.entries.len(), _t.elapsed().as_micros()); // 记录条目数与耗时
+        debugf!("后端:列目录成功 句柄={} 模式={:?} → {} 个条目(耗时 {}µs)", &["SMB"], self.handle_id, pattern, r.entries.len(), _t.elapsed().as_micros()); // 记录条目数与耗时
         let entries = r // 逐条转换:帧协议 FileInfo → 库 FileInfo
             .entries
             .into_iter()
@@ -320,7 +321,7 @@ impl Handle for RemoteHandle {
     /// 2. 失败仅记日志——句柄已注销,数据一致性由网关侧写回重试兜底。
     async fn close(self: Box<Self>) -> SmbResult<()> {
         let _t = std::time::Instant::now(); // 计时起点
-        debugf!("后端:关闭句柄 {} 关闭即删={}", &["后端"], self.handle_id, self.delete_on_close); // 记录关闭请求
+        debugf!("后端:关闭句柄 {} 关闭即删={}", &["SMB"], self.handle_id, self.delete_on_close); // 记录关闭请求
         let req = OperateRequest {
             // 组装关闭请求
             code: CODE_FILE_CLOSE, // 操作码:关闭
@@ -334,7 +335,7 @@ impl Handle for RemoteHandle {
         let (_, _) = call_operate(&self.conn, &req, &[]) // 发网关(触发写回上传/关闭即删)
             .await
             .map_err(map_gateway_err)?; // 失败仍注销句柄;一致性由网关写回重试兜底
-        debugf!("后端:关闭成功 句柄={}(耗时 {}µs)", &["后端"], self.handle_id, _t.elapsed().as_micros()); // 记录关闭成功与耗时
+        debugf!("后端:关闭成功 句柄={}(耗时 {}µs)", &["SMB"], self.handle_id, _t.elapsed().as_micros()); // 记录关闭成功与耗时
         Ok(())
     }
 }

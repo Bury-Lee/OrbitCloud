@@ -1,7 +1,7 @@
 ﻿package config
 
 // 内置默认配置:编译期将 config/default.yaml 硬编码进二进制。
-// ./config.yaml 不存在时,InitConfig 自动用本配置生成;`orbitcloud -initConfig` 可强制覆盖写入。
+// ./OrbitCloud.yaml 不存在时,InitConfig 自动用本配置生成;`orbitcloud -initConfig` 可强制覆盖写入。
 import (
 	_ "embed"
 	"fmt"

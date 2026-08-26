@@ -48,7 +48,7 @@ pub async fn sync_loop(
 ) {//TODO:可以考虑去除
 
     if let Err(e) = reconcile(&conn, &registry, &handle).await { // 启动即全量快照:一次性搬入权威状态
-        errorf!("同步:初始快照失败:{e}", &["同步"]); // 失败不退出(仅记日志):推送/对账会再收敛
+        errorf!("同步:初始快照失败:{e}", &["SMB"]); // 失败不退出(仅记日志):推送/对账会再收敛
     }
 
     let mut ticker = tokio::time::interval(interval); // 定时器:按对账周期触发
@@ -63,21 +63,21 @@ pub async fn sync_loop(
                                     continue; // 无 CHANGE_NOTIFY 能力,直接忽略(等下次对账)
                                 }
                                 if let Err(e) = apply_push(&registry, &conn, &handle, entry).await { // 应用单条变更
-                                    warnf!("同步:应用推送失败:{e}", &["同步"]); // 失败仅告警,不打断推送流
+                                    warnf!("同步:应用推送失败:{e}", &["SMB"]); // 失败仅告警,不打断推送流
                                 }
                             }
-                            Err(e) => warnf!("同步:解析推送条目失败:{e}", &["同步"]), // 单条解析失败仅告警
+                            Err(e) => warnf!("同步:解析推送条目失败:{e}", &["SMB"]), // 单条解析失败仅告警
                         }
                     }
                     None => { // 通道关闭 = 连接生命周期结束
-                        warnf!("同步:推送通道已关闭,停止同步循环", &["同步"]); // 记录后退出
+                        warnf!("同步:推送通道已关闭,停止同步循环", &["SMB"]); // 记录后退出
                         return; // 本任务结束(重连后 main 会重启)
                     }
                 }
             }
             _ = ticker.tick() => { // 分支 b:定时全量对账(兜底一致性)
                 if let Err(e) = reconcile(&conn, &registry, &handle).await { // 重拉快照并全量应用
-                    errorf!("同步:对账失败:{e}", &["同步"]); // 失败仅记错误日志
+                    errorf!("同步:对账失败:{e}", &["SMB"]); // 失败仅记错误日志
                 }
             }
         }
@@ -112,7 +112,7 @@ pub async fn apply_snapshot(
             .map_err(|e| format!("同步:添加用户 {} 失败:{e}", user.username))?; // 单用户失败终止
         users_index.upsert(&user.username, user.id).await; // 用户名 → users.id 登记
     }
-    infof!("同步:快照用户 {} 人", &["同步"], snap.users.len()); // 记录用户表规模
+    infof!("同步:快照用户 {} 人", &["SMB"], snap.users.len()); // 记录用户表规模
 
     registry.apply_snapshot(snap, conn, handle).await?; // 桶/共享:整体交给注册表做差集同步(内部联动协议层)
     Ok(())
@@ -131,7 +131,7 @@ pub async fn apply_push(
     handle: &ConfigHandle, // 配置句柄
     entry: AclEntry, // 变更条目(按 op/kind 路由)
 ) -> Result<(), String> {
-    debugf!("同步:推送 操作={} 类型={} 共享={}", &["同步"], entry.op, entry.kind, entry.share_name); // 记录变更推送(操作/类型/共享)
+    debugf!("同步:推送 操作={} 类型={} 共享={}", &["SMB"], entry.op, entry.kind, entry.share_name); // 记录变更推送(操作/类型/共享)
     let users_index = registry.users_index(); // 用户索引(操作身份映射,随推送维护)
     match (entry.op.as_str(), entry.kind.as_str()) { // 按 (op, kind) 组合路由到对应处理
         ("upsert", "user") => { // 用户新增/更新 → 写入内存用户表
@@ -152,7 +152,7 @@ pub async fn apply_push(
             let user = entry.user.ok_or("推送:条目缺少用户数据")?; // 取用户载荷
             let _ = handle.remove_user(&user.username).await; // 移除(此后该用户名登录失败)
             users_index.remove(&user.username).await; // 同步移除身份映射
-            infof!("同步:用户 {} 已删除", &["同步"], user.username); // 记录删除
+            infof!("同步:用户 {} 已删除", &["SMB"], user.username); // 记录删除
             Ok(())
         }
         ("upsert", "share") => { // 共享新增/更新 → 注册表 upsert
@@ -213,7 +213,7 @@ pub async fn reconcile(
         ));
     }
     let snap = resp.snapshot.ok_or("sync: snapshot result missing")?; // 取快照结果,缺失即协议错误
-    debugf!("同步:收到快照:{} 用户,{} 共享", &["同步"], snap.users.len(), snap.shares.len()); // 记录快照规模
+    debugf!("同步:收到快照:{} 用户,{} 共享", &["SMB"], snap.users.len(), snap.shares.len()); // 记录快照规模
 
     apply_snapshot(registry, conn, handle, &snap).await // 全量应用:用户表重建 + 注册表差集同步
 }

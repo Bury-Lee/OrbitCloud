@@ -95,7 +95,7 @@ static LOGGER: OnceLock<Logger> = OnceLock::new();
 
 /// 初始化全局日志器(启动期调用一次;失败返回错误串,调用方终止启动)。
 ///
-/// 参数:`cfg` 已解析的日志配置(config.yaml `log:` 分节)。
+/// 参数:`cfg` 已解析的日志配置(SMB.yaml `log:` 分节)。
 ///
 /// 步骤:
 /// 1. 级别:RUST_LOG 环境变量优先,其次配置,非法退化为 Info;

@@ -205,9 +205,9 @@ func (ShareAPI) ResolveShare(c *gin.Context) {
 		var meta *model.File
 		var err error
 		if br == nil {
-			rc, meta, err = server.DownloadSharedFile(ctx, server.DownloadSharedFileArg{Token: token, Password: password, RelPath: path})
+			rc, meta, err = server.DownloadSharedFile(ctx, server.DownloadSharedFileArg{Token: token, Password: password, RelPath: path, ClientIP: c.ClientIP()})
 		} else {
-			rc, meta, err = server.DownloadSharedFileRange(ctx, server.DownloadSharedFileRangeArg{Token: token, Password: password, RelPath: path, Start: br.Start, End: br.End})
+			rc, meta, err = server.DownloadSharedFileRange(ctx, server.DownloadSharedFileRangeArg{Token: token, Password: password, RelPath: path, Start: br.Start, End: br.End, ClientIP: c.ClientIP()})
 		}
 		if err != nil {
 			respondError(c, err)

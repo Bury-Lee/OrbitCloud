@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import "strings"
 
@@ -60,12 +60,12 @@ type Server struct {
 type StorageProvider string
 
 const (
-	// 存储提供商常量,取值与 config.yaml 的 storage.provider 小写写法一致。
+	// 存储提供商常量,取值与 OrbitCloud.yaml 的 storage.provider 小写写法一致。
 	Minio  StorageProvider = "minio"
 	Rustfs StorageProvider = "rustfs"
 )
 
-// Storage 存储引擎配置(config.yaml 的 storage 段,含对象存储后端与分片/副本参数)。
+// Storage 存储引擎配置(OrbitCloud.yaml 的 storage 段,含对象存储后端与分片/副本参数)。
 type Storage struct {
 	// —— 对象存储后端 ——
 	// Provider 仅为标识字段(仅校验非空),驱动由 storage.driver(s3|local)决定。
@@ -123,7 +123,7 @@ type Log struct {
 	RetentionDays int    `yaml:"retention_days" json:"retention_days"` // 日志保留天数,默认 30;cron 按此清理 logs 与 operation_logs 两表
 }
 
-// ExecPool 执行池配置(config.yaml 的 exec_pool 段)。
+// ExecPool 执行池配置(OrbitCloud.yaml 的 exec_pool 段)。
 // api 层通过 ExecPoolMiddleware 将 handler 提交至此池执行。
 type ExecPool struct {
 	MaxWorkers    int `yaml:"max_workers" json:"max_workers"`       // 最大工作协程数(默认 128)
@@ -140,7 +140,7 @@ const (
 	RequestPoolModeReject RequestPoolMode = "reject" // 快速拒绝(503)
 )
 
-// RequestPool 请求准入池配置(config.yaml 的 request_pool 段)。
+// RequestPool 请求准入池配置(OrbitCloud.yaml 的 request_pool 段)。
 // 目前由 StreamingPoolMiddleware 使用,控制流式请求并发上限。
 type RequestPool struct {
 	MaxConcurrent int             `yaml:"max_concurrent" json:"max_concurrent"` // 同时在途请求上限(默认 256)
@@ -149,7 +149,7 @@ type RequestPool struct {
 	Mode          RequestPoolMode `yaml:"mode" json:"mode"`                     // block | reject(默认 block)
 }
 
-// Bucket 桶相关配置(config.yaml 的 bucket 段)。
+// Bucket 桶相关配置(OrbitCloud.yaml 的 bucket 段)。
 type Bucket struct {
 	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
 }
@@ -170,7 +170,7 @@ type Config struct {
 	RequestPool RequestPool `yaml:"request_pool" json:"request_pool"`
 	ExecPool    ExecPool    `yaml:"exec_pool" json:"exec_pool"`
 	Nodes       []Node      `yaml:"nodes" json:"nodes"`
-	// SmbGateway SMB 网关私有 Socket 配置(与 Rust 侧 config.yaml gateway: 分节对齐;
+	// SmbGateway SMB 网关私有 Socket 配置(与 Rust 侧 OrbitCloud.yaml gateway: 分节对齐;
 	// 缺省时用 DefaultSmbGatewayConfig)。
 	SmbGateway SmbGatewayConfig `yaml:"smb_gateway" json:"smb_gateway"`
 }
@@ -179,7 +179,7 @@ type Config struct {
 type SmbGatewayConfig struct {
 	// ListenAddr 私有 TCP 监听地址(如 127.0.0.1:9101)。
 	ListenAddr string `yaml:"listen_addr" json:"listen_addr"`
-	// SharedKey 共享密钥(可直接配置在 config.yaml;优先级高于 SharedKeyEnv。
+	// SharedKey 共享密钥(可直接配置在 OrbitCloud.yaml;优先级高于 SharedKeyEnv。
 	// 留空时回退到 SharedKeyEnv 指定的环境变量;两者皆空则跳过静态鉴权,
 	// 等待握手后动态密钥协商(接口后续实现)。
 	SharedKey string `yaml:"shared_key" json:"shared_key"`
@@ -192,7 +192,7 @@ type SmbGatewayConfig struct {
 	MaxConcurrent int `yaml:"max_concurrent" json:"max_concurrent"`
 }
 
-// DefaultSmbGatewayConfig 网关配置缺省值(与 Rust 侧 config.yaml 内置默认保持一致)。
+// DefaultSmbGatewayConfig 网关配置缺省值(与 Rust 侧 OrbitCloud.yaml 内置默认保持一致)。
 func DefaultSmbGatewayConfig() SmbGatewayConfig {
 	return SmbGatewayConfig{
 		ListenAddr:    "127.0.0.1:9101",
@@ -202,19 +202,19 @@ func DefaultSmbGatewayConfig() SmbGatewayConfig {
 	}
 }
 
-// Health 健康检查配置(config.yaml 的 health 段)。
+// Health 健康检查配置(OrbitCloud.yaml 的 health 段)。
 type Health struct {
 	CheckInterval string `yaml:"check_interval" json:"check_interval"` // 节点探测周期(默认 5s)
 	FailThreshold int    `yaml:"fail_threshold" json:"fail_threshold"` // 连续失败 N 次标记 inactive(默认 3)
 }
 
-// Pool 协程池配置(config.yaml 的 pool 段)。
+// Pool 协程池配置(OrbitCloud.yaml 的 pool 段)。
 type Pool struct {
 	MaxWorkers int `yaml:"max_workers" json:"max_workers"` // 最大工作协程数(默认 64)
 	QueueSize  int `yaml:"queue_size" json:"queue_size"`   // 任务队列容量(默认 1024;超出后提交方阻塞)
 }
 
-// Node 存储节点配置(config.yaml 的 nodes 列表项)。
+// Node 存储节点配置(OrbitCloud.yaml 的 nodes 列表项)。
 // 当前仅做非空与字段校验(config/init.go);驱动/端点/凭据实际取自 storage 段,逐节点覆盖为后续扩展预留。
 type Node struct {
 	ID        string `yaml:"id" json:"id"`                 // 节点 ID(唯一,如 node1)

@@ -26,8 +26,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"orbitcloud/core"
-	"orbitcloud/log"
+	"orbitcloud/core"
 	"orbitcloud/model"
 	"orbitcloud/server"
 )
@@ -202,7 +201,7 @@ func resolveSession(ctx context.Context, userID uint) (*SessionInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("smb_gateway: 身份解析 userId=%d user=%q(权限=%d)", info.UserID, info.Username, info.PermissionLevel)
+	smbDebugf("smb_gateway: 身份解析 userId=%d user=%q(权限=%d)", info.UserID, info.Username, info.PermissionLevel)
 	return info, nil
 }
 

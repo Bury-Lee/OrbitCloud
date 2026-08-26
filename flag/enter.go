@@ -1,8 +1,8 @@
-﻿package flag
+package flag
 
 // Package flag 命令行指令定义与实现。
 // 约定:权限 0(超级管理员)只能经命令行创建,HTTP API 不可创建权限 0 的用户;
-// 配置固定从工作目录 ./config.yaml 读取,不支持命令行覆盖路径。
+// 配置固定从工作目录 ./OrbitCloud.yaml 读取,不支持命令行覆盖路径。
 //
 // 指令分两批执行:
 //   - RunPreInit(在 appinit 初始化之前,无需任何初始化):-initConfig 强制生成配置后退出;
@@ -34,16 +34,16 @@ const usageText = `orbitcloud 分布式网盘服务
 
 用法:
   orbitcloud                         正常启动服务
-  orbitcloud -initConfig              用内置默认配置(embed)强制覆盖生成 ./config.yaml 后退出
+  orbitcloud --initConfig              用内置默认配置(embed)强制覆盖生成 ./OrbitCloud.yaml 后退出
   orbitcloud --add-superadmin <username> <password>   添加超级管理员(权限 0)后退出
   orbitcloud --version               打印版本号后退出
   orbitcloud --help                  打印本帮助后退出
 
-配置文件:工作目录 ./config.yaml(不存在时自动用内置默认配置生成; -initConfig 可强制覆盖)
+配置文件:工作目录 ./OrbitCloud.yaml(不存在时自动用内置默认配置生成; -initConfig 可强制覆盖)
 `
 
 // RunPreInit 处理无需任何初始化的指令,必须在 appinit 初始化之前调用(命中则执行后退出):
-// -initConfig 用内置默认配置(embed)强制覆盖写入 ./config.yaml。
+// -initConfig 用内置默认配置(embed)强制覆盖写入 ./OrbitCloud.yaml。
 // 不能并入 Run:Run 在 appinit 初始化之后执行,而 appinit 会先读配置并初始化 DB
 // (不可用会持续重试);若配置缺失/损坏,-initConfig 将永远轮不到执行。
 func RunPreInit(args []string) error {
@@ -52,11 +52,11 @@ func RunPreInit(args []string) error {
 	}
 
 	switch args[0] {
-	case "-initConfig", "--initConfig", "--" + CmdInitConfig:
-		if err := config.WriteDefaultConfigFile("./config.yaml"); err != nil {
+	case "--initConfig", "--" + CmdInitConfig:
+		if err := config.WriteDefaultConfigFile("./OrbitCloud.yaml"); err != nil {
 			return err
 		}
-		fmt.Println("默认配置已强制写入 ./config.yaml(内置 embed 配置),请按需修改后重启")
+		fmt.Println("默认配置已强制写入 ./OrbitCloud.yaml(内置 embed 配置),请按需修改后重启")
 		return ErrExit
 	default:
 		return nil // 未命中 → 继续正常启动流程

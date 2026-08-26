@@ -4,7 +4,7 @@
 #
 # 步骤:
 #   1. 安装二进制 /opt/orbitcloud/bin/orbitcloud
-#   2. 生成/校验 config.yaml(缺失则用 -initConfig 落盘, 提示修改)
+#   2. 生成/校验 OrbitCloud.yaml(缺失则用 -initConfig 落盘, 提示修改)
 #   3. 注入 smb_gateway 分节(shared_key 自动生成, 与 SMB 网关脚本共享)
 #   4. 创建超级管理员(--add-superadmin, 已存在则跳过)
 #   5. 注册 systemd 服务并启动
@@ -22,7 +22,7 @@ DIST="$REPO_ROOT/build/dist"
 OC_HOME="/opt/orbitcloud"
 OC_BIN="$OC_HOME/bin/orbitcloud"
 OC_CFG_DIR="$OC_HOME/config"
-OC_CFG="$OC_CFG_DIR/config.yaml"
+OC_CFG="$OC_CFG_DIR/OrbitCloud.yaml"
 KEY_FILE="$OC_HOME/.smb-gateway-key"   # 共享密钥(SMB 网关脚本复用; 敏感, 0600)
 
 SUPERADMIN=""
@@ -53,7 +53,7 @@ install -m 0755 "$DIST/orbitcloud" "$OC_BIN/orbitcloud"
 ok "$OC_BIN/orbitcloud"
 
 # ---------- 2. 配置 ----------
-step "2. 生成/校验 config.yaml"
+step "2. 生成/校验 OrbitCloud.yaml"
 if [[ ! -f "$OC_CFG" || "$RESET" == true ]]; then
   (cd "$OC_CFG_DIR" && "$OC_BIN/orbitcloud" -initConfig)
   warn "已生成默认配置 $OC_CFG —— 生产必改:"

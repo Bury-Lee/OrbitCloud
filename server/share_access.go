@@ -113,6 +113,7 @@ type DownloadSharedFileArg struct {
 	Token    string // 分享短码
 	Password string // 提取码明文(无则空串)
 	RelPath  string // 文件夹分享:分享根内文件相对路径(空 = ErrInvalidInput)
+	ClientIP string // 请求方 IP(日志留痕;api 层 c.ClientIP() 注入)
 }
 
 // DownloadSharedFile 分享下载/预览通道(公开访问):校验后直接返回
@@ -147,7 +148,7 @@ func DownloadSharedFile(ctx context.Context, arg DownloadSharedFileArg) (io.Read
 		return nil, nil, err
 	}
 
-	log.Infof("share download: token %s file %d (bucket %d) size %d", token, file.ID, file.BucketID, file.FileSize)
+	log.Infof("share download: token=%s file=%d client_ip=%s", token, file.ID, arg.ClientIP)
 	return rc, file, nil
 }
 
@@ -175,6 +176,7 @@ type DownloadSharedFileRangeArg struct {
 	RelPath  string // 文件夹分享:分享根内文件相对路径
 	Start    int64  // 区间起点(闭区间,含)
 	End      int64  // 区间终点(闭区间,含)
+	ClientIP string // 请求方 IP(日志留痕;api 层 c.ClientIP() 注入)
 }
 
 // DownloadSharedFileRange 分享通道范围下载(公开访问):与 DownloadSharedFile 同一校验通路,
@@ -215,8 +217,8 @@ func DownloadSharedFileRange(ctx context.Context, arg DownloadSharedFileRangeArg
 		return nil, nil, err
 	}
 
-	log.Infof("share download range: token %s file %d (bucket %d) [%d,%d] size %d",
-		token, file.ID, file.BucketID, start, end, file.FileSize)
+	log.Infof("share download range: token=%s file=%d [%d,%d] client_ip=%s",
+		token, file.ID, start, end, arg.ClientIP)
 	return rc, file, nil
 }
 

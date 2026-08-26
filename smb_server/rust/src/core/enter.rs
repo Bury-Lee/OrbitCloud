@@ -1,5 +1,5 @@
 //! ============================================================================
-//! core/enter.rs —— 全局配置结构定义(与 config.yaml 字段一一对应)
+//! core/enter.rs —— 全局配置结构定义(与 SMB.yaml 字段一一对应)
 //! ============================================================================
 //!
 //! 设计来源(草稿扩展):`struct Core { Host, Des, log }` ——
@@ -12,7 +12,7 @@
 
 use serde::Deserialize; // 反序列化 derive(配置解析)
 
-/// 全局配置根(对应 config.yaml 顶层三个分节)。
+/// 全局配置根(对应 SMB.yaml 顶层三个分节)。
 ///
 /// 承载功能:启动期经 `flag::load_config` 反序列化填充;
 /// 运行期只读访问(不提供热重载,变更走 Go 网关推送)。
@@ -26,7 +26,7 @@ pub struct Config {
     pub log: LogConfig,
 }
 
-/// SMB 服务配置(对应 config.yaml `smb:` 分节)。
+/// SMB 服务配置(对应 SMB.yaml `smb:` 分节)。
 ///
 /// 承载功能:决定本进程 SMB 监听行为与共享网络标识。
 #[derive(Debug, Clone, Deserialize)] // 派生
@@ -37,7 +37,7 @@ pub struct SmbConfig {
     pub netbios_name: String,
 }
 
-/// Go 网关配置(对应 config.yaml `gateway:` 分节)。
+/// Go 网关配置(对应 SMB.yaml `gateway:` 分节)。
 ///
 /// 承载功能:定位 Go 网关并约定保活/同步节奏(帧协议见 types.rs);
 /// 缓冲与并发参数与 Go 侧请求池对齐(设计点 6)。
@@ -45,7 +45,7 @@ pub struct SmbConfig {
 pub struct GatewayConfig {
     /// Go 网关地址(如 "127.0.0.1:9001";对应草稿 Des 发送往地址,后端服务位置)。
     pub addr: String,
-    /// 共享密钥(可直接配置在 config.yaml;优先级高于 shared_key_env。
+    /// 共享密钥(可直接配置在 SMB.yaml;优先级高于 shared_key_env。
     /// 留空时回退到 shared_key_env 指定的环境变量;两者皆空则跳过静态鉴权,
     /// 等待握手后动态密钥协商(接口后续实现)。
     #[serde(default)]
@@ -72,7 +72,7 @@ fn default_rpc_timeout_secs() -> u64 {
     30
 }
 
-/// 日志配置(对应 config.yaml `log:` 分节)。
+/// 日志配置(对应 SMB.yaml `log:` 分节)。
 ///
 /// 承载功能:初始化本网关日志器(与 Go 侧 orbitcloud/log 对齐):
 /// - 级别过滤(仍可用 RUST_LOG 环境变量覆盖);

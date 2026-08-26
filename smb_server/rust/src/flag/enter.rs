@@ -2,8 +2,8 @@
 //! flag/enter.rs —— 配置读取与解析
 //! ============================================================================
 //!
-//! - 内置默认:`include_str!("../../config.yaml")`(编译期嵌入);
-//! - 读取解析:优先工作目录 ./config.yaml,缺失落盘内置默认后解析;
+//! - 内置默认:`include_str!("../../SMB.yaml")`(编译期嵌入);
+//! - 读取解析:优先工作目录 ./SMB.yaml,缺失落盘内置默认后解析;
 //! - 解析库:serde_yaml(与 Go 侧 gopkg.in/yaml.v3 语义对齐)。
 
 use std::env; // 环境变量读取(共享密钥注入)
@@ -12,14 +12,14 @@ use std::net::SocketAddr; // 监听/网关地址校验
 
 use crate::core::enter::Config; // 全局配置结构
 
-/// 内置默认配置(编译期嵌入;与包根 config.yaml 保持同步,禁止手工漂移)。
+/// 内置默认配置(编译期嵌入;与包根 SMB.yaml 保持同步,禁止手工漂移)。
 ///
-/// 意义:首次启动无配置文件时,把此内容落盘为 ./config.yaml,
+/// 意义:首次启动无配置文件时,把此内容落盘为 ./SMB.yaml,
 /// 与 Go 侧"内置 embed 默认配置"行为一致。
-pub const DEFAULT_CONFIG: &str = include_str!("../../config.yaml"); // 编译期把 config.yaml 内容嵌进二进制
+pub const DEFAULT_CONFIG: &str = include_str!("../../SMB.yaml"); // 编译期把 SMB.yaml 内容嵌进二进制
 
-/// 默认配置文件路径(工作目录相对;与 Go 侧 `./config.yaml` 约定一致)。
-pub const DEFAULT_CONFIG_PATH: &str = "./config.yaml";
+/// 默认配置文件路径(工作目录相对;与 Go 侧 `./OrbitCloud.yaml` 约定一致)。
+pub const DEFAULT_CONFIG_PATH: &str = "./SMB.yaml";
 
 /// 应用版本号(与 Go 侧 --version 输出对齐)。
 pub const VERSION: &str = "0.1.0";
@@ -36,7 +36,7 @@ pub fn load_config(path: &str) -> Result<Config, String> {
     if !std::path::Path::new(path).exists() { // 配置文件不存在?(首次启动)
         fs::write(path, DEFAULT_CONFIG) // 用编译期内置默认落盘(让用户拿到可改的样板)
             .map_err(|e| format!("配置:写入默认配置 {} 失败: {}", path, e))?; // 写盘失败终止
-        infof!("配置:默认配置已写入 {}", &["配置"], path); // 记录自动生成
+        infof!("配置:默认配置已写入 {}", &["SMB"], path); // 记录自动生成
     }
     let data = fs::read_to_string(path) // 读取配置文件全部内容
         .map_err(|e| format!("配置:读取 {} 失败: {}", path, e))?; // 读失败终止
@@ -45,7 +45,7 @@ pub fn load_config(path: &str) -> Result<Config, String> {
     validate(&cfg)?; // 语义校验(必填项/地址可解析/白名单),失败即终止启动
     debugf!(
         "配置:已加载 监听={} 网关={} 缓冲={} 对账间隔={}s 日志级别={}",
-        &["配置"], // 前缀标签
+        &["SMB"], // 前缀标签
         cfg.smb.listen, // SMB 监听地址
         cfg.gateway.addr, // 网关地址
         cfg.gateway.channel_buffer, // 管道缓冲
@@ -109,7 +109,7 @@ pub fn load_shared_key(cfg_shared_key: &str, env_name: &str) -> Result<Vec<u8>, 
         String::new() // 两者皆空
     };
     if raw.is_empty() { // 均未配置?
-        warnf!("配置:未配置共享密钥(shared_key 与 shared_key_env 均空),跳过静态鉴权(动态协商后续实现)", &["配置"]); // 提示降级
+        warnf!("配置:未配置共享密钥(shared_key 与 shared_key_env 均空),跳过静态鉴权(动态协商后续实现)", &["SMB"]); // 提示降级
         return Ok(Vec::new()); // 空密钥继续启动(空密钥下 HMAC 双侧一致,握手可通过)
     }
     if raw.len() < 16 { // 过短?
@@ -132,7 +132,7 @@ pub fn load_shared_key(cfg_shared_key: &str, env_name: &str) -> Result<Vec<u8>, 
 /// - Err(String):非法参数/指令失败。
 pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     if args.len() <= 1 { // 无参数(只有程序名)?
-        return Ok(Some(load_config(DEFAULT_CONFIG_PATH)?)); // 默认启动路径:加载 ./config.yaml
+        return Ok(Some(load_config(DEFAULT_CONFIG_PATH)?)); // 默认启动路径:加载 ./SMB.yaml
     }
     let cmd = args[1].as_str(); // 取第二个参数作为指令
     match cmd {
@@ -150,11 +150,11 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             println!("smb-gateway (OrbitCloud SMB 网关 Rust 侧)"); // 程序简介
             println!("用法:"); // 用法头
             println!("  smb-gateway [flags]"); // 语法行
-            println!("    (无参数)          正常启动(读取 ./config.yaml,缺失自动落盘默认配置)"); // 默认行为
-            println!("  smb-gateway -initConfig   用内置默认配置覆盖生成 ./config.yaml 后退出"); // 指令 1
+            println!("    (无参数)          正常启动(读取 ./SMB.yaml,缺失自动落盘默认配置)"); // 默认行为
+            println!("  smb-gateway -initConfig   用内置默认配置覆盖生成 ./SMB.yaml 后退出"); // 指令 1
             println!("  smb-gateway --version     打印版本号后退出"); // 指令 2
             println!("  smb-gateway --help / -h   打印帮助后退出"); // 指令 3
-            println!("  smb-gateway --WithConfig <json>  用 JSON 注入配置启动(跳过 config.yaml)"); // 指令 4
+            println!("  smb-gateway --WithConfig <json>  用 JSON 注入配置启动(跳过 SMB.yaml)"); // 指令 4
             println!("共享密钥:经环境变量 {} 注入(≥16 字节;留空 = 跳过静态密钥)", // 密钥说明
                 crate::core::enter::DEFAULT_KEY_ENV);
             Ok(None) // 指令已处理,退出
@@ -166,7 +166,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
             let cfg: Config = serde_yaml::from_str(args[2].as_str()) // 解析注入的 JSON 为 Config
                 .map_err(|e| format!("指令:解析 --WithConfig JSON 失败: {}", e))?; // 解析失败终止
             validate(&cfg)?; // 同样的语义校验
-            Ok(Some(cfg)) // 用注入配置继续启动(跳过 config.yaml)
+            Ok(Some(cfg)) // 用注入配置继续启动(跳过 SMB.yaml)
         }
         other => Err(format!("指令:未知参数 {:?}(试试 --help)", other)), // 未知参数:报错不静默(避免配置失效不自知)
     }

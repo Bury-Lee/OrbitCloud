@@ -12,4 +12,4 @@
 //! 本模块只定义数据与访问入口,不承载业务逻辑。
 //! 引用方式:`crate::core::enter::{Config, ...}`。
 
-pub mod enter; // 全局配置结构定义(与 config.yaml 字段一一对应)
+pub mod enter; // 全局配置结构定义(与 SMB.yaml 字段一一对应)

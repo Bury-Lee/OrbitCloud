@@ -266,9 +266,9 @@ func (FileAPI) DownloadFile(c *gin.Context) {
 	var rc io.ReadCloser
 	var meta *model.File
 	if br == nil {
-		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: bucketID, FileID: fileID})
+		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: bucketID, FileID: fileID, UserID: userID, ClientIP: c.ClientIP()})
 	} else {
-		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: bucketID, FileID: fileID, Start: br.Start, End: br.End})
+		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: bucketID, FileID: fileID, Start: br.Start, End: br.End, UserID: userID, ClientIP: c.ClientIP()})
 	}
 	if err != nil {
 		respondError(c, err)
@@ -330,9 +330,9 @@ func writePreviewStream(c *gin.Context, bucketID, fileID uint) {
 	var rc io.ReadCloser
 	var meta *model.File
 	if br == nil {
-		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: bucketID, FileID: fileID})
+		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: bucketID, FileID: fileID, UserID: userID, ClientIP: c.ClientIP()})
 	} else {
-		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: bucketID, FileID: fileID, Start: br.Start, End: br.End})
+		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: bucketID, FileID: fileID, Start: br.Start, End: br.End, UserID: userID, ClientIP: c.ClientIP()})
 	}
 	if err != nil {
 		respondError(c, err)
