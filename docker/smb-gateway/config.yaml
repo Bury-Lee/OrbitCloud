@@ -1,0 +1,23 @@
+# smb-gateway 容器配置(与后端共享同一密钥,直配在 shared_key)
+smb:
+  listen: "0.0.0.0:445"
+  netbios_name: "ORBITCLOUD"
+
+gateway:
+  addr: "172.28.0.10:9101"        # orbitcloud 容器静态 IP(compose oc-net 网络)
+  shared_key: "CHANGE_ME_IN_PREP"    # prep.ps1 生成时替换,与后端 OrbitCloud.yaml 一致
+  shared_key_env: ""
+  heartbeat_secs: 30
+  sync_interval_secs: 60
+  channel_buffer: 1024
+  rpc_timeout_secs: 30
+
+log:
+  level: info
+  output: "/opt/orbitcloud/smb-gateway/logs"
+  file_prefix: "smb-gateway"
+  db_enabled: true
+  db_path: "/opt/orbitcloud/smb-gateway/logs/logs.db"
+  db_level: "info"
+  retention_days: 30
+  cleanup_interval_secs: 3600

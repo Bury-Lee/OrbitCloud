@@ -1,0 +1,122 @@
+# ============================================================
+#  OrbitCloud - 生产部署示例(postgres 风格)
+#
+#  用法: 像 postgres 官方镜像一样, 在 environment 里只写你
+#        需要改的项, 其余自动使用内置默认值。
+#
+#  启动: docker compose -f docker-compose.prod.yml up -d
+#  完整变量清单(全部可选, 括号内为默认值):
+#
+#  ── 应用 ──────────────────────────────────────────────
+#  ORBITCLOUD_APP_NAME / VERSION / ENVIRONMENT(prod) / DEBUG(false)
+#  ORBITCLOUD_APP_TIMEZONE (Asia/Shanghai)
+#
+#  ── HTTP ──────────────────────────────────────────────
+#  ORBITCLOUD_SERVER_HOST(0.0.0.0) PORT(8080) READ_TIMEOUT(1分)
+#  WRITE_TIMEOUT(0) IDLE_TIMEOUT(0) MAX_HEADER_BYTES(1MiB)
+#  MODE(release) PPROF_ENABLED(false) PPROF_DIR("")
+#
+#  ── 认证 ──────────────────────────────────────────────
+#  ORBITCLOUD_JWT_SECRET(★必改) EXPIRE_MINUTES(720) ISSUER ALGORITHM(HS256)
+#  ORBITCLOUD_REFRESH_JWT_EXPIRE_MINUTES(10080) / ISSUER / ALGORITHM
+#
+#  ── 存储(对象存储 + 分片副本) ─────────────────────────
+#  ORBITCLOUD_STORAGE_PROVIDER(rustfs) ENDPOINT ACCESS_KEY SECRET_KEY
+#  REGION(us-east-1) USE_SSL(false) TIMEOUT(30s) MAX_RETRIES(3)
+#  CHUNK_SIZE(5MB) MIN_REPLICAS(2) DRIVER(s3|local)
+#  REPAIR_INTERVAL(30s) REPAIR_CONCURRENCY(4)
+#
+#  ── 健康检查 / 协程池 ─────────────────────────────────
+#  ORBITCLOUD_HEALTH_CHECK_INTERVAL(5s) FAIL_THRESHOLD(3)
+#  ORBITCLOUD_POOL_MAX_WORKERS(64) QUEUE_SIZE(1024)
+#  ORBITCLOUD_REQUEST_POOL_MAX_CONCURRENT(256) QUEUE_SIZE(512)
+#    STREAMING_MAX(64) MODE(block|reject)
+#  ORBITCLOUD_EXEC_POOL_MAX_WORKERS(128) QUEUE_SIZE(512)
+#    STREAM_WORKERS(64) STREAM_QUEUE(256)
+#
+#  ── 存储节点(单节点) ──────────────────────────────────
+#  ORBITCLOUD_NODE_ID(node1) DRIVER PATH ENDPOINT
+#    ACCESS_KEY SECRET_KEY MAX_SPACE(0=不限) ENABLED(true)
+#
+#  ── 数据库(元数据) ────────────────────────────────────
+#  ORBITCLOUD_DB_SOURCE(sqlite|postgres) CHARSET LOG_LEVEL(warn)
+#    MAX_IDLE_CONNS(5) MAX_OPEN_CONNS(20)
+#    ORBITCLOUD_DB_DSN(/data/orbitcloud.db 或 postgres://...)
+#
+#  ── 桶 / SMB 通道 ─────────────────────────────────────
+#  ORBITCLOUD_BUCKET_ADMIN_CREATE_ONLY(false)
+#  ORBITCLOUD_SMB_GATEWAY_LISTEN_ADDR(127.0.0.1:9101)
+#  ORBITCLOUD_SMB_CHANNEL_BUFFER(1024) MAX_CONCURRENT(64)
+#  ORBITCLOUD_SMB_SHARED_KEY(★必改, 与网关一致)
+#
+#  ── 日志 ──────────────────────────────────────────────
+#  ORBITCLOUD_LOG_LEVEL(info) FORMAT(text|json) OUTPUT_PATH(""=stdout)
+#  MAX_SIZE(0) MAX_BACKUPS(0) MAX_AGE(0) DB_LEVEL("") RETENTION_DAYS(30)
+#
+#  ── SMB 网关(独立进程) ────────────────────────────────
+#  ORBITCLOUD_SMB_LISTEN(0.0.0.0:445) NETBIOS_NAME(ORBITCLOUD)
+#  ORBITCLOUD_SMB_GATEWAY_ADDR(127.0.0.1:9101)
+#  HEARTBEAT_SECS(30) SYNC_INTERVAL_SECS(60) RPC_TIMEOUT_SECS(30)
+#  ORBITCLOUD_SMB_LOG_LEVEL(info) OUTPUT(/data/logs)
+#    DB_ENABLED(true) DB_PATH(/data/logs/logs.db) DB_LEVEL(info)
+#    RETENTION_DAYS(30) CLEANUP_INTERVAL_SECS(3600)
+#
+#  高度定制: 挂载自定义 yaml 可覆盖全部(含多节点/读写分离):
+#    -v ./OrbitCloud.yaml:/opt/orbitcloud/OrbitCloud.yaml
+#    -v ./SMB.yaml:/opt/orbitcloud/gateway/SMB.yaml
+#  参考模板: docker/templates/*.example
+# ============================================================
+
+services:
+  orbitcloud:
+    image: orbitcloud:latest
+    container_name: orbitcloud
+    restart: unless-stopped
+    ports:
+      - "80:80"        # 前端 Web
+      - "8080:8080"    # 后端 HTTP API
+      - "445:445"      # SMB(本机 445 被占用可改 "1445:445")
+    volumes:
+      - orbitcloud-data:/data    # 数据卷: 数据库 + 对象存储 + 日志
+    environment:
+      # ── 应用 ──
+      ORBITCLOUD_APP_ENVIRONMENT: prod
+      ORBITCLOUD_APP_TIMEZONE: Asia/Shanghai
+
+      # ── HTTP(容器内固定, 对外端口由 ports 控制) ──
+      # ORBITCLOUD_SERVER_PORT: "8080"
+      ORBITCLOUD_SERVER_MODE: release
+
+      # ── 认证: ★生产必改 ──
+      # ORBITCLOUD_JWT_SECRET: "请换成32字节以上随机串"
+      # ORBITCLOUD_JWT_EXPIRE_MINUTES: "720"
+
+      # ── 存储: 单机开箱即用 local; 多机生产用 s3 ──
+      ORBITCLOUD_STORAGE_DRIVER: local          # local | s3
+      # ORBITCLOUD_STORAGE_ENDPOINT: "http://192.168.1.10:9000"
+      # ORBITCLOUD_STORAGE_ACCESS_KEY: "orbitcloud"
+      # ORBITCLOUD_STORAGE_SECRET_KEY: "请更换"
+      # ORBITCLOUD_STORAGE_CHUNK_SIZE: "5"
+      # ORBITCLOUD_STORAGE_MIN_REPLICAS: "2"
+
+      # ── 数据库: 默认 SQLite(仅开发); 生产用 postgres ──
+      # ORBITCLOUD_DB_SOURCE: sqlite
+      # ORBITCLOUD_DB_DSN: "/data/orbitcloud.db"
+      # ORBITCLOUD_DB_DSN: "postgres://user:pass@db:5432/orbitcloud?sslmode=disable"
+
+      # ── SMB 通道: ★生产必改(与网关一致) ──
+      # ORBITCLOUD_SMB_SHARED_KEY: "请换成32字节以上随机串"
+
+      # ── 日志(留空=stdout, docker logs 可看) ──
+      # ORBITCLOUD_LOG_LEVEL: info
+      # ORBITCLOUD_LOG_FORMAT: json
+
+      # ── SMB 网关 ──
+      # ORBITCLOUD_SMB_NETBIOS_NAME: ORBITCLOUD
+      # ORBITCLOUD_SMB_SYNC_INTERVAL_SECS: "60"
+
+      # ── 后端写日志到 /data 卷(可选, 与 docker logs 并存) ──
+      # ORBITCLOUD_LOG_OUTPUT_PATH: "/data/logs"
+
+volumes:
+  orbitcloud-data:

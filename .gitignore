@@ -28,7 +28,10 @@ other_software/
 .VSCodeCounter/
 tem/
 dist/
-docker/
+# docker 目录:忽略二进制/构建产物,保留 Dockerfile/模板/entrypoint 等文本
+docker/*/bin/
+docker/web/web/
+docker/.env
 # 部署运维工具产物
 OrbitCloudDeployTool.exe
 config.json

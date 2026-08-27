@@ -102,13 +102,74 @@ sudo bash deploy/deploy.sh --superadmin admin <密码>
 
 ## 命令行指令
 
+### 后端(`orbitcloud`)
+
 | 指令 | 说明 |
 |---|---|
-| `orbitcloud` | 正常启动服务 |
+| `orbitcloud` | 正常启动服务(读取 `./OrbitCloud.yaml`;缺失时自动用内置默认生成) |
 | `orbitcloud -initConfig` | 用内置默认配置强制覆盖生成 `./OrbitCloud.yaml` 后退出 |
 | `orbitcloud --add-superadmin <username> <password>` | 创建权限 0 超级管理员后退出(仅此通道可创建;密码 ≥8 位;不幂等) |
 | `orbitcloud --version` | 打印版本号后退出 |
 | `orbitcloud --help` / `-h` | 打印帮助后退出 |
+
+### SMB 网关(`smb-gateway`)
+
+| 指令 | 说明 |
+|---|---|
+| `smb-gateway` | 启动网关(读取 `./SMB.yaml`;缺失时自动用内置默认生成) |
+| `smb-gateway -initConfig` | 用内置默认配置强制覆盖生成 `./SMB.yaml` 后退出 |
+| `smb-gateway --version` | 打印版本号后退出 |
+| `smb-gateway --help` / `-h` | 打印帮助后退出 |
+| `smb-gateway --WithConfig <json>` | 以 JSON 注入配置启动(覆盖 `SMB.yaml`) |
+
+共享密钥:经环境变量 `ORBITCLOUD_SMB_GATEWAY_KEY` 注入(≥16 字节,必须与后端 `smb_gateway.shared_key` 一致)。
+
+## 配置说明
+
+两组件均为配置驱动 + 内置默认(embed),**不做缺省值兜底**——配置缺失/非法即启动终止。
+
+| 组件 | 配置文件(工作目录) | 关键分节 | 参考 |
+|---|---|---|---|
+| 后端 | `./OrbitCloud.yaml` | `app` `server` `jwt` `storage` `health` `pool` `database` `nodes` `bucket` `smb_gateway` `log` | [配置参考](配置参考.md) |
+| SMB 网关 | `./SMB.yaml` | `smb`(监听/NetBIOS)`gateway`(地址/共享密钥/心跳)`log` | [deploy-smb-gateway.sh](../deploy/deploy-smb-gateway.sh) |
+
+敏感项(JWT 密钥、SMB 共享密钥、S3 凭据)建议经环境变量注入,详见[配置参考](配置参考.md)。
+
+## 依赖清单
+
+### Go(后端)
+
+| 依赖 | 用途 |
+|---|---|
+| gin | HTTP 框架 |
+| gorm + dbresolver | ORM,读写分离 |
+| golang-jwt/jwt/v5 | JWT 访问/刷新令牌 |
+| minio-go/v7 | S3 对象存储客户端 |
+| glebarez/sqlite + modernc | 纯 Go SQLite 驱动(零 CGO) |
+| gorm.io/driver/postgres | PostgreSQL 驱动 |
+| Yiming1997/agilePool | 全局协程池 |
+| gopkg.in/yaml.v3 | 配置解析 |
+
+### Rust(SMB 网关)
+
+| 依赖 | 用途 |
+|---|---|
+| tokio | 异步运行时 |
+| ixr-smb-server(本地 patch,随仓库) | SMB 协议服务端 |
+| rusqlite(bundled) | 本地日志库 |
+| serde / serde_yaml | 配置与序列化 |
+| hmac / sha2 | 握手鉴权 |
+| tracing / tracing-subscriber | 日志 |
+
+### 前端(Vue 3)
+
+| 依赖 | 用途 |
+|---|---|
+| Vue 3 + vue-router + Pinia | 核心 / 路由 / 状态 |
+| Element Plus + icons | UI 组件库 |
+| axios | HTTP 客户端 |
+| fflate | 客户端 zip(批量下载) |
+| Vite + TypeScript + vue-tsc | 构建与类型检查 |
 
 ## 目录结构
 

@@ -1,0 +1,323 @@
+# ============================================================
+#  OrbitCloud - 容器高度定制版配置示例
+#  (使用: docker run -v 本文件:/opt/orbitcloud/OrbitCloud.yaml)
+#
+#  机制说明:
+#  · 容器启动时 entrypoint 仅在后端配置不存在时用内置模板渲染;
+#  · 挂载本文件后它会被直接采用, 模板不覆盖, 即"配置优先";
+#  · 本文件为全量配置(覆盖全部可配置项), 带详细注释便于定制;
+#  · 与 SMB 网关的 shared_key 必须保持一致(见 smb_gateway 段),
+#    网关侧配置挂载: docker run -v 网关配置:/opt/orbitcloud/gateway/SMB.yaml
+#
+#  ★ 生产必改项:
+#    - jwt.secret (建议 32+ 字节随机串)
+#    - smb_gateway.shared_key (与网关 SMB.yaml 的 gateway.shared_key 一致)
+#    - 存储: 单机开箱即用 driver: local (数据落 /data/objects);
+#            生产多机可改 driver: s3 + nodes 指向真实对象存储
+#    - database: 生产建议 postgres
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. 应用基础
+# ------------------------------------------------------------
+app:
+  # 应用名称
+  # 类型: string | 必填
+  name: orbitcloud
+
+  # 版本号
+  # 类型: string | 可选 | 默认: 0.1.0
+  version: 1.0.0
+
+  # 运行环境
+  # 类型: string | 可选 | 默认: dev | 取值: dev | test | prod
+  environment: prod
+
+  # 是否开启调试模式(额外诊断输出)
+  # 类型: bool | 可选 | 默认: false
+  debug: false
+
+  # 时区
+  # 类型: string | 可选 | 默认: Asia/Shanghai
+  timezone: Asia/Shanghai
+
+# ------------------------------------------------------------
+# 2. HTTP 服务
+# ------------------------------------------------------------
+server:
+  # 监听地址(0.0.0.0 = 所有网卡; 生产按需收窄)
+  host: "0.0.0.0"
+
+  # 监听端口(容器内固定, 对外端口用 docker -p 映射)
+  port: 8080
+
+  # 读超时(分钟; 0 = 不限)
+  read_timeout: 1
+
+  # 写超时(分钟; 0 = 不限; 下载为流式返回, 建议保持 0)
+  write_timeout: 0
+
+  # 空闲超时(分钟; 0 = 不限)
+  idle_timeout: 0
+
+  # 最大请求头大小(字节)
+  max_header_bytes: 1048576
+
+  # 运行模式
+  # 取值: debug | release | test
+  mode: release
+
+  # pprof 性能剖析(排查时开启)
+  # 类型: bool | 可选 | 默认: false
+  pprof_enabled: false
+
+  # pprof 输出目录(留空 = 内存采样后下载)
+  pprof_dir: ""
+
+# ------------------------------------------------------------
+# 3. 认证(JWT)
+# ------------------------------------------------------------
+jwt:
+  # JWT 签名密钥(必填; ★生产必须更换为随机串, 建议 32+ 字节)
+  secret: "REPLACE_ME_WITH_RANDOM_32BYTES_AT_LEAST"
+
+  # 访问令牌有效期(分钟; 默认 720 = 12 小时)
+  expire_minutes: 720
+
+  # 签发者(Verify 时校验 issuer)
+  issuer: orbitcloud
+
+  # 签名算法
+  # 取值: HS256(其余如 RS256 需额外密钥配置)
+  algorithm: HS256
+
+# 刷新令牌配置(与 jwt 分离; secret 留空时由访问密钥派生)
+refresh_jwt:
+  # 刷新令牌有效期(分钟; 默认 10080 = 7 天)
+  expire_minutes: 10080
+
+  # 签发者(可选, 默认同 jwt.issuer)
+  issuer: orbitcloud
+
+  # 签名算法(可选, 默认同 jwt.algorithm)
+  algorithm: HS256
+
+# ------------------------------------------------------------
+# 4. 存储引擎(对象存储后端 + 分片/副本参数)
+# ------------------------------------------------------------
+storage:
+  # 存储提供商标识(供展示/校验, 不参与驱动选择)
+  # 取值: minio | rustfs | s3 | oss | cos | obs
+  provider: rustfs
+
+  # 服务端点地址(单存储端点; 多节点场景可留空, 由 nodes[].endpoint 逐节点指定)
+  endpoint: "http://192.168.1.10:9000"
+
+  # 访问密钥(S3 Access Key; 生产建议环境变量注入)
+  access_key: "orbitcloud"
+
+  # 访问密钥 Secret(生产必改)
+  secret_key: "orbitcloud123456"
+
+  # 区域
+  region: us-east-1
+
+  # 是否启用 SSL(端点协议切换 http/https)
+  use_ssl: false
+
+  # 请求超时(秒)
+  timeout: 30
+
+  # 最大重试次数
+  max_retries: 3
+
+  # —— 分片/副本参数 ——
+  # 分片大小(MB): 文件按此大小切分并分发到不同节点
+  # 建议范围 1 ~ 64; 过大则并行度低, 过小则元数据膨胀
+  chunk_size: 5
+
+  # 最小副本数: 每个分片至少保存的副本数量, 副本落在不同节点
+  min_replicas: 2
+
+  # 默认存储驱动(可被 nodes[].driver 逐节点覆盖)
+  # 取值: s3    - 分片以 S3 对象存入对象存储(生产推荐)
+  #       local - 分片直接写本地目录(单机/开发, 无需对象存储)
+  # ★ 单机开箱即用: 改为 local 即可, 数据落 /data/objects
+  driver: s3
+
+  # 副本修复扫描周期: 周期性检查副本数不足的分片并触发重建
+  repair_interval: 30s
+
+  # 副本修复并发上限: 防止多节点同时故障时产生"修复风暴"
+  repair_concurrency: 4
+
+# ------------------------------------------------------------
+# 5. 健康检查(节点可用性)
+# ------------------------------------------------------------
+health:
+  # 节点探测周期
+  check_interval: 5s
+
+  # 连续失败 N 次后将该节点标记为 inactive(自动剔除, 不再分配新写入)
+  fail_threshold: 3
+
+# ------------------------------------------------------------
+# 6. agilePool 协程池(后台任务并发控制)
+# ------------------------------------------------------------
+pool:
+  # 最大工作协程数: 所有并行任务的并发上限
+  max_workers: 64
+
+  # 任务队列容量: 超出后提交方阻塞等待
+  queue_size: 1024
+
+# ------------------------------------------------------------
+# 7. request_pool — API 请求准入池(Gin 中间件层)
+#    提供显式背压:限制同时在途请求数,满时阻塞(block)或快速拒绝(reject)。
+# ------------------------------------------------------------
+request_pool:
+  # 普通请求同时在途上限
+  max_concurrent: 256
+
+  # 等待队列深度(0 = 不排队,满时直接按 mode 处理)
+  queue_size: 512
+
+  # 流式请求(下载/预览/流媒体)同时在途上限
+  streaming_max: 64
+
+  # 池满行为: block(阻塞等待=自然背压) | reject(快速拒绝→503)
+  mode: block
+
+# ------------------------------------------------------------
+# 8. exec_pool — API 执行池(agilePool 实例)
+#    所有非流式 handler 在此池执行; 满时提交方阻塞 = 显式背压。
+# ------------------------------------------------------------
+exec_pool:
+  # 最大工作协程数: 同时在执行的非流式 API handler 上限
+  max_workers: 128
+
+  # 任务队列容量: 超出后提交方阻塞等待(背压)
+  queue_size: 512
+
+  # 流式接口(下载/预览/流媒体)工作协程数: 与普通请求隔离,防止慢流挤占
+  stream_workers: 64
+
+  # 流式接口队列容量
+  stream_queue: 256
+
+# ------------------------------------------------------------
+# 9. 存储节点列表
+# 注: 全局凭据/驱动取自 storage 段, 节点可逐项覆盖(留空 = 继承 storage)
+# ------------------------------------------------------------
+nodes:
+  - id: node1                # 节点 ID: 唯一
+    driver: s3               # 可选, 覆盖 storage.driver(s3 | local)
+    path: orbitcloud-node1   # s3 驱动: bucket 名; local 驱动: 本地目录路径
+    endpoint: http://192.168.1.10:9000   # s3 驱动必填: 该节点 S3 端点
+    access_key: ""           # 可选, 覆盖全局 storage.access_key(留空继承)
+    secret_key: ""           # 可选, 覆盖全局 storage.secret_key(留空继承)
+    max_space: 0             # 容量配额(GB); 0 表示不限
+    enabled: true            # 可选, 默认 true; false = 启动时不注册该节点
+
+  # 多节点扩展示例(取消注释即可):
+  # - id: node2
+  #   path: orbitcloud-node2
+  #   endpoint: http://192.168.1.12:9000
+  #   max_space: 100
+  # - id: node3
+  #   path: orbitcloud-node3
+  #   endpoint: http://192.168.1.13:9000
+  #   max_space: 100
+
+# ------------------------------------------------------------
+# 10. 数据库(元数据; GORM 自动建表, 无需手写迁移 SQL)
+#    读写分离: sources 写库列表 + replicas 读库列表
+#    - sqlite 仅限开发(单写库、无读库; 容器默认 /data/orbitcloud.db)
+#    - 生产建议 postgres(可用 replicas 做读库负载均衡)
+# ------------------------------------------------------------
+database:
+  # 默认数据库类型(列表项未指定时继承)
+  # 取值: sqlite | postgres
+  source: sqlite
+
+  # 字符集
+  charset: "utf8mb4"
+
+  # GORM 日志级别
+  # 取值: silent | error | warn | info
+  log_level: warn
+
+  # 主库连接池(仅 sources[0] 生效)
+  max_idle_conns: 5
+  max_open_conns: 20
+
+  # 写库列表(必填 ≥1; 首个为主库)
+  # 每个连接项可用 dsn 或 host/port/username/password/database 拼装(dsn 优先)
+  # sqlite  : dsn = 数据库文件路径, 如 "/data/orbitcloud.db"(自动创建)
+  # postgres: dsn = 连接串, 如 "postgres://user:pass@host:5432/orbitcloud?sslmode=disable"
+  sources:
+    - dsn: "/data/orbitcloud.db"
+
+  # 读库列表(可选; sqlite 不支持读写分离, 配置了会报错)
+  # replicas:
+  #   - dsn: "postgres://user:pass@10.0.0.2:5432/orbitcloud?sslmode=disable"
+  #     max_idle_conns: 5
+  #     max_open_conns: 20
+
+# ------------------------------------------------------------
+# 11. 桶相关配置
+# ------------------------------------------------------------
+bucket:
+  # 是否仅管理员可创建桶(权限等级 0/1)
+  admin_create_only: false
+
+# ------------------------------------------------------------
+# 12. 日志
+# ------------------------------------------------------------
+log:
+  # 日志级别
+  # 取值: debug | info | warn | error
+  level: info
+
+  # 输出格式
+  # 取值: json | text; 生产建议 json(便于采集解析)
+  format: text
+
+  # 日志输出配置; 留空 = 输出到 stdout(容器默认建议留空, docker logs 可看)
+  output_path: ""
+
+  # 日志文件最大大小(KB; >0 时单文件超过即轮转新文件; <=0 仅按日期轮转)
+  max_size: 0
+
+  # 最大保留旧文件数(0 = 不限制)
+  max_backups: 0
+
+  # 最大保留天数(0 = 不限制)
+  max_age: 0
+
+  # 日志入库的最低级别; 留空表示不入库(量大会膨胀, 谨慎开启)
+  # 取值: debug | info | warn | error | ""(不入库)
+  db_level: ""
+
+  # 日志表保留天数; 超过后由定时任务分批清理
+  retention_days: 30
+
+# ------------------------------------------------------------
+# 13. SMB 网关私有 Socket(后端 ↔ smb-gateway 通信)
+#    ★ shared_key 必须与网关 SMB.yaml 的 gateway.shared_key 完全一致
+# ------------------------------------------------------------
+smb_gateway:
+  # 后端监听网关连接的地址(容器内固定, 无需对外映射)
+  listen_addr: "127.0.0.1:9101"
+
+  # 与网关共享的密钥(必改; 与 SMB.yaml 保持一致)
+  shared_key: "REPLACE_ME_SAME_AS_SMB_YAML"
+
+  # 共享密钥环境变量名(可选; 优先于 shared_key, 便于密钥不入文件)
+  shared_key_env: ""
+
+  # 通道缓冲大小(越大吞吐越高, 占用内存越多)
+  channel_buffer: 1024
+
+  # 最大并发连接数
+  max_concurrent: 64

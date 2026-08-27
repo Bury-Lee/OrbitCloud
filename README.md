@@ -102,13 +102,74 @@ Or use the **prebuilt artifacts** in `dist/` at the repo root: three-platform ba
 
 ## CLI Commands
 
+### Backend (`orbitcloud`)
+
 | Command | Description |
 |---|---|
-| `orbitcloud` | Start the service |
+| `orbitcloud` | Start the service (reads `./OrbitCloud.yaml`; auto-generates from embedded defaults if missing) |
 | `orbitcloud -initConfig` | Force-generate `./OrbitCloud.yaml` from embedded defaults and exit |
 | `orbitcloud --add-superadmin <username> <password>` | Create level-0 super admin and exit (only way; password ≥8 chars; not idempotent) |
 | `orbitcloud --version` | Print version and exit |
 | `orbitcloud --help` / `-h` | Print help and exit |
+
+### SMB Gateway (`smb-gateway`)
+
+| Command | Description |
+|---|---|
+| `smb-gateway` | Start the gateway (reads `./SMB.yaml`; auto-generates from embedded defaults if missing) |
+| `smb-gateway -initConfig` | Force-generate `./SMB.yaml` from embedded defaults and exit |
+| `smb-gateway --version` | Print version and exit |
+| `smb-gateway --help` / `-h` | Print help and exit |
+| `smb-gateway --WithConfig <json>` | Start with an injected JSON config (overrides `SMB.yaml`) |
+
+Shared key: injected via the `ORBITCLOUD_SMB_GATEWAY_KEY` environment variable (≥16 bytes; must match the backend's `smb_gateway.shared_key`).
+
+## Configuration
+
+Both components are config-driven with embedded defaults — no fallback values: missing/invalid config aborts startup.
+
+| Component | File (working dir) | Key sections | Reference |
+|---|---|---|---|
+| Backend | `./OrbitCloud.yaml` | `app` `server` `jwt` `storage` `health` `pool` `database` `nodes` `bucket` `smb_gateway` `log` | [Configuration Reference](docs/配置参考.md) |
+| SMB gateway | `./SMB.yaml` | `smb` (listen/netbios) `gateway` (addr/shared_key/heartbeat) `log` | [deploy-smb-gateway.sh](deploy/deploy-smb-gateway.sh) |
+
+Sensitive values (JWT secret, SMB shared key, S3 credentials) should be injected via environment variables — see [Configuration Reference](docs/配置参考.md).
+
+## Dependencies
+
+### Go (backend)
+
+| Dependency | Purpose |
+|---|---|
+| gin | HTTP framework |
+| gorm + dbresolver | ORM with read-write splitting |
+| golang-jwt/jwt/v5 | JWT access/refresh tokens |
+| minio-go/v7 | S3 object storage client |
+| glebarez/sqlite + modernc | Pure-Go SQLite driver (CGO-free) |
+| gorm.io/driver/postgres | PostgreSQL driver |
+| Yiming1997/agilePool | Global goroutine pool |
+| gopkg.in/yaml.v3 | Config parsing |
+
+### Rust (SMB gateway)
+
+| Dependency | Purpose |
+|---|---|
+| tokio | Async runtime |
+| ixr-smb-server (patched, vendored) | SMB protocol server |
+| rusqlite (bundled) | Local log DB |
+| serde / serde_yaml | Config & serialization |
+| hmac / sha2 | Handshake auth |
+| tracing / tracing-subscriber | Logging |
+
+### Frontend (Vue 3)
+
+| Dependency | Purpose |
+|---|---|
+| Vue 3 + vue-router + Pinia | Core / routing / state |
+| Element Plus + icons | UI library |
+| axios | HTTP client |
+| fflate | Client-side zip (batch download) |
+| Vite + TypeScript + vue-tsc | Build & type checking |
 
 ## Directory Layout
 
