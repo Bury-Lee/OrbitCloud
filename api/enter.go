@@ -14,17 +14,18 @@ import (
 // claimsKey 鉴权 Claims 在 gin context 中的存取键。
 const claimsKey = "orbitcloud.claims"
 
-// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download/Pprof),
+// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download/RecycleBin/Pprof),
 // 各次级接口均为无状态空结构体,配合全局单例 App 使用。
 type AppGroup struct {
-	Auth     AuthAPI
-	User     UserAPI
-	Bucket   BucketAPI
-	File     FileAPI
-	Share    ShareAPI
-	Group    GroupAPI
-	Download DownloadAPI
-	Pprof    PprofAPI
+	Auth       AuthAPI
+	User       UserAPI
+	Bucket     BucketAPI
+	File       FileAPI
+	Share      ShareAPI
+	Group      GroupAPI
+	Download   DownloadAPI
+	RecycleBin RecycleBinAPI
+	Pprof      PprofAPI
 }
 
 // App 是 api 层的全局单例,零值即可用。
@@ -65,6 +66,7 @@ func Router() *gin.Engine {
 	FileRouter(authed, streamAuthed)
 	ShareRouter(pub, authed)
 	DownloadRouter(authed)
+	RecycleBinRouter(authed)
 	// pprof 管理接口(管理员,按需采样):走 streamAuthed 组,不占执行池
 	PprofRouter(streamAuthed)
 	return r
