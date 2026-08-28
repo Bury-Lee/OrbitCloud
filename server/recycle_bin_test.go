@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"orbitcloud/common"
 	"orbitcloud/core"
 	"orbitcloud/model"
 	"orbitcloud/utils"
@@ -203,38 +202,38 @@ func TestListRecycleBin(t *testing.T) {
 	// active 不删
 
 	// 自己的回收站:own1/own2(deleted_at 倒序 → own2 在前)
-	res, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Opt: common.NewOption(1, 50)})
+	total, items, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Page: 1, PageSize: 50})
 	if err != nil {
 		t.Fatalf("list recycle bin: %v", err)
 	}
-	if len(res.List) != 2 || res.TotalPages != 1 || res.HasMore {
-		t.Fatalf("list = %d items / pages %d / has_more %v, want 2 / 1 / false", len(res.List), res.TotalPages, res.HasMore)
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("total=%d items=%d, want 2/2", total, len(items))
 	}
-	if res.List[0].ID != own2.ID || res.List[1].ID != own1.ID {
-		t.Fatalf("order = [%d, %d], want [own2, own1](deleted_at 倒序)", res.List[0].ID, res.List[1].ID)
+	if items[0].ID != own2.ID || items[1].ID != own1.ID {
+		t.Fatalf("order = [%d, %d], want [own2, own1](deleted_at 倒序)", items[0].ID, items[1].ID)
 	}
 	// 软删行(带 deleted_at 供前端展示删除时间)
-	for i := range res.List {
-		if !res.List[i].DeletedAt.Valid {
-			t.Fatalf("file %d missing deleted_at", res.List[i].ID)
+	for i := range items {
+		if !items[i].DeletedAt.Valid {
+			t.Fatalf("file %d missing deleted_at", items[i].ID)
 		}
 	}
 
 	// 他人视角:只看到自己归属的 other
-	res2, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: u2.ID, Opt: common.NewOption(1, 50)})
+	total2, items2, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: u2.ID, Page: 1, PageSize: 50})
 	if err != nil {
 		t.Fatalf("list recycle bin (u2): %v", err)
 	}
-	if len(res2.List) != 1 || res2.List[0].ID != other.ID {
-		t.Fatalf("u2 recycle = %+v, want [other]", res2.List)
+	if total2 != 1 || len(items2) != 1 || items2[0].ID != other.ID {
+		t.Fatalf("u2 recycle = %+v(total %d), want [other](1)", items2, total2)
 	}
 
-	// 分页:page_size=1 只回一页,total_pages=2 / has_more
-	paged, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Opt: common.NewOption(1, 1)})
+	// 分页:page_size=1 只回一页,total 仍为 2
+	pagedTotal, paged, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Page: 1, PageSize: 1})
 	if err != nil {
 		t.Fatalf("paged list: %v", err)
 	}
-	if len(paged.List) != 1 || paged.List[0].ID != own2.ID || paged.TotalPages != 2 || !paged.HasMore {
-		t.Fatalf("page1 = %+v(pages %d, has_more %v), want [own2] / 2 pages / has more", paged.List, paged.TotalPages, paged.HasMore)
+	if len(paged) != 1 || paged[0].ID != own2.ID || pagedTotal != 2 {
+		t.Fatalf("page1 = %+v(total %d), want [own2](2)", paged, pagedTotal)
 	}
 }
