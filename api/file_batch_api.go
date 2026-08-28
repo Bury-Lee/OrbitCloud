@@ -1,19 +1,15 @@
-// file_batch_api.go 文件模块批量操作接口:批量删除 / 复制 / 移动 / 下载。
+// file_batch_api.go 文件模块批量操作接口:批量删除 / 复制 / 移动。
 // 调用 server 批量函数前在 api 层对所有条目做可见性预检,失败条目进 failed 列表。
 package api
 
 import (
-	"archive/zip"
 	"context"
 	"net/http"
-	"strconv"
-	"strings"
 
 	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
 
 	"orbitcloud/core"
-	"orbitcloud/log"
 	"orbitcloud/server"
 )
 
@@ -166,88 +162,6 @@ func (FileAPI) BatchMove(c *gin.Context) {
 		Items:       req.Items,
 	})
 	respondResult(c, results, nil)
-}
-
-// BatchDownload 批量下载为 zip(GET /buckets/:id/items/batch-download?ids=file:122,folder:33)。
-// zip 流式输出,失败项以 zip 内缺失体现;响应头带条目数供前端预估耗时。
-func (FileAPI) BatchDownload(c *gin.Context) {
-	var req struct {
-		bucketPathReq
-		IDs string `form:"ids"` // "file:122,folder:33"
-	}
-	if !bindRequest(c, &req) {
-		return
-	}
-	bucketID := req.BucketID
-	userID := currentUser(c)
-	ctx := c.Request.Context()
-
-	// 解析 ids=kind:id,kind:id
-	items := []server.DownloadItem{}
-	for _, part := range strings.Split(req.IDs, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		seg := strings.SplitN(part, ":", 2)
-		if len(seg) != 2 {
-			respondError(c, server.ErrInvalidInput)
-			return
-		}
-		kind := seg[0]
-		id, err := strconv.ParseUint(seg[1], 10, 64)
-		if err != nil || id == 0 || (kind != server.ItemKindFile && kind != server.ItemKindFolder) {
-			respondError(c, server.ErrInvalidInput)
-			return
-		}
-		items = append(items, server.DownloadItem{Kind: kind, ID: uint(id)})
-	}
-	if len(items) == 0 {
-		respondError(c, server.ErrInvalidInput)
-		return
-	}
-	if err := server.CheckBatchItems(ctx, server.CheckBatchItemsArg{Count: len(items)}); err != nil {
-		respondError(c, err)
-		return
-	}
-
-	// 桶可写 + 条目存在性 + 条目级/祖先链可见性(api 层完成)
-	if _, err := precheckBucketWrite(ctx, userID, bucketID); err != nil {
-		respondError(c, err)
-		return
-	}
-	failed := precheckItems(c, userID, bucketID,
-		func(i int) (string, uint) { return items[i].Kind, items[i].ID }, len(items))
-	if len(failed) > 0 {
-		respondResult(c, nil, failed)
-		return
-	}
-
-	// 打包前统计规模(受限目录不计入),写入响应头供前端提示耗时预估
-	folderCount, fileCount := server.CountDownloadItems(ctx, server.CountDownloadItemsArg{UserID: userID, BucketID: bucketID, Items: items})
-	c.Header("X-Batch-Folders", strconv.FormatInt(folderCount, 10))
-	c.Header("X-Batch-Files", strconv.FormatInt(fileCount, 10))
-
-	// zip 流式输出(响应头先发,Content-Disposition attachment)
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", "attachment; filename=batch.zip")
-	zw := zip.NewWriter(c.Writer)
-	defer zw.Close()
-
-	results := server.DownloadItems(ctx, server.DownloadItemsArg{
-		UserID:   userID,
-		BucketID: bucketID,
-		Items:    items,
-	}, zw)
-	if err := zw.Close(); err != nil {
-		return // 流已发,无法改状态码
-	}
-	// zip 为流式响应:失败项无法回写 JSON,仅记录日志
-	for _, r := range results {
-		if r.Error != "" {
-			log.Warnf("batch zip: item %s failed: %s", r.Name, r.Error) // 失败项:zip 内缺失该条目(客户端可见)
-		}
-	}
 }
 
 // ---- 鉴权预检辅助 ----

@@ -1,4 +1,4 @@
-﻿// file_ops_api.go 文件模块操作接口:删除 / 复制 / 剪切 / 建目录 / 可见组设置
+// file_ops_api.go 文件模块操作接口:删除 / 复制 / 剪切 / 建目录 / 可见组设置
 // (上传/列表/元数据/下载/预览见 file_api.go)。
 package api
 
@@ -258,8 +258,8 @@ func (FileAPI) CreateDir(c *gin.Context) {
 }
 
 // DeleteDir 删除文件夹(DELETE /buckets/:id/dirs/:fid,成功 204)。
-// 删除进回收站(Isable=false + 软删,见 server.DeleteDir),目录立即从列表消失;
-// 返回 taskID 恒 0,不提交物理清理任务(回收站保留数据)。
+// 落删除任务后文件夹置"正在删除"(可见可读,拒写),后台先删内部(逐条软删进回收站)
+// 再删文件夹自身,见 server.DeleteDir / processDeleteDirTask。
 func (FileAPI) DeleteDir(c *gin.Context) {
 	var req dirPathReq
 	if !bindRequest(c, &req) {

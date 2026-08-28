@@ -243,16 +243,19 @@ func purgeRecycledFile(ctx context.Context, file *model.File) error {
 
 // purgeRecycledFolderSubtree 物理删除回收站目录的整棵子树:
 // 深度优先逐文件夹删其下文件(对象+记录)再删自身,子孙条目一律清除
-// (含未逐条标记的、以及目录删除前已单独软删的文件行)。
+// (含未逐条标记的、目录删除前已单独软删的、以及删除任务已软删的子文件夹行)。
 func purgeRecycledFolderSubtree(ctx context.Context, bucketID, folderID uint) error {
 	stack := []uint{folderID}
 	for len(stack) > 0 {
 		fid := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		// 子文件夹压栈(先压后弹 = 深度优先)
-		children, err := nextSubfolders(ctx, bucketID, fid)
-		if err != nil {
+		// 子文件夹压栈(Unscoped:新删除语义下子文件夹随任务一并软删,
+		// 须在此整棵清除,防软删子行残留)
+		var children []model.Folder
+		if err := core.DB.WithContext(ctx).Unscoped().
+			Where("bucket_id = ? AND parent_id = ?", bucketID, fid).
+			Order("id ASC").Find(&children).Error; err != nil {
 			return err
 		}
 		for i := range children {

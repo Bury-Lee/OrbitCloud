@@ -1,4 +1,4 @@
-﻿// path.go —— 路径 → 目录节点定位。
+// path.go —— 路径 → 目录节点定位。
 //
 // 核心语义:
 //   - 桶根 = 虚拟(桶名即根,无实例行):ResolveDirPath 返回 0 表示桶根;
@@ -52,6 +52,11 @@ func ResolveDirPath(ctx context.Context, userID, bucketID uint, dirPath string) 
 				bucketID, parentID, strings.ToLower(seg)).
 			First(&f).Error
 		if err == nil {
+			// 段已存在:正在删除(FolderDeleting)的目录拒绝任何新写入
+			// (含在其下继续 mkdir -p 建子目录),防删除任务与写入竞态
+			if f.Isable == model.FolderDeleting {
+				return 0, ErrForbidden
+			}
 			parentID = f.ID // 段已存在,继续下一段
 			continue
 		}
@@ -63,7 +68,7 @@ func ResolveDirPath(ctx context.Context, userID, bucketID uint, dirPath string) 
 				Name:       seg,
 				NameLower:  strings.ToLower(seg),
 				UploadedBy: userID,
-				Isable:     true,
+				Isable:     model.FolderUsable,
 			}
 			if err := core.DB.WithContext(ctx).Create(&f).Error; err != nil {
 				if errors.Is(err, gorm.ErrDuplicatedKey) {

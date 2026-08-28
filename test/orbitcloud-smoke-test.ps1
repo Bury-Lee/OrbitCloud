@@ -251,11 +251,6 @@ Write-Host "`n--- 8. 批量操作 ---" -ForegroundColor Yellow
 $bd = Invoke-Api "POST" "/buckets/$userBucketId/items/batch-delete" $adminTok @{ items = @(@{ kind = "file"; id = $up4.data.ID }) }
 Write-Result "批量删除" ($bd.ok -and $bd.resp.code -eq 0 -and $bd.resp.data.failed.Count -eq 0) ($bd.resp.data | ConvertTo-Json -Compress)
 
-$zpath = Join-Path $script:tmpDir "batch.zip"
-Invoke-Curl -s -o $zpath "$script:apiBase/buckets/$bucketId/items/batch-download?ids=file:$($up3.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
-$zb = [System.IO.File]::ReadAllBytes($zpath)
-Write-Result "批量下载 zip" ($zb[0] -eq 80 -and $zb[1] -eq 75) "PK 魔数=$($zb[0]),$($zb[1])"
-
 # ==================== 9. 限流(可选) ====================
 if ($TestRateLimit) {
     Write-Host "`n--- 9. 限流(启用时才测) ---" -ForegroundColor Yellow

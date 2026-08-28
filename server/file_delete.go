@@ -1,17 +1,18 @@
-﻿// file_delete.go —— 桶内条目删除:文件/文件夹删除进入回收站(GORM 软删)。
+// file_delete.go —— 桶内条目删除:文件删除进回收站(软删);文件夹删除落删除任务。
 //
 // 回收站语义:
-//   - 删除 = 置 gorm.Model.DeletedAt(deleted_at 列)= now,保留记录/对象/用量,
+//   - 文件删除 = 置 gorm.Model.DeletedAt(deleted_at 列)= now,保留记录/对象/用量,
 //     不归还空间(软删不归还用量,与 cron 对账口径一致);回收站清除(后续功能)
 //     才物理删除并归还;
 //   - 读取/列表/搜索路径全部经 GORM 软删自动过滤(deleted_at IS NULL),
 //     回收站内条目不可见不可达;
-//   - 文件夹删除另置 Isable=false,保证子树(未逐条标记的子孙)即刻不可达;
-//   - 不再落 DeleteTask/不做物理清理(数据进回收站需保留);
+//   - 文件夹删除:落 DeleteTask(带操作者/权限快照)后后台处理——文件夹自身
+//     保持可见,深度优先先删内部(逐条软删进回收站),内部清空后才置 Isable=false
+//     + 软删删除文件夹自身(见 bucket_task.go processDeleteDirTask);
 //   - 级联:删除指向被删条目的分享链接(删除即不可再访问)。
 //
 // 条目权限由 api 层预检,本文件只做可行性(桶状态、条目归属、Isable 链);
-// userID 仅用于操作日志。
+// userID 用于操作日志 + 任务操作者快照。
 package server
 
 import (
@@ -75,14 +76,16 @@ func DeleteFile(ctx context.Context, arg DeleteFileArg) error {
 
 // DeleteDirArg 文件夹删除入参。
 type DeleteDirArg struct {
-	UserID   uint // 操作者 users.id(操作日志)
+	UserID   uint // 操作者 users.id(操作日志 + 任务操作者快照)
 	BucketID uint // 所属桶
 	DirID    uint // 文件夹 folders.id
 }
 
-// DeleteDir 删除文件夹 → 进回收站:置 Isable=false(子树即刻不可达)+ 软删
-// (置 deleted_at=now)+ 级联清理指向该目录的分享。返回 taskID 恒 0(不再落
-// DeleteTask/物理清理,回收站保留数据;调用方以 taskID==0 跳过任务提交)。
+// DeleteDir 删除文件夹:落 DeleteTask(带操作者/权限快照)后触发后台任务。
+// 关键语义:落表后文件夹置 FolderDeleting(正在删除)——文件夹**保持可见可读**,
+// 但拒绝一切新写入(上传/建目录/移动/复制进来,见 checkAncestorsWritable);
+// 后台任务深度优先先删内部(文件/子文件夹逐条软删进回收站),内部全部清空后
+// 才删除文件夹自身(置 FolderUnusable + 软删)。中断时子树结构完整,可续跑/恢复。
 // 错误语义:目录不存在/已进回收站 → ErrNotFound;桶禁用 → ErrForbidden。
 func DeleteDir(ctx context.Context, arg DeleteDirArg) (uint, error) {
 	userID, bucketID, dirID := arg.UserID, arg.BucketID, arg.DirID
@@ -92,32 +95,41 @@ func DeleteDir(ctx context.Context, arg DeleteDirArg) (uint, error) {
 	}
 
 	// 查目录(软删过滤:回收站内再删 → ErrNotFound)
-	if _, err := loadFolder(ctx, bucketID, dirID); err != nil {
+	folder, err := loadFolder(ctx, bucketID, dirID)
+	if err != nil {
 		return 0, err
 	}
-
-	// 回收站:Isable=false + 软删 + 级联清理分享
-	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 置 Isable=false:子树即刻不可达(读路径 404)
-		if err := tx.Model(&model.Folder{}).
-			Where("id = ?", dirID).Update("isable", false).Error; err != nil {
-			return err
-		}
-		// 软删(置 deleted_at=now)
-		if err := tx.Delete(&model.Folder{}, dirID).Error; err != nil {
-			return err
-		}
-		// 级联:删除指向该目录的分享
-		if err := tx.Unscoped().
-			Where("bucket_item_id = ? AND item_type = 'folder'", dirID).
-			Delete(&model.ShareLink{}).Error; err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return 0, fmt.Errorf("delete dir %d: recycle: %w", dirID, err)
+	// 已在删除中(任务未完成)→ 拒绝重复删除
+	if folder.Isable == model.FolderDeleting {
+		return 0, ErrForbidden
 	}
 
-	log.Infof("delete dir: user %d bucket %d dir %d (isable=false) moved to recycle bin", userID, bucketID, dirID)
-	return 0, nil
+	// 权限快照(处理时动态重查,此处仅记录发起时等级用于审计/语义判断)
+	operatorLevel := operatorLevelOf(ctx, userID)
+
+	// 落删除任务(文件夹保持可见,后台先删内部再删自身)
+	task := &model.DeleteTask{
+		BucketID:      bucketID,
+		DirID:         dirID,
+		OperatorID:    userID,
+		OperatorLevel: operatorLevel,
+		Status:        0,
+	}
+	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
+		return 0, fmt.Errorf("delete dir %d: create delete task: %w", dirID, err)
+	}
+
+	// 置 FolderDeleting:正在删除(可见可读,拒写)——拒绝删除期间新写入的竞态
+	if err := core.DB.WithContext(ctx).Model(&model.Folder{}).
+		Where("id = ?", dirID).Update("isable", model.FolderDeleting).Error; err != nil {
+		return 0, fmt.Errorf("delete dir %d: mark deleting: %w", dirID, err)
+	}
+
+	// 触发处理(尽力而为,失败不阻断返回——残留任务由启动/cron 续跑)
+	if err := ProcessDeleteTask(ctx, ProcessDeleteTaskArg{TaskID: task.ID}); err != nil {
+		log.Errorf("delete dir %d: process task %d: %v", dirID, task.ID, err)
+	}
+
+	log.Infof("delete dir: user %d bucket %d dir %d delete task %d queued", userID, bucketID, dirID, task.ID)
+	return task.ID, nil
 }

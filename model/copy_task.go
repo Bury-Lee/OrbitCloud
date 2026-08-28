@@ -28,7 +28,10 @@ type CopyTask struct {
 	DstDirPath     string `gorm:"type:varchar(512);not null"` // 目标父目录(路径;任务处理时解析为 folder_id)
 	DstName        string `gorm:"type:varchar(255);not null"` // 目标根目录名(冲突自动重命名后的名字;文件移动任务为目标文件名)
 	UploadedBy     uint   `gorm:"index;not null"`             // 操作者 users.id(目标侧新建目录/文件的创建者)
-	Status         int    `gorm:"default:0"`                  // 0 待处理 / 1 处理中(完成即硬删任务记录)
+	// OperatorLevel 发起复制时的权限等级快照(处理时按批动态重查操作者
+	// 最新权限,禁用/降权即中止任务;0 = 存量任务,按旧语义放行)。
+	OperatorLevel int `gorm:"default:0"` // 发起时的权限等级快照(0 超管/1 管理员/3 普通)
+	Status        int `gorm:"default:0"` // 0 待处理 / 1 处理中(完成即硬删任务记录)
 
 	// LockOwner / LockExpiresAt:处理锁(条件更新抢占,带持有者条件释放)。
 	LockOwner     string     `gorm:"type:varchar(64);index"` // 锁持有者(core.InstanceID,如 hostname-pid)

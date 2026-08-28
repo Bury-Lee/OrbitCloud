@@ -1,4 +1,4 @@
-﻿// bucket.go —— 存储桶基础层:创建 / 查询 / 列表 / 修改 / 删除入口(删除任务执行见 bucket_task.go)。
+// bucket.go —— 存储桶基础层:创建 / 查询 / 列表 / 修改 / 删除入口(删除任务执行见 bucket_task.go)。
 //
 // 桶权限语义:桶代表"不同的电脑",同级别(权限不低于 owner)可越 owner 代管;
 // 桶管理归属/等级规则在 api/perm.go(permCanManageBucket),本文件只做可行性判断
@@ -21,10 +21,10 @@ import (
 
 // CreateBucketArg 创建桶入参(api 层从请求体 + 鉴权上下文组装)。
 type CreateBucketArg struct {
-	OwnerID              uint                   // 创建者 users.id(鉴权中间件注入)
-	Name                 string                 // 桶名(全局唯一)
-	Description          string                 // 描述(可空)
-	PermissionLevel      model.PermissionLevel  // 桶访问等级(<=0 = 跟随创建者等级;负数非法)
+	OwnerID               uint                  // 创建者 users.id(鉴权中间件注入)
+	Name                  string                // 桶名(全局唯一)
+	Description           string                // 描述(可空)
+	PermissionLevel       model.PermissionLevel // 桶访问等级(<=0 = 跟随创建者等级;负数非法)
 	ManagePermissionLevel model.PermissionLevel // 桶管理等级(<=0 = 跟随访问等级;负数非法)
 }
 
@@ -64,12 +64,12 @@ func CreateBucket(ctx context.Context, arg CreateBucketArg) (*model.Bucket, erro
 	// 落库用 map Create:permission_level 的 gorm tag 带 default:1,
 	// struct Create 会把零值(0)替换为默认值,map 可保留显式 0
 	if err := core.DB.WithContext(ctx).Model(&model.Bucket{}).Create(map[string]any{
-		"name":                     name,
-		"description":              arg.Description,
-		"permission_level":         perm,
-		"manage_permission_level":  managePerm,
-		"owner_id":                 arg.OwnerID,
-		"status":                   1,
+		"name":                    name,
+		"description":             arg.Description,
+		"permission_level":        perm,
+		"manage_permission_level": managePerm,
+		"owner_id":                arg.OwnerID,
+		"status":                  1,
 	}).Error; err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrConflict
@@ -161,11 +161,11 @@ func ListBuckets(ctx context.Context, arg ListBucketsArg) ([]model.Bucket, error
 
 // UpdateBucketInput 桶可更新字段(指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
 type UpdateBucketInput struct {
-	Description           string                  // 描述
-	PermissionLevel       *model.PermissionLevel  // 访问所需最低权限
-	ManagePermissionLevel *model.PermissionLevel  // 管理所需最低权限(0 = 跟随访问等级)
-	Quota                 *int64                  // 容量配额(字节;0=不限)
-	Status                *int                    // 1 正常 / 0 禁用
+	Description           string                 // 描述
+	PermissionLevel       *model.PermissionLevel // 访问所需最低权限
+	ManagePermissionLevel *model.PermissionLevel // 管理所需最低权限(0 = 跟随访问等级)
+	Quota                 *int64                 // 容量配额(字节;0=不限)
+	Status                *int                   // 1 正常 / 0 禁用
 }
 
 // 桶管理权限判定已迁移至 api.permCanManageBucket(owner / 管理员 / 管理等级满足)。
@@ -276,8 +276,14 @@ func DeleteBucket(ctx context.Context, arg DeleteBucketArg) error {
 		return err
 	}
 
-	// 先落删除任务、再置桶禁用:若中途崩溃,任务已落库可续跑,不会出现"桶禁用且无任务"的死状态
-	task := &model.DeleteTask{BucketID: bucketID, Status: 0}
+	// 先落删除任务(带操作者/权限快照)、再置桶禁用:若中途崩溃,任务已落库可续跑,
+	// 不会出现"桶禁用且无任务"的死状态
+	task := &model.DeleteTask{
+		BucketID:      bucketID,
+		OperatorID:    operatorID,
+		OperatorLevel: operatorLevelOf(ctx, operatorID),
+		Status:        0,
+	}
 	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
 		return fmt.Errorf("delete bucket %d: create delete task: %w", bucketID, err)
 	}

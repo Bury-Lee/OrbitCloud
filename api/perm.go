@@ -1,4 +1,4 @@
-﻿// perm.go 权限校验原语:用户可用性、桶权限等级、条目级/祖先链可见性、归属与管理员放行。
+// perm.go 权限校验原语:用户可用性、桶权限等级、条目级/祖先链可见性、归属与管理员放行。
 // 数据源为 server 层只读查询;权限失败统一 ErrForbidden,资源不存在 ErrNotFound。
 package api
 
@@ -92,7 +92,7 @@ func permAncestorsAccessWith(ctx context.Context, userID uint, user **model.User
 		if err != nil {
 			return err
 		}
-		if !f.Isable {
+		if f.Isable == model.FolderUnusable {
 			return server.ErrNotFound // 目录已删 → 不可达(404 防探测)
 		}
 		if err := permItemAccessWith(ctx, userID, user, groups, f.VisibleToGroups, f.UploadedBy); err != nil {

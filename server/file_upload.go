@@ -1,4 +1,4 @@
-﻿// file_upload.go —— 桶内条目写入:上传文件 / 创建文件夹(均 mkdir -p 建父链)。
+// file_upload.go —— 桶内条目写入:上传文件 / 创建文件夹(均 mkdir -p 建父链)。
 //
 // 桶级权限由 api 层预检,本文件做可行性判断(桶状态、路径规范、Isable 链、
 // 同名冲突、流式落盘);目标目录由 mkdir -p 内部解析,其可见性用
@@ -68,6 +68,10 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 	}
 	// 目标目录可用性 + 条目级可见性
 	if err := checkAncestorsAccessTree(ctx, userID, bucketID, folderID); err != nil {
+		return nil, err
+	}
+	// 目标目录可写性(正在删除的目录拒绝写入)
+	if err := checkAncestorsWritable(ctx, bucketID, folderID); err != nil {
 		return nil, err
 	}
 
@@ -212,7 +216,11 @@ func CreateDir(ctx context.Context, arg CreateDirArg) (*model.Folder, error) {
 		return nil, err
 	}
 	// 父链可用性 + 条目级可见性
+	// 父链可见性(含 Deleting 拒写:正在删除的父链上不允许 mkdir)
 	if err := checkAncestorsAccessTree(ctx, userID, bucketID, parentID); err != nil {
+		return nil, err
+	}
+	if err := checkAncestorsWritable(ctx, bucketID, parentID); err != nil {
 		return nil, err
 	}
 	name := segs[len(segs)-1]
@@ -227,9 +235,13 @@ func CreateDir(ctx context.Context, arg CreateDirArg) (*model.Folder, error) {
 		Where("bucket_id = ? AND parent_id = ? AND name_lower = ?",
 			bucketID, parentID, strings.ToLower(name)).First(&exist).Error
 	if err == nil {
-		if !exist.Isable {
+		if exist.Isable == model.FolderUnusable {
 			// 同名目录已逻辑删除:拒绝复用,按不存在处理
 			return nil, ErrNotFound
+		}
+		if exist.Isable == model.FolderDeleting {
+			// 同名目录正在删除:拒绝复用/写入
+			return nil, ErrForbidden
 		}
 		return &exist, nil // 幂等:已存在同名文件夹,直接返回
 	}
@@ -252,7 +264,7 @@ func CreateDir(ctx context.Context, arg CreateDirArg) (*model.Folder, error) {
 		ParentID:   parentID,
 		Name:       name,
 		UploadedBy: userID,
-		Isable:     true,
+		Isable:     model.FolderUsable,
 	}
 	if err := core.DB.WithContext(ctx).Create(folder).Error; err != nil {
 		if isUniqueViolation(err) {

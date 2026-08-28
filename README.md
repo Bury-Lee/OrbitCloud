@@ -200,7 +200,6 @@ Unified prefix `/api/v1`; success: `{code:0, data:{...}, message:"ok"}`, error: 
 | DELETE | `/buckets/:id/dirs/:fid` | logged-in | Delete folder (background DFS cleanup) |
 | POST | `/buckets/:id/dirs/:fid/copy` | logged-in | Copy folder (background CopyTask) |
 | POST | `/buckets/:id/items/batch-delete` / `batch-copy` / `batch-move` | logged-in | Batch operations (≤100) |
-| GET | `/buckets/:id/items/batch-download` | logged-in | Batch download (zip) |
 | PUT | `/buckets/:id/files/:fid/visibility` / `/dirs/:fid/visibility` | logged-in | Set item visibility groups |
 
 ### Shares

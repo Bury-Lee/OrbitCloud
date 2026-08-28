@@ -280,8 +280,8 @@ func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
 }
 
 // SMB 删除目录(Unlink)复用 server 层 DeleteDir:
-// 目录树进回收站(Isable=false + 软删),记录/对象/用量保留,仅目录自身分享级联删除;
-// 子树内条目不可达(读路径 404),不落物理清理任务。
+// 落删除任务 + 置"正在删除",后台先删内部(文件/子文件夹逐条软删进回收站)
+// 再删文件夹自身(置 FolderUnusable + 软删);记录/对象/用量保留,可恢复。
 func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	db := newITDB(t)
 	defer func() {
@@ -299,11 +299,11 @@ func TestUnlinkDirUsesServerDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 目录树:dir(f1=100B) / sub(f2=50B)
-	dir := &model.Folder{BucketID: b.ID, ParentID: 0, Name: "dir", UploadedBy: u.ID, Isable: true}
+	dir := &model.Folder{BucketID: b.ID, ParentID: 0, Name: "dir", UploadedBy: u.ID, Isable: model.FolderUsable}
 	if err := core.DB.Create(dir).Error; err != nil {
 		t.Fatal(err)
 	}
-	sub := &model.Folder{BucketID: b.ID, ParentID: dir.ID, Name: "sub", UploadedBy: u.ID, Isable: true}
+	sub := &model.Folder{BucketID: b.ID, ParentID: dir.ID, Name: "sub", UploadedBy: u.ID, Isable: model.FolderUsable}
 	if err := core.DB.Create(sub).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -328,13 +328,26 @@ func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	info, _ := resolveSession(ctx, u.ID)
 	ctx = withSession(ctx, info)
 
-	// Unlink 目录(复用 server.DeleteDir:进回收站,不物理清理)
+	// Unlink 目录(复用 server.DeleteDir:落任务,后台先删内部再删自身)
 	if err := svc.Unlink(ctx, &UnlinkArgs{BucketID: b.ID, Path: "/dir"}); err != nil {
 		t.Fatalf("unlink dir: %v", err)
 	}
 
-	// 目录树记录保留:顶层 dir 软删(isable=false + deleted_at);子目录不逐条标记
-	// (祖先链经软删过滤后不可达),文件未标记(均保留,对象可恢复)
+	// 等待删除任务完成(同步触发尽力而为,轮询兜底)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int64
+		if err := core.DB.Model(&model.DeleteTask{}).Count(&n).Error; err != nil || n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("delete task not finished within 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 目录树记录保留且全部软删:dir 与 sub 均 FolderUnusable + deleted_at(内部先删,
+	// 文件夹最后删),文件全部软删(记录/对象/用量保留,可恢复)
 	var cnt int64
 	if err := core.DB.Unscoped().Model(&model.Folder{}).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 2 {
 		t.Fatalf("folder rows = %d, want 2(回收站保留)", cnt)
@@ -343,21 +356,24 @@ func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	if err := core.DB.Unscoped().First(&d1, dir.ID).Error; err != nil {
 		t.Fatalf("dir should be retained: %v", err)
 	}
-	if d1.Isable || !d1.DeletedAt.Valid {
-		t.Fatalf("dir should be isable=false + soft-deleted: %+v", d1)
+	if d1.Isable != model.FolderUnusable || !d1.DeletedAt.Valid {
+		t.Fatalf("dir should be isable=0 + soft-deleted: %+v", d1)
 	}
-	// 子目录不逐条标记(保留 isable=true/deleted_at 空),其不可达由祖先链
-	// 判定保证:顶层 dir 已被软删,loadFolder(dir) 经软删过滤 404
+	// 子目录同样已软删(先删内部:子文件夹随任务一并进回收站)
 	var d2 model.Folder
 	if err := core.DB.Unscoped().First(&d2, sub.ID).Error; err != nil {
 		t.Fatalf("sub should be retained: %v", err)
 	}
+	if d2.Isable != model.FolderUnusable || !d2.DeletedAt.Valid {
+		t.Fatalf("sub should be isable=0 + soft-deleted: %+v", d2)
+	}
+	// 文件全部软删进回收站
 	if err := core.DB.Unscoped().Model(&model.File{}).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 2 {
 		t.Fatalf("file rows = %d, want 2(回收站保留)", cnt)
 	}
-	// 目录自身分享级联删除;子树内文件分享保留(访问侧经软删过滤 404)
-	if err := core.DB.Unscoped().Model(&model.ShareLink{}).Where("creator_id = ?", u.ID).Count(&cnt).Error; err != nil || cnt != 1 {
-		t.Fatalf("share rows = %d, want 1(仅文件分享保留)", cnt)
+	// 分享全部级联删除(文件与目录分享均随软删清除)
+	if err := core.DB.Unscoped().Model(&model.ShareLink{}).Where("creator_id = ?", u.ID).Count(&cnt).Error; err != nil || cnt != 0 {
+		t.Fatalf("share rows = %d, want 0(全部级联删除)", cnt)
 	}
 	// 用量不归还(回收站软删不归还;清除才归还)
 	var uu model.User

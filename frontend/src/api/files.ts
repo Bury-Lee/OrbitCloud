@@ -281,17 +281,3 @@ export function batchMove(
 ): Promise<BatchResult> {
   return http.post(`/buckets/${bucketId}/items/batch-move`, { ...opts, items })
 }
-
-/** GET /buckets/:id/items/batch-download 批量下载(zip 流;ids=file:1,folder:2)。
- *  下载/预览同款:走 raw 实例注入 Bearer 头(浏览器直链/新标签页无法携带 Authorization → 401)。 */
-export async function batchDownload(
-  bucketId: number,
-  items: { kind: 'file' | 'folder'; id: number }[],
-): Promise<Blob> {
-  const ids = items.map((it) => `${it.kind}:${it.id}`).join(',')
-  const resp = await raw.get(`/buckets/${bucketId}/items/batch-download`, {
-    params: { ids },
-    responseType: 'blob',
-  })
-  return resp.data as Blob
-}

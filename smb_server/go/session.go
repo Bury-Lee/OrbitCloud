@@ -26,7 +26,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"orbitcloud/core"
+	"orbitcloud/core"
 	"orbitcloud/model"
 	"orbitcloud/server"
 )
@@ -183,7 +183,7 @@ func checkAncestorsVisible(ctx context.Context, info *SessionInfo, bucketID, fol
 		if err != nil {
 			return err
 		}
-		if !f.Isable {
+		if f.Isable == model.FolderUnusable {
 			return server.ErrNotFound // 目录已删 → 不可达
 		}
 		if err := checkItemVisible(info, f.VisibleToGroups); err != nil {

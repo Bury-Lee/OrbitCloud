@@ -18,7 +18,6 @@ func FileRouter(authed, streamAuthed *gin.RouterGroup) {
 		stream.GET("/buckets/:id/files/:fid/download", AuthMiddleware, App.File.DownloadFile)
 		stream.GET("/buckets/:id/files/:fid/preview", AuthMiddleware, App.File.PreviewFile)
 		stream.GET("/buckets/:id/files/:fid/stream", QueryTokenAuthMiddleware, App.File.StreamFile)
-		stream.GET("/buckets/:id/items/batch-download", AuthMiddleware, App.File.BatchDownload)
 	}
 
 	// —— 非流式接口(经全局 ExecPoolMiddleware 自动池化) ——————————

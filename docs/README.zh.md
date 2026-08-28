@@ -200,7 +200,6 @@ model(GORM 模型)  common(哨兵错误/分页/校验)  utils(桶名编码/采�
 | DELETE | `/buckets/:id/dirs/:fid` | 登录 | 删除文件夹(进回收站,超保留期 cron 物理清除) |
 | POST | `/buckets/:id/dirs/:fid/copy` | 登录 | 复制文件夹(落 CopyTask 后台处理) |
 | POST | `/buckets/:id/items/batch-delete` / `batch-copy` / `batch-move` | 登录 | 批量操作(≤100 条) |
-| GET | `/buckets/:id/items/batch-download` | 登录 | 批量下载(zip) |
 | PUT | `/buckets/:id/files/:fid/visibility` / `/dirs/:fid/visibility` | 登录 | 设置条目可见组 |
 
 ### 分享

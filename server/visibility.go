@@ -1,4 +1,4 @@
-﻿// visibility.go —— 条目级可见性(用户组 ACL)。
+// visibility.go —— 条目级可见性(用户组 ACL)。
 //
 // File/Folder.VisibleToGroups 存"可见组 ID"的 JSON 数组(如 "[1,5]"):
 // 空串 = 不限制(按桶级权限可见);非空 = 仅管理员(IsAdmin)/
@@ -47,7 +47,7 @@ func checkAncestorsAccessTree(ctx context.Context, userID, bucketID, folderID ui
 		if err != nil {
 			return err
 		}
-		if !f.Isable {
+		if f.Isable == model.FolderUnusable {
 			return ErrNotFound // 目录已删 → 不可达(原 checkAncestorsUsable 语义)
 		}
 		if user == nil { // 用户/组成员仅加载一次(链上各层复用)
@@ -82,6 +82,31 @@ func checkItemAccessTree(ctx context.Context, user *model.User, groups *[]uint, 
 		*groups = gs
 	}
 	return ItemVisibleRule(user.ID, visibleToGroups, uploadedBy, user, *groups)
+}
+
+// checkAncestorsWritable 沿祖先链校验目录可写(写路径专用):
+// 任一祖先已删(FolderUnusable)→ ErrNotFound;任一祖先正在删除(FolderDeleting)
+// → ErrForbidden(删除任务处理中,拒绝一切新写入)。
+// 与 checkAncestorsAccessTree 的差异:后者是读路径(Deleting 放行)。
+// folderID=0(桶根)直接通过。
+func checkAncestorsWritable(ctx context.Context, bucketID, folderID uint) error {
+	cur := folderID
+	seen := map[uint]bool{} // 环保护(数据异常时防死循环)
+	for cur != 0 && !seen[cur] {
+		seen[cur] = true
+		f, err := loadFolder(ctx, bucketID, cur)
+		if err != nil {
+			return err
+		}
+		if f.Isable == model.FolderUnusable {
+			return ErrNotFound // 目录已删 → 不可达
+		}
+		if f.Isable == model.FolderDeleting {
+			return ErrForbidden // 正在删除 → 拒绝写入
+		}
+		cur = f.ParentID
+	}
+	return nil
 }
 
 // ParseVisibleGroups 解析 VisibleToGroups 的 JSON 数组为组 ID 列表(去重、剔 0;

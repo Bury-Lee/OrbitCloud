@@ -27,13 +27,14 @@
 
 请求:`{"username": "admin", "password": "<your-password>"}`
 
+> 刷新令牌不再于响应体返回:登录/刷新成功后经 `Set-Cookie: orbitcloud_refresh_token`(HttpOnly + SameSite=Strict,Path=/api/v1/auth)下发,JS 不可读。
+
 ```json
 {
   "code": 0,
   "data": {
     "access_token": "eyJ...",
     "expires_in": 43200,
-    "refresh_token": "eyJ...",
     "user": {
       "id": 1, "username": "admin", "name": "admin",
       "email": "", "permission_level": 0, "status": 1,
@@ -46,11 +47,11 @@
 
 ### POST `/auth/refresh`(公开)
 
-请求:`{"refresh_token": "..."}` → 返回新令牌对(轮换:旧刷新令牌即刻失效)+ user。
+请求体可为空(刷新令牌经 HttpOnly Cookie 自动携带)→ 返回新访问令牌(轮换:旧刷新令牌即刻失效)+ user;兼容旧客户端在请求体传 `{"refresh_token": "..."}`。
 
 ### POST `/auth/logout`(登录)
 
-请求:`{"refresh_token": "..."}` → `204`,幂等(令牌已吊销同样成功)。
+请求体可为空(刷新令牌经 HttpOnly Cookie 自动携带)→ `204` 并清除 Cookie,幂等(令牌已吊销同样成功);兼容旧客户端在请求体传 `{"refresh_token": "..."}`。
 
 ### POST `/auth/register`(管理员)
 
@@ -148,7 +149,6 @@
 | POST `/buckets/:id/items/batch-delete` | `{"items": [{type: "file"\|"folder", id}]}` |
 | POST `/buckets/:id/items/batch-copy` | 同上 + `target_folder_id` |
 | POST `/buckets/:id/items/batch-move` | 同上 |
-| GET `/buckets/:id/items/batch-download` | 批量下载(zip),失败项逐条返回 |
 
 ### 可见性(条目级 ACL)
 

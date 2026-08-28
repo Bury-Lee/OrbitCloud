@@ -82,10 +82,13 @@ frontend/
 
 ## 5. 认证与令牌
 
-- 登录返回 `{access_token, refresh_token, user}`;access_token 存 localStorage,
+- 登录返回 `{access_token, expires_in, user}`;**access_token 仅存内存**(不落 localStorage),
   `http.ts` 请求拦截器自动加 `Authorization: Bearer <token>`;
-- 刷新令牌轮换:响应 401 时先 `POST /auth/refresh` 换新令牌对再重放原请求
+- 刷新令牌仅存后端 **HttpOnly + SameSite=Strict Cookie**(JS 不可读,防 XSS 窃取长期凭证):
+  响应 401 时先 `POST /auth/refresh`(Cookie 自动携带)换新访问令牌再重放原请求
   (并发 401 共享同一刷新 Promise,避免重复刷新);刷新失败 → 清凭证跳登录页;
+- 页面刷新恢复会话:入口 `main.ts` 挂载前先 `restoreSession()`(经 Cookie 刷新),无有效会话则跳登录;
+- HTTPS 部署时后端需置 `server.cookie_secure: true`(Secure Cookie);
 - 登录时保存 `user`(含 `PermissionLevel`),用于判断管理员身份(`permission_level <= 1`);
 - 路由守卫:未登录访问受保护页 → `/login?redirect=...`;非管理员访问 `/admin/*`
   → `/403`。

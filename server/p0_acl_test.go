@@ -111,7 +111,7 @@ func mkBucketP0(t *testing.T, name string, perm model.PermissionLevel, owner uin
 
 func mkFolderP0(t *testing.T, bucketID, parentID, uploadedBy uint, name string) *model.Folder {
 	t.Helper()
-	f := &model.Folder{BucketID: bucketID, ParentID: parentID, Name: name, UploadedBy: uploadedBy, Isable: true}
+	f := &model.Folder{BucketID: bucketID, ParentID: parentID, Name: name, UploadedBy: uploadedBy, Isable: model.FolderUsable}
 	if err := core.DB.Create(f).Error; err != nil {
 		t.Fatalf("create folder %s: %v", name, err)
 	}

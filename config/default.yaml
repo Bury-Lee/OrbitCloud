@@ -62,6 +62,10 @@ server:
   # 取值: debug | release | test
   mode: debug
 
+  # 刷新令牌 Cookie 是否带 Secure 标志(HTTPS 部署必须置 true;
+  # 默认 false 兼容纯 HTTP 内网部署)
+  cookie_secure: false
+
   # pprof 管理接口(管理员路由 /api/v1/admin/pprof/):
   #   - CPU 火焰图:管理员主动触发采样(默认 30 秒),采完落盘可下载
   #   - 内存/协程快照:随时可取(快照式抓取,无常驻损耗)
