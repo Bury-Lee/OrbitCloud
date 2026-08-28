@@ -2,6 +2,7 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"strconv"
 
@@ -73,5 +74,9 @@ func (SystemAPI) DownloadLog(c *gin.Context) {
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Length", strconv.FormatInt(info.Size, 10))
 	c.Header("Content-Disposition", "attachment; filename="+info.Name)
-	c.DataFromReader(http.StatusOK, info.Size, "text/plain; charset=utf-8", rc, nil)
+	// 关键:gin render.Reader 用 io.Copy(读到 EOF),而日志文件下载期间仍在
+	// 持续写入增长——直接传 rc 会读满增长后的文件,实际写入超过声明的
+	// Content-Length → "wrote more than the declared Content-Length" + 响应损坏。
+	// 用 LimitReader 锁定读取上限 = Stat 时大小,写入恒等于 CL。
+	c.DataFromReader(http.StatusOK, info.Size, "text/plain; charset=utf-8", io.LimitReader(rc, info.Size), nil)
 }
