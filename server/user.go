@@ -36,6 +36,12 @@ type RegisterArg struct {
 	PermissionLevel model.PermissionLevel // 权限等级(<=0 归一为最低权限普通用户)
 }
 
+// NtHashSyncHook SMB 网关 NT hash 同步钩子:用户注册/改密后即时通知
+// SMB 网关推送凭据变更(缩短 SMB 认证凭据收敛窗口,避免旧密码在推送周期内
+// 仍可登录)。默认空实现(未装配 SMB 网关时不产生任何行为);由 SMB 网关
+// 装配时注入(见 smb_server/go/wire.go BuildGateway)。
+var NtHashSyncHook = func(_ context.Context, _ string, _ string) {}
+
 // Register 注册用户(管理员接口;普通用户不能自助注册):
 // trim 用户名 → 校验 → bcrypt 哈希密码 → 写入(Status=1)。
 // 权限等级归一:<=0 → 最低权限普通用户;0 仅命令行创建,API 不可授予。
@@ -80,6 +86,9 @@ func Register(ctx context.Context, arg RegisterArg) (*model.User, error) {
 	// 返回前清敏感字段(禁止回传哈希)
 	user.Password = ""
 	user.NtHash = ""
+
+	// 即时通知 SMB 网关(推送 NT hash,新用户 SMB 登录零等待)
+	NtHashSyncHook(ctx, name, password)
 
 	log.Infof("register: user %q (id %d) permission %d created", name, user.ID, perm)
 	return user, nil
@@ -311,8 +320,13 @@ func UpdateMe(ctx context.Context, arg UpdateMeArg) (*model.User, error) {
 	}
 
 	// 重查并返回(已脱敏)
+	user, err := GetUser(ctx, GetUserArg{ID: userID})
+	if err == nil && in.Password != "" {
+		// 即时通知 SMB 网关(改密后旧密码立即失效,不等推送周期)
+		NtHashSyncHook(ctx, user.Username, in.Password)
+	}
 	log.Infof("update me: user %d profile updated", userID)
-	return GetUser(ctx, GetUserArg{ID: userID})
+	return user, err
 }
 
 // UpdateUserInput 用户可更新字段(管理员改他人;指针字段 nil 表示不更新;JSON 绑定走 api 层 DTO)。
@@ -385,8 +399,13 @@ func UpdateUser(ctx context.Context, arg UpdateUserArg) (*model.User, error) {
 	}
 
 	// 重查并返回(已脱敏)
+	user, err := GetUser(ctx, GetUserArg{ID: targetID})
+	if err == nil && in.Password != "" {
+		// 即时通知 SMB 网关(改密后旧密码立即失效,不等推送周期)
+		NtHashSyncHook(ctx, user.Username, in.Password)
+	}
 	log.Infof("update user: operator %d updated user %d", operatorID, targetID)
-	return GetUser(ctx, GetUserArg{ID: targetID})
+	return user, err
 }
 
 // UpdateUserQuotaArg 用户配额设置入参(专用接口,语义与 DB 一致)。
