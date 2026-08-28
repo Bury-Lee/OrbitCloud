@@ -130,3 +130,24 @@ sequenceDiagram
 1. 注册表与 ConfigHandle 是**两套表**,任何 upsert/delete 必须两边都落,漏一边会出现"业务视图有、协议层无"或反之;
 2. 桶删除是异步清理:先 remove_share(踢连接)再后台清对象存储,顺序不能反;
 3. `resolve` 只放行 status=1;禁用桶的实例可以留在表里(便于恢复),但必须拒绝新连接。
+
+## 8. 已知限制
+
+### 8.1 ACL 重建与底账漂移(低风险,自愈)
+
+**现象**:共享重建(`upsert` 走 remove_share + add_share,触发条件 = 定义变化:模式/状态/桶删除重建)时,重建基底取**独立底账 `acl_map`**(grant_user/revoke_user 双写维护)。
+
+**潜在缺陷**:若某用户授权处于"协议层已写、底账未写"的双写间隙(微秒级窗口),且恰好并发触发重建,则该用户在重建后的授权**可能静默丢失**——重建基底(底账)缺该用户,`remove_share` 又清掉了协议层授权。
+
+**影响**:该用户挂载被拒一次;由于该用户在"认证用户集合"内,周期刷新(≤60s)会重新 QUERY_ACL 并恢复授权,**自愈,无数据损坏**。
+
+**触发条件苛刻**:双写间隙(微秒级)∩ 并发重建(定义变化,日常罕见)。
+
+**已知修复方向**(未实施):重建时合并**协议层当前 ACL**(授权真相,需 ConfigHandle 提供只读 getter)而非仅信底账:
+```rust
+// upsert 重建路径(registry.rs):
+if let Ok(Some(proto_acl)) = config.share_acl_users(&info.share_name) {
+    merged_users.extend(proto_acl); // 保持"底账 = 协议层镜像"
+}
+self.acl_map.write().await.insert(info.share_name.clone(), merged_users);
+```
