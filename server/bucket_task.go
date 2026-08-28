@@ -82,9 +82,14 @@ func processDeleteTask(ctx context.Context, taskID uint) error {
 		}
 	}()
 
-	// 动态验证操作者(禁用/降权/删号 → 暂停任务,保留记录待管理员处理;
-	// OperatorID=0 存量任务按旧语义放行)
+	// 动态验证操作者(禁用/降权/删号 → 暂停任务:status 回 0 + 释放锁,
+	// 权限恢复后由启动扫描/cron 续跑重判,不会卡死)
 	if err := checkDeleteOperator(ctx, task); err != nil {
+		if uerr := core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
+			Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
+			Update("status", 0).Error; uerr != nil {
+			log.Errorf("process delete task %d: pause (status back to 0): %v", taskID, uerr)
+		}
 		return err
 	}
 
@@ -248,8 +253,14 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 			return nil // 锁已被抢占,放弃本轮
 		}
 
-		// 每批(每轮)动态验证操作者(禁用/降权/删号 → 暂停任务)
+		// 每批(每轮)动态验证操作者(禁用/降权/删号 → 暂停任务:status 回 0,
+		// 权限恢复后由启动扫描/cron 续跑重判)
 		if err := checkDeleteOperator(ctx, task); err != nil {
+			if uerr := core.DB.WithContext(ctx).Model(&model.DeleteTask{}).
+				Where("id = ? AND lock_owner = ?", taskID, core.InstanceID()).
+				Update("status", 0).Error; uerr != nil {
+				log.Errorf("process delete dir task %d: pause (status back to 0): %v", taskID, uerr)
+			}
 			return err
 		}
 
@@ -324,7 +335,8 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 //   - 账号不存在(被删/软删)→ 暂停任务(记录保留,待续跑重判);
 //   - 账号禁用(Status!=1)→ 暂停任务;
 //
-// 返回错误时任务记录保留,由启动扫描/cron 续跑重判(权限恢复后自动继续)。
+// 返回错误时调用方须把任务 status 回 0(暂停),由启动扫描/cron 续跑重判
+// (权限恢复后自动继续);不回 0 则任务卡在"处理中"永不被重扫。
 func checkDeleteOperator(ctx context.Context, task *model.DeleteTask) error {
 	if task.OperatorID == 0 {
 		return nil // 存量任务:无快照,按旧语义执行
