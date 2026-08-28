@@ -24,6 +24,45 @@ import (
 // recyclePurgeBatch 单批扫描上限(防一次查询过载;循环直到清完)。
 const recyclePurgeBatch = 100
 
+// ListRecycleBinArg 回收站列表入参。
+type ListRecycleBinArg struct {
+	UserID   uint // 归属者 users.id(仅查自己的回收站)
+	Page     int  // 页码(≥1)
+	PageSize int  // 页大小(缺省 50,上限 500)
+}
+
+// ListRecycleBin 分页查询用户自己的回收站文件(软删行,deleted_at 倒序,
+// offset 分页)。返回文件切片与总数;未删除的文件/他人归属的文件不出现。
+func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (files []model.File, total int64, err error) {
+	// 分页归一(与 ListFiles 同规则)
+	page, pageSize := arg.Page, arg.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 500 {
+		pageSize = 500
+	}
+
+	// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤)
+	cond := core.DB.WithContext(ctx).Unscoped().Model(&model.File{}).
+		Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID)
+	if err := cond.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("list recycle bin: count: %w", err)
+	}
+	if err := cond.Order("deleted_at DESC").
+		Limit(pageSize).Offset((page - 1) * pageSize).
+		Find(&files).Error; err != nil {
+		return nil, 0, fmt.Errorf("list recycle bin: query: %w", err)
+	}
+	if files == nil {
+		files = []model.File{}
+	}
+	return files, total, nil
+}
+
 // CleanExpiredRecycleBinArg 回收站过期清理入参。
 type CleanExpiredRecycleBinArg struct {
 	Cutoff time.Time // 清理 deleted_at < cutoff 的回收站条目

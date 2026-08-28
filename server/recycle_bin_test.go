@@ -169,3 +169,69 @@ func TestCleanExpiredRecycleBin(t *testing.T) {
 		t.Fatalf("re-clean: %v", err)
 	}
 }
+
+// TestListRecycleBin 回收站查询:只返回"已删除且归属自己"的文件,
+// 他人归属/未删除的文件不出现;deleted_at 倒序,分页与 total 正确。
+func TestListRecycleBin(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "rbq-admin", model.Admin)
+	u2 := mkUserP0(t, "rbq-u2", model.NormalUser)
+	b := mkBucketP0(t, "rbq-bucket", model.NormalUser, admin.ID)
+
+	// 自己的回收站文件 ×2(先删的 deleted_at 更早,期望倒序后在后)
+	own1 := mkFileP0(t, b.ID, 0, "own1.txt", 10)
+	own2 := mkFileP0(t, b.ID, 0, "own2.txt", 20)
+	// 他人归属的文件(u2 删除)
+	other := mkFileP0(t, b.ID, 0, "other.txt", 30)
+	// 自己未删除的文件(不应出现在回收站)
+	active := mkFileP0(t, b.ID, 0, "active.txt", 40)
+	_ = active
+	core.DB.Model(&model.File{}).Where("id = ?", other.ID).Update("uploaded_by", u2.ID)
+
+	for _, f := range []*model.File{own1, other} {
+		if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f.ID}); err != nil {
+			t.Fatalf("delete %d: %v", f.ID, err)
+		}
+	}
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: own2.ID}); err != nil {
+		t.Fatalf("delete own2: %v", err)
+	}
+	// active 不删
+
+	// 自己的回收站:own1/own2(deleted_at 倒序 → own2 在前)
+	files, total, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("list recycle bin: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2", total)
+	}
+	if len(files) != 2 || files[0].ID != own2.ID || files[1].ID != own1.ID {
+		t.Fatalf("files = %+v, want [own2, own1](deleted_at 倒序)", files)
+	}
+	// 软删行(带 deleted_at 供前端展示删除时间)
+	for i := range files {
+		if !files[i].DeletedAt.Valid {
+			t.Fatalf("file %d missing deleted_at", files[i].ID)
+		}
+	}
+
+	// 他人视角:只看到自己归属的 other
+	files2, total2, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: u2.ID, Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("list recycle bin (u2): %v", err)
+	}
+	if total2 != 1 || len(files2) != 1 || files2[0].ID != other.ID {
+		t.Fatalf("u2 recycle = %+v(total %d), want [other](1)", files2, total2)
+	}
+
+	// 分页:page_size=1 只回一页,total 不变
+	paged, _, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Page: 1, PageSize: 1})
+	if err != nil {
+		t.Fatalf("paged list: %v", err)
+	}
+	if len(paged) != 1 || paged[0].ID != own2.ID {
+		t.Fatalf("page1 = %+v, want [own2]", paged)
+	}
+}

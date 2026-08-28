@@ -198,6 +198,23 @@ func (FileAPI) ListFiles(c *gin.Context) {
 	common.Success(c, gin.H{"files": files, "folders": folders, "total": total})
 }
 
+// ListRecycleBin 查询自己的回收站(GET /recycle-bin?page=&page_size=):
+// 返回 {files, total}——已删除(软删)且归属自己的文件,deleted_at 倒序。
+func (FileAPI) ListRecycleBin(c *gin.Context) {
+	userID := currentUser(c)
+	page := queryInt(c, "page", 1)
+	pageSize := queryInt(c, "page_size", 50)
+
+	files, total, err := server.ListRecycleBin(c.Request.Context(), server.ListRecycleBinArg{
+		UserID: userID, Page: page, PageSize: pageSize,
+	})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	common.Success(c, gin.H{"files": files, "total": total})
+}
+
 // GetFileMeta 返回文件元数据(GET /buckets/:id/files/:fid,仅文件)。
 func (FileAPI) GetFileMeta(c *gin.Context) {
 	bucketID := parseIDParam(c, "id")
