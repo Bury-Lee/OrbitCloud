@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { FolderOpened, Link, SwitchButton, User, UserFilled } from '@element-plus/icons-vue'
+import { Delete, FolderOpened, Link, Monitor, SwitchButton, User, UserFilled } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -34,6 +34,10 @@ async function onLogout() {
           <el-icon><Link /></el-icon>
           <span>分享管理</span>
         </el-menu-item>
+        <el-menu-item index="/recycle-bin">
+          <el-icon><Delete /></el-icon>
+          <span>回收站</span>
+        </el-menu-item>
         <el-menu-item index="/groups">
           <el-icon><UserFilled /></el-icon>
           <span>我的组</span>
@@ -45,6 +49,10 @@ async function onLogout() {
         <el-menu-item v-if="auth.isAdmin" index="/admin/groups">
           <el-icon><UserFilled /></el-icon>
           <span>组管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin" index="/admin/system">
+          <el-icon><Monitor /></el-icon>
+          <span>系统运维</span>
         </el-menu-item>
       </el-menu>
     </el-aside>

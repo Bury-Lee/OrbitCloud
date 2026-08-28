@@ -39,6 +39,12 @@ const router = createRouter({
       meta: { title: '文件管理', requiresAuth: true },
     },
     {
+      path: '/recycle-bin',
+      name: 'recycle-bin',
+      component: () => import('@/views/RecycleBinView.vue'),
+      meta: { title: '回收站', requiresAuth: true },
+    },
+    {
       path: '/shares',
       name: 'shares',
       component: () => import('@/views/SharesView.vue'),
@@ -61,6 +67,12 @@ const router = createRouter({
       name: 'groups',
       component: () => import('@/views/GroupsView.vue'),
       meta: { title: '组管理', requiresAuth: true, requiresAdmin: true },
+    },
+    {
+      path: '/admin/system',
+      name: 'system',
+      component: () => import('@/views/SystemView.vue'),
+      meta: { title: '系统运维', requiresAuth: true, requiresAdmin: true },
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
