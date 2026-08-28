@@ -59,13 +59,34 @@ function Invoke-Api {
     $params = @{ Uri = "$script:apiBase$Path"; Method = $Method; Headers = $headers; TimeoutSec = 30 }
     if ($Body -is [string]) { $params.ContentType = "application/json"; $params.Body = $Body }
     elseif ($null -ne $Body) { $params.ContentType = "application/json"; $params.Body = ($Body | ConvertTo-Json -Depth 6) }
-    try {
-        $r = Invoke-RestMethod @params
-        return @{ ok = $true; resp = $r }
-    } catch {
-        $status = ""
-        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        return @{ ok = $false; status = $status; msg = $_.ErrorDetails.Message }
+    # 429 限流自动重试(最多 3 次,间隔 1s;默认限流 10/s 下冒烟连发可能触发)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try {
+            $r = Invoke-RestMethod @params
+            return @{ ok = $true; resp = $r }
+        } catch {
+            $status = ""
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            if ($status -eq 429 -and $attempt -lt 2) { Start-Sleep -Seconds 1; continue }
+            return @{ ok = $false; status = $status; msg = $_.ErrorDetails.Message }
+        }
+    }
+}
+
+# curl 包装:429 自动重试(默认限流下连发可能触发)。用法与 curl.exe 相同,
+# 裸参数形式(Invoke-Curl -s -o NUL ...)或数组形式均可;返回 stdout。
+# ValueFromRemainingArguments 收集所有裸参数(否则 -s 会被当函数命名参数解析丢失)。
+function Invoke-Curl {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CurlArgs)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $out = & curl.exe @CurlArgs 2>$null
+        $is429 = $false
+        if ($LASTEXITCODE -eq 0) {
+            if ($out -match "429") { $is429 = $true }                       # -w "%{http_code}" 模式
+            elseif ($out -match "请求过于频繁") { $is429 = $true }            # JSON body 模式
+        }
+        if ($is429 -and $attempt -lt 2) { Start-Sleep -Seconds 1; continue }
+        return $out
     }
 }
 
@@ -78,9 +99,10 @@ function New-TestFile {
 
 function Upload-File {
     param([string]$Token, [int]$BucketId, [string]$FilePath, [string]$Type = "")
-    $args = @("-s", "-X", "POST", "$script:apiBase/buckets/$BucketId/files", "-H", "Authorization: Bearer $Token", "-F", "file=@$FilePath")
-    if ($Type) { $args += "-F", "file_type=$Type" }
-    $out = & curl.exe @args 2>$null
+    # 注意:不能命名 $args(PS 自动变量,会被覆盖语义干扰),用 $curlArgs
+    $curlArgs = @("-s", "-X", "POST", "$script:apiBase/buckets/$BucketId/files", "-H", "Authorization: Bearer $Token", "-F", "file=@$FilePath")
+    if ($Type) { $curlArgs += "-F", "file_type=$Type" }
+    $out = Invoke-Curl @curlArgs   # @ 展开为独立位置参数(ValueFromRemainingArguments 逐 token 收集)
     return ($out | ConvertFrom-Json)
 }
 
@@ -127,10 +149,10 @@ $f2 = New-TestFile "smoke-2.docx"
 $up2 = Upload-File $adminTok $bucketId $f2 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 Write-Result "上传 OOXML(长 MIME 不 500)" ($up2.code -eq 0) ($up2 | ConvertTo-Json -Compress)
 
-$dl = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" 2>$null
+$dl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "下载文件" ($dl -eq "200") "HTTP $dl"
 
-$rg = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" -H "Range: bytes=0-9" 2>$null
+$rg = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" -H "Range: bytes=0-9" 2>$null
 Write-Result "Range 206 断点" ($rg -eq "206") "HTTP $rg"
 
 $up3 = Upload-File $adminTok $bucketId $f1
@@ -139,12 +161,12 @@ Write-Result "同名上传自动重命名" ($up3.code -eq 0 -and $up3.data.Name 
 $sch = Invoke-Api "GET" "/buckets/$bucketId/files?key=smoke" $adminTok
 Write-Result "文件名搜索" ($sch.ok -and $sch.resp.code -eq 0 -and $sch.resp.data.total -ge 1) $sch.msg
 
-$pv = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/preview" -H "Authorization: Bearer $adminTok" 2>$null
+$pv = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/preview" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "预览接口" ($pv -eq "200") "HTTP $pv"
 
 # ==================== 3. 回收站 ====================
 Write-Host "`n--- 3. 回收站 ---" -ForegroundColor Yellow
-$del = & curl.exe -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
+$del = Invoke-Curl -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "删除进回收站" ($del -eq "204") "HTTP $del"
 
 $rb = Invoke-Api "GET" "/recycle-bin/files" $adminTok
@@ -153,8 +175,8 @@ Write-Result "回收站列表含删除文件" ($rb.ok -and $rb.resp.code -eq 0 -
 $rs = Invoke-Api "POST" "/recycle-bin/files/$fileId/restore" $adminTok
 Write-Result "回收站恢复" ($rs.ok -and $rs.resp.code -eq 0 -and $null -eq $rs.resp.data.DeletedAt) $rs.msg
 
-& curl.exe -s -o NUL -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
-$pd = & curl.exe -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/recycle-bin/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
+Invoke-Curl -s -o NUL -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
+$pd = Invoke-Curl -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/recycle-bin/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "回收站永久删除" ($pd -eq "204") "HTTP $pd"
 
 # ==================== 4. 分享 ====================
@@ -165,12 +187,12 @@ $sh = Invoke-Api "POST" "/shares" $adminTok @{ file_id = $up4.data.ID }
 Write-Result "创建分享" ($sh.ok -and $sh.resp.code -eq 0) $sh.msg
 if ($sh.ok) {
     $tk = $sh.resp.data.Token
-    $res = & curl.exe -s "$script:apiBase/share/$tk" 2>$null | ConvertFrom-Json
+    $res = Invoke-Curl -s "$script:apiBase/share/$tk" 2>$null | ConvertFrom-Json
     Write-Result "公开解析分享(无 token)" ($res.code -eq 0) ($res | ConvertTo-Json -Compress)
     # 注意:变量后紧跟 ? 必须用 $() 包裹(PS 5.1 会把 $tk?download 整体当变量名解析为空)
-    $sdl = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/share/$($tk)?download=1" 2>$null
+    $sdl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/share/$($tk)?download=1" 2>$null
     if ($sdl -ne "200") {
-        $sdb = & curl.exe -s "$script:apiBase/share/$($tk)?download=1" 2>$null
+        $sdb = Invoke-Curl -s "$script:apiBase/share/$($tk)?download=1" 2>$null
         Write-Result "公开下载分享" $false "HTTP $sdl body=$sdb"
     } else {
         Write-Result "公开下载分享" $true "HTTP $sdl"
@@ -189,7 +211,7 @@ $logs = Invoke-Api "GET" "/logs" $adminTok
 Write-Result "日志列表" ($logs.ok -and $logs.resp.code -eq 0) $logs.msg
 if ($logs.ok -and $logs.resp.data.files.Count -gt 0) {
     $first = $logs.resp.data.files | Select-Object -First 1
-    $ldl = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/logs/download?path=$($first.path)" -H "Authorization: Bearer $adminTok" 2>$null
+    $ldl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/logs/download?path=$($first.path)" -H "Authorization: Bearer $adminTok" 2>$null
     Write-Result "日志下载" ($ldl -eq "200") "HTTP $ldl path=$($first.path)"
 } else {
     Write-Result "日志下载" $false "无日志文件(未配置 ORBITCLOUD_LOG_OUTPUT_PATH?)"
@@ -197,13 +219,13 @@ if ($logs.ok -and $logs.resp.data.files.Count -gt 0) {
 
 # ==================== 6. 权限 ====================
 Write-Host "`n--- 6. 权限 ---" -ForegroundColor Yellow
-$p1 = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/system/status" -H "Authorization: Bearer $userTok" 2>$null
+$p1 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/system/status" -H "Authorization: Bearer $userTok" 2>$null
 Write-Result "普通用户访问管理接口 403" ($p1 -eq "403") "HTTP $p1"
 
-$p2 = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" 2>$null
+$p2 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" 2>$null
 Write-Result "无 token 401" ($p2 -eq "401") "HTTP $p2"
 
-$p3 = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$userBucketId/files" -H "Authorization: Bearer $userTok" 2>$null
+$p3 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$userBucketId/files" -H "Authorization: Bearer $userTok" 2>$null
 Write-Result "普通用户访问自己的桶" ($p3 -eq "200") "HTTP $p3"
 
 # ==================== 7. 用户组可见性 ====================
@@ -221,7 +243,7 @@ Write-Result "添加组成员" ($gm.ok -and $gm.resp.code -eq 0) $gm.msg
 $up5 = Upload-File $adminTok $bucketId (New-TestFile "vis.txt")
 $vis = Invoke-Api "PUT" "/buckets/$bucketId/files/$($up5.data.ID)/visibility" $adminTok @{ groups = @($gid) }
 Write-Result "设置文件可见组" ($vis.ok -and $vis.resp.code -eq 0) $vis.msg
-$v1 = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$($up5.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null
+$v1 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$($up5.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "管理员可见组内文件" ($v1 -eq "200") "HTTP $v1"
 
 # ==================== 8. 批量 ====================
@@ -230,7 +252,7 @@ $bd = Invoke-Api "POST" "/buckets/$userBucketId/items/batch-delete" $adminTok @{
 Write-Result "批量删除" ($bd.ok -and $bd.resp.code -eq 0 -and $bd.resp.data.failed.Count -eq 0) ($bd.resp.data | ConvertTo-Json -Compress)
 
 $zpath = Join-Path $script:tmpDir "batch.zip"
-& curl.exe -s -o $zpath "$script:apiBase/buckets/$bucketId/items/batch-download?ids=file:$($up3.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
+Invoke-Curl -s -o $zpath "$script:apiBase/buckets/$bucketId/items/batch-download?ids=file:$($up3.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
 $zb = [System.IO.File]::ReadAllBytes($zpath)
 Write-Result "批量下载 zip" ($zb[0] -eq 80 -and $zb[1] -eq 75) "PK 魔数=$($zb[0]),$($zb[1])"
 
@@ -239,7 +261,7 @@ if ($TestRateLimit) {
     Write-Host "`n--- 9. 限流(启用时才测) ---" -ForegroundColor Yellow
     $codes = @()
     for ($i = 0; $i -lt 40; $i++) {
-        $c = & curl.exe -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" -H "Authorization: Bearer $adminTok" 2>$null
+        $c = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" -H "Authorization: Bearer $adminTok" 2>$null
         $codes += $c
     }
     $n429 = ($codes | Where-Object { $_ -eq "429" }).Count
