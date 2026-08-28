@@ -326,9 +326,9 @@ func ListSharedDir(ctx context.Context, arg ListSharedDirArg) (files []model.Fil
 		pageSize = 500
 	}
 	unionSQL := `SELECT id, created_at, kind FROM (
-		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ?
+		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows := []unionRow{}
 	if err := core.DB.WithContext(ctx).Raw(unionSQL,

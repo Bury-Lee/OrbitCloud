@@ -165,8 +165,8 @@ func (f *FileOpsService) Close(ctx context.Context, handleID uint64) error {
 // Unlink 删除路径(CodeFileUnlink;目录须为空)。
 // 参数:ctx 上下文;args 删除请求(路径 + 可选桶 ID)。
 // 返回值:错误按哨兵语义。
-// 实现:解析共享 → 解析父目录 → 目录分支递归删除 / 文件分支复用
-// server.DeleteFile(对象 + 记录 + 桶用量一并清理)。
+// 实现:解析共享 → 解析父目录 → 目录分支复用 server.DeleteDir(进回收站)/
+// 文件分支复用 server.DeleteFile(软删进回收站,记录/对象/用量保留)。
 func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 	// 操作者身份(同 Open:操作帧 userId 解析;缺失/无效 → 拒绝)
 	info := sessionFrom(ctx)
@@ -212,9 +212,8 @@ func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 		if err := checkAncestorsVisible(ctx, info, share.BucketID, fid); err != nil {
 			return err
 		}
-		// 目录:复用 server 层删除(DeleteDir 置 Isable=false 落删除任务 → 同步处理完成)。
-		// 与 Web 端同一套物理清理(深度优先删对象/记录/分享级联/归还桶与用户用量,
-		// 带任务锁与幂等续跑),不再在本层重复实现。
+		// 目录:复用 server 层删除(DeleteDir 置 Isable=false + 软删进回收站,同步生效)。
+		// 返回 taskID 恒 0(回收站保留数据,不做物理清理),与 Web 端同一删除语义。
 		taskID, err := server.DeleteDir(ctx, server.DeleteDirArg{
 			UserID: userID, BucketID: share.BucketID, DirID: fid,
 		})
@@ -222,10 +221,13 @@ func (f *FileOpsService) Unlink(ctx context.Context, args *UnlinkArgs) error {
 			smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d:%v", path, fid, err) // 记录目录删除失败
 			return err // 失败上抛
 		}
-		if err := server.ProcessDeleteTask(ctx, server.ProcessDeleteTaskArg{TaskID: taskID}); err != nil {
-			// 物理清理失败:任务保留(启动/cron 续跑),SMB 返回错误,客户端可重试
-			smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d 任务=%d:%v", path, fid, taskID, err)
-			return err
+		// 防御:返回 taskID>0(如未来回收站清除复用该通道)才同步处理
+		if taskID > 0 {
+			if err := server.ProcessDeleteTask(ctx, server.ProcessDeleteTaskArg{TaskID: taskID}); err != nil {
+				// 物理清理失败:任务保留(启动/cron 续跑),SMB 返回错误,客户端可重试
+				smbErrorf("smb_gateway: 删除目录失败 路径=%q 文件夹=%d 任务=%d:%v", path, fid, taskID, err)
+				return err
+			}
 		}
 		smbDebugf("smb_gateway: 删除目录成功 路径=%q 文件夹=%d", path, fid) // 记录目录删除成功
 		smbInfof("smb_gateway: 文件变更 删除目录 user=%d(%s) 目录=%d", userID, info.Username, fid) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)

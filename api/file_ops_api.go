@@ -275,8 +275,8 @@ func (FileAPI) CreateDir(c *gin.Context) {
 }
 
 // DeleteDir 删除文件夹(DELETE /buckets/:id/dirs/:fid,成功 204)。
-// 内部置为不可见并落删除任务,目录立即从列表消失;
-// 物理清理经全局协程池后台执行(背压:池满时提交阻塞,请求自然排队)。
+// 删除进回收站(Isable=false + 软删,见 server.DeleteDir),目录立即从列表消失;
+// 返回 taskID 恒 0,不提交物理清理任务(回收站保留数据)。
 func (FileAPI) DeleteDir(c *gin.Context) {
 	bucketID := parseIDParam(c, "id")
 	if bucketID == 0 {
@@ -294,19 +294,19 @@ func (FileAPI) DeleteDir(c *gin.Context) {
 		return
 	}
 
-	// 落删除任务(幂等,中断由启动/cron 续跑)
+	// 进回收站(幂等;taskID 恒 0 = 无需物理清理)
 	taskID, err := server.DeleteDir(c.Request.Context(), server.DeleteDirArg{UserID: userID, BucketID: bucketID, DirID: dirID})
 	if err != nil {
 		respondError(c, err)
 		return
 	}
 
-	// 经全局协程池提交物理清理:SubmitCtx 传入 gin 请求上下文——
-	// 客户端断开后不再提交/未开始的任务被跳过(任务留在任务表由 cron 续跑);
-	// 任务已开始执行则内部 context.WithoutCancel 继续,不随断开中断
-	core.Pool.SubmitCtx(c, agilepool.TaskFunc(func() error {
-		return server.ProcessDeleteTask(context.Background(), server.ProcessDeleteTaskArg{TaskID: taskID})
-	}))
+	// 防御:返回 taskID>0(如未来回收站清除复用该通道)才经全局协程池提交
+	if taskID > 0 {
+		core.Pool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+			return server.ProcessDeleteTask(context.Background(), server.ProcessDeleteTaskArg{TaskID: taskID})
+		}))
+	}
 
 	c.Status(204)
 }

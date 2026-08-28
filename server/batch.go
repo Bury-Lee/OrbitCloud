@@ -185,8 +185,8 @@ type DeleteItemsArg struct {
 	Items    []DeleteItem // 删除指令列表
 }
 
-// DeleteItems 批量删除(同桶):文件硬删(对象+记录+桶 used_space 原子减),
-// 文件夹逻辑删(Isable=false)后落 DeleteTask 后台物理清理;逐条独立,失败不中断其余。
+// DeleteItems 批量删除(同桶):文件/文件夹删除进回收站(软删置 deleted_at,
+// 保留记录/对象/用量;文件夹另置 Isable=false),逐条独立,失败不中断其余。
 func DeleteItems(ctx context.Context, arg DeleteItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {

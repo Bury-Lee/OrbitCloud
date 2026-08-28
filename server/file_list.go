@@ -94,9 +94,9 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 		visCond = " AND " + visSQL
 	}
 	unionSQL := `SELECT id, created_at, kind FROM (
-		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ?` + visCond + `
+		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL` + visCond + `
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true` + visCond + `
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL` + visCond + `
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	queryArgs := []any{bucketID, folderID}
 	queryArgs = append(queryArgs, visArgs...)
@@ -113,12 +113,12 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 	countArgs := []any{bucketID, folderID}
 	countArgs = append(countArgs, visArgs...)
 	if err := core.DB.WithContext(ctx).
-		Raw("SELECT COUNT(*) FROM files WHERE bucket_id = ? AND folder_id = ?"+visCond, countArgs...).
+		Raw("SELECT COUNT(*) FROM files WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL"+visCond, countArgs...).
 		Scan(&n1).Error; err != nil {
 		return nil, nil, 0, fmt.Errorf("list files count (files): %w", err)
 	}
 	if err := core.DB.WithContext(ctx).
-		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true"+visCond, countArgs...).
+		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL"+visCond, countArgs...).
 		Scan(&n2).Error; err != nil {
 		return nil, nil, 0, fmt.Errorf("list files count (folders): %w", err)
 	}
@@ -210,7 +210,7 @@ func ListFilesCursor(ctx context.Context, arg ListFilesCursorArg) (files []model
 	folderCond, folderCondArgs := common.KeysetIDCond("", folderCursor)
 
 	// 文件表
-	fileSQL := "SELECT id FROM files WHERE bucket_id = ? AND folder_id = ?" + visCond
+	fileSQL := "SELECT id FROM files WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL" + visCond
 	fileArgs := []any{bucketID, folderID}
 	fileArgs = append(fileArgs, visArgs...)
 	if fileCond != "" {
@@ -225,7 +225,7 @@ func ListFilesCursor(ctx context.Context, arg ListFilesCursorArg) (files []model
 	}
 
 	// 文件夹表
-	folderSQL := "SELECT id FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true" + visCond
+	folderSQL := "SELECT id FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL" + visCond
 	folderArgs := []any{bucketID, folderID}
 	folderArgs = append(folderArgs, visArgs...)
 	if folderCond != "" {
