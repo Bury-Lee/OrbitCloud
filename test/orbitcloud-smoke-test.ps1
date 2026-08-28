@@ -76,6 +76,10 @@ function Invoke-Api {
 # curl 包装:429 自动重试(默认限流下连发可能触发)。用法与 curl.exe 相同,
 # 裸参数形式(Invoke-Curl -s -o NUL ...)或数组形式均可;返回 stdout。
 # ValueFromRemainingArguments 收集所有裸参数(否则 -s 会被当函数命名参数解析丢失)。
+# 注意:PS5.1 中 1) 裸 -o/-w 会被公共参数(-OutVariable/-WarningAction 等)歧义劫持;
+# 2) 字面量 @("a","b") 展开只算一个实参,必须经数组变量再 @展开。故状态码请求
+# 统一走 Get-HttpCode(固定 -s -o NUL -w %{http_code} 前缀),其余裸参数仅用
+# -X/-H/URL 等无歧义形式。
 function Invoke-Curl {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CurlArgs)
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
@@ -88,6 +92,14 @@ function Invoke-Curl {
         if ($is429 -and $attempt -lt 2) { Start-Sleep -Seconds 1; continue }
         return $out
     }
+}
+
+# 取 HTTP 状态码(PS5.1 兼容封装;$UrlArgs 收集 -X/-H/URL 等无歧义裸参数)。
+function Get-HttpCode {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$UrlArgs)
+    $curlArgs = @("-s", "-o", "NUL", "-w", "%{http_code}")
+    $curlArgs += $UrlArgs
+    return (Invoke-Curl @curlArgs)
 }
 
 function New-TestFile {
@@ -149,10 +161,10 @@ $f2 = New-TestFile "smoke-2.docx"
 $up2 = Upload-File $adminTok $bucketId $f2 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 Write-Result "上传 OOXML(长 MIME 不 500)" ($up2.code -eq 0) ($up2 | ConvertTo-Json -Compress)
 
-$dl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" 2>$null
+$dl = Get-HttpCode "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "下载文件" ($dl -eq "200") "HTTP $dl"
 
-$rg = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" -H "Range: bytes=0-9" 2>$null
+$rg = Get-HttpCode "$script:apiBase/buckets/$bucketId/files/$fileId/download" -H "Authorization: Bearer $adminTok" -H "Range: bytes=0-9" 2>$null
 Write-Result "Range 206 断点" ($rg -eq "206") "HTTP $rg"
 
 $up3 = Upload-File $adminTok $bucketId $f1
@@ -161,12 +173,12 @@ Write-Result "同名上传自动重命名" ($up3.code -eq 0 -and $up3.data.Name 
 $sch = Invoke-Api "GET" "/buckets/$bucketId/files?key=smoke" $adminTok
 Write-Result "文件名搜索" ($sch.ok -and $sch.resp.code -eq 0 -and $sch.resp.data.total -ge 1) $sch.msg
 
-$pv = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$fileId/preview" -H "Authorization: Bearer $adminTok" 2>$null
+$pv = Get-HttpCode "$script:apiBase/buckets/$bucketId/files/$fileId/preview" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "预览接口" ($pv -eq "200") "HTTP $pv"
 
 # ==================== 3. 回收站 ====================
 Write-Host "`n--- 3. 回收站 ---" -ForegroundColor Yellow
-$del = Invoke-Curl -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
+$del = Get-HttpCode -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "删除进回收站" ($del -eq "204") "HTTP $del"
 
 $rb = Invoke-Api "GET" "/recycle-bin/files" $adminTok
@@ -175,8 +187,8 @@ Write-Result "回收站列表含删除文件" ($rb.ok -and $rb.resp.code -eq 0 -
 $rs = Invoke-Api "POST" "/recycle-bin/files/$fileId/restore" $adminTok
 Write-Result "回收站恢复" ($rs.ok -and $rs.resp.code -eq 0 -and $null -eq $rs.resp.data.DeletedAt) $rs.msg
 
-Invoke-Curl -s -o NUL -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
-$pd = Invoke-Curl -s -o NUL -w "%{http_code}" -X DELETE "$script:apiBase/recycle-bin/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
+Get-HttpCode -X DELETE "$script:apiBase/buckets/$bucketId/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null | Out-Null
+$pd = Get-HttpCode -X DELETE "$script:apiBase/recycle-bin/files/$fileId" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "回收站永久删除" ($pd -eq "204") "HTTP $pd"
 
 # ==================== 4. 分享 ====================
@@ -187,12 +199,14 @@ $sh = Invoke-Api "POST" "/shares" $adminTok @{ file_id = $up4.data.ID }
 Write-Result "创建分享" ($sh.ok -and $sh.resp.code -eq 0) $sh.msg
 if ($sh.ok) {
     $tk = $sh.resp.data.Token
-    $res = Invoke-Curl -s "$script:apiBase/share/$tk" 2>$null | ConvertFrom-Json
+    $shareArgs = @("-s", "$script:apiBase/share/$tk")
+    $res = Invoke-Curl @shareArgs 2>$null | ConvertFrom-Json
     Write-Result "公开解析分享(无 token)" ($res.code -eq 0) ($res | ConvertTo-Json -Compress)
     # 注意:变量后紧跟 ? 必须用 $() 包裹(PS 5.1 会把 $tk?download 整体当变量名解析为空)
-    $sdl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/share/$($tk)?download=1" 2>$null
+    $sdl = Get-HttpCode "$script:apiBase/share/$($tk)?download=1" 2>$null
     if ($sdl -ne "200") {
-        $sdb = Invoke-Curl -s "$script:apiBase/share/$($tk)?download=1" 2>$null
+        $sdbArgs = @("-s", "$script:apiBase/share/$($tk)?download=1")
+        $sdb = Invoke-Curl @sdbArgs 2>$null
         Write-Result "公开下载分享" $false "HTTP $sdl body=$sdb"
     } else {
         Write-Result "公开下载分享" $true "HTTP $sdl"
@@ -211,7 +225,7 @@ $logs = Invoke-Api "GET" "/logs" $adminTok
 Write-Result "日志列表" ($logs.ok -and $logs.resp.code -eq 0) $logs.msg
 if ($logs.ok -and $logs.resp.data.files.Count -gt 0) {
     $first = $logs.resp.data.files | Select-Object -First 1
-    $ldl = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/logs/download?path=$($first.path)" -H "Authorization: Bearer $adminTok" 2>$null
+    $ldl = Get-HttpCode "$script:apiBase/logs/download?path=$($first.path)" -H "Authorization: Bearer $adminTok" 2>$null
     Write-Result "日志下载" ($ldl -eq "200") "HTTP $ldl path=$($first.path)"
 } else {
     Write-Result "日志下载" $false "无日志文件(未配置 ORBITCLOUD_LOG_OUTPUT_PATH?)"
@@ -219,13 +233,13 @@ if ($logs.ok -and $logs.resp.data.files.Count -gt 0) {
 
 # ==================== 6. 权限 ====================
 Write-Host "`n--- 6. 权限 ---" -ForegroundColor Yellow
-$p1 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/system/status" -H "Authorization: Bearer $userTok" 2>$null
+$p1 = Get-HttpCode "$script:apiBase/system/status" -H "Authorization: Bearer $userTok" 2>$null
 Write-Result "普通用户访问管理接口 403" ($p1 -eq "403") "HTTP $p1"
 
-$p2 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" 2>$null
+$p2 = Get-HttpCode "$script:apiBase/buckets" 2>$null
 Write-Result "无 token 401" ($p2 -eq "401") "HTTP $p2"
 
-$p3 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$userBucketId/files" -H "Authorization: Bearer $userTok" 2>$null
+$p3 = Get-HttpCode "$script:apiBase/buckets/$userBucketId/files" -H "Authorization: Bearer $userTok" 2>$null
 Write-Result "普通用户访问自己的桶" ($p3 -eq "200") "HTTP $p3"
 
 # ==================== 7. 用户组可见性 ====================
@@ -243,7 +257,7 @@ Write-Result "添加组成员" ($gm.ok -and $gm.resp.code -eq 0) $gm.msg
 $up5 = Upload-File $adminTok $bucketId (New-TestFile "vis.txt")
 $vis = Invoke-Api "PUT" "/buckets/$bucketId/files/$($up5.data.ID)/visibility" $adminTok @{ groups = @($gid) }
 Write-Result "设置文件可见组" ($vis.ok -and $vis.resp.code -eq 0) $vis.msg
-$v1 = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets/$bucketId/files/$($up5.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null
+$v1 = Get-HttpCode "$script:apiBase/buckets/$bucketId/files/$($up5.data.ID)" -H "Authorization: Bearer $adminTok" 2>$null
 Write-Result "管理员可见组内文件" ($v1 -eq "200") "HTTP $v1"
 
 # ==================== 8. 批量 ====================
@@ -256,7 +270,7 @@ if ($TestRateLimit) {
     Write-Host "`n--- 9. 限流(启用时才测) ---" -ForegroundColor Yellow
     $codes = @()
     for ($i = 0; $i -lt 40; $i++) {
-        $c = Invoke-Curl -s -o NUL -w "%{http_code}" "$script:apiBase/buckets" -H "Authorization: Bearer $adminTok" 2>$null
+        $c = Get-HttpCode "$script:apiBase/buckets" -H "Authorization: Bearer $adminTok" 2>$null
         $codes += $c
     }
     $n429 = ($codes | Where-Object { $_ -eq "429" }).Count
