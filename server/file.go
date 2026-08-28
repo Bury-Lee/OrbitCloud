@@ -118,12 +118,13 @@ func nameExists(ctx context.Context, bucketID, folderID uint, name string) (bool
 	return n1 > 0 || n2 > 0, nil
 }
 
-// findFolderByParent 按 (bucket, parent, name) 查启用子文件夹(Isable=true);
-// 未找到 → ErrNotFound。供复制任务续跑"目标子目录已存在则复用"判定。
+// findFolderByParent 按 (bucket, parent, name) 查启用子文件夹(Isable != FolderUnusable,
+// FolderDeleting 视为已存在可复用);未找到 → ErrNotFound。
+// 供复制任务续跑"目标子目录已存在则复用"判定。
 func findFolderByParent(ctx context.Context, bucketID, parentID uint, name string) (uint, error) {
 	var f model.Folder
 	err := core.DB.WithContext(ctx).
-		Where("bucket_id = ? AND parent_id = ? AND name_lower = ? AND isable = true",
+		Where("bucket_id = ? AND parent_id = ? AND name_lower = ? AND isable <> 0",
 			bucketID, parentID, strings.ToLower(name)).First(&f).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, ErrNotFound

@@ -328,7 +328,7 @@ func ListSharedDir(ctx context.Context, arg ListSharedDirArg) (files []model.Fil
 	unionSQL := `SELECT id, created_at, kind FROM (
 		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable <> 0 AND deleted_at IS NULL
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows := []unionRow{}
 	if err := core.DB.WithContext(ctx).Raw(unionSQL,
@@ -343,7 +343,7 @@ func ListSharedDir(ctx context.Context, arg ListSharedDirArg) (files []model.Fil
 		return nil, nil, 0, err
 	}
 	if err := core.DB.WithContext(ctx).Model(&model.Folder{}).
-		Where("bucket_id = ? AND parent_id = ? AND isable = true", root.BucketID, targetFolderID).Count(&n2).Error; err != nil {
+		Where("bucket_id = ? AND parent_id = ? AND isable <> 0", root.BucketID, targetFolderID).Count(&n2).Error; err != nil {
 		return nil, nil, 0, err
 	}
 	total = n1 + n2
