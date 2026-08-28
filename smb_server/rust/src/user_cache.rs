@@ -75,9 +75,16 @@ impl UserCache {
     }
 
     /// 周期刷新单个认证用户(凭据 + ACL,收敛改密/禁用/权限变更):
-    /// - 用户有效 → 刷新凭据(Moka + users_index)并重做 ACL diff;
+    /// - 用户有效 → 刷新凭据(Moka + 协议层表 + users_index)并重做 ACL diff;
     /// - 用户不存在/禁用(删号/禁用)→ 移除凭据表/索引/授权并移出集合;
     /// - RPC 失败 → 跳过本轮(临时故障不踢人,下轮再试)。
+    ///
+    /// 为什么需要它:协议层用户表是常驻 HashMap(认证 lookup 用,无 TTL),
+    /// 认证时表命中即短路,不会重新拉取——只靠认证路径无法收敛"改密/
+    /// 禁用/权限变更"。本函数由 sync_loop 每周期对所有**认证过的用户**
+    /// (连接用户维度,非全库)执行一次,把收敛窗口拉回一个对账周期。
+    /// 刷新时**必须同时更新协议层表**(add_user_nt_hash):表不更新,认证
+    /// 仍会用旧 hash 通过(改密不收敛)。
     pub async fn refresh_user(
         &self,
         conn: &Arc<GatewayClient>,
@@ -88,25 +95,27 @@ impl UserCache {
     ) {
         match self.fetch(conn, username).await {
             Ok(Some(cached)) => {
+                // 用户仍有效:凭据三处回填(Moka 缓存 / 协议层表 / 身份索引)
                 self.inner.insert(username.to_string(), cached.clone());
                 users_index.upsert(username, cached.user_id).await;
-                // 更新协议层用户表(认证 lookup 用;改密收敛的关键——表不更新,
-                // 认证仍走表命中短路用旧 hash)
+                // 协议层表更新是改密收敛的关键(见函数头注释)
                 let hash_hex = hex::encode(cached.creds.nt_hash);
                 if let Err(e) = handle.add_user_nt_hash(username, &hash_hex).await {
                     warnf!("缓存:周期刷新写入用户 {username} 凭据失败:{e:?}", &["SMB"]);
                 }
+                // 重做 ACL diff:QUERY_ACL 拉最新可见共享 → grant/revoke
+                // (权限变更/新增共享收敛)
                 self.ensure_user_acl(conn, registry, handle, username).await;
             }
             Ok(None) => {
-                // 用户不存在/禁用:清理凭据与授权(收敛删号/禁用)
+                // 用户不存在/禁用(删号/禁用):清理凭据与授权(收敛删号/禁用)
                 infof!("缓存:周期刷新用户 {username} 不存在/禁用,清理凭据与授权", &["SMB"]);
-                self.inner.invalidate(username);
-                users_index.remove(username).await;
+                self.inner.invalidate(username); // ① Moka 失效
+                users_index.remove(username).await; // ② 身份索引移除
                 if let Err(e) = handle.remove_user(username).await {
                     warnf!("缓存:移除用户 {username} 失败:{e:?}", &["SMB"]);
-                }
-                // 全量 revoke 该用户已授权共享(经注册表包装,实例底账同步)
+                } // ③ 协议层表移除(该用户名认证即 LOGON_FAILURE)
+                // ④ 全量 revoke 该用户已授权共享(经注册表包装,协议层 + 底账双清)
                 let to_revoke: Vec<String> = {
                     let mut table = self.acl_table.lock().unwrap();
                     table.remove(username).unwrap_or_default().into_iter().collect()
@@ -116,9 +125,10 @@ impl UserCache {
                         warnf!("缓存:用户 {username} 撤销 {name} 失败:{e}", &["SMB"]);
                     }
                 }
-                self.auth_users.lock().unwrap().remove(username);
+                self.auth_users.lock().unwrap().remove(username); // ⑤ 移出刷新集合(集合随删号收缩)
             }
             Err(()) => {
+                // RPC 失败(网关抖动等):跳过本轮,不清理(临时故障不误踢人)
                 warnf!("缓存:周期刷新用户 {username} RPC 失败,跳过本轮", &["SMB"]);
             }
         }
@@ -184,6 +194,16 @@ impl UserCache {
     /// RPC CODE_AUTH_QUERY_ACL 拉该用户可见共享清单 → 逐共享 upsert 实例
     /// (幂等)+ grant 授权;与上次授权集合 diff,不再可见的立即 revoke
     /// (权限收紧即时生效,不等对账周期)。
+    ///
+    /// ## diff 原理(为什么用"上次授权集合"做基准)
+    /// 授权是**累计式**的:用户 A、B 先后认证,共享 S 的协议层 ACL 会先后
+    /// 写入 A、B。QUERY_ACL 只返回"该用户当前可见"的清单,无法表达"以前
+    /// 可见、现在不可见"——因此必须记住每个用户上次授权了哪些共享,
+    /// 本轮清单与基准做差集:
+    ///   - 清单里有、基准里没有 → 新增可见 → grant;
+    ///   - 清单里没有、基准里有 → 权限被移除 → revoke(立即收紧);
+    ///   - 两者都有 → 维持。
+    /// 基准(acl_table)在本轮结束时更新为新清单。
     pub async fn ensure_user_acl(
         &self,
         conn: &Arc<GatewayClient>,
@@ -195,7 +215,7 @@ impl UserCache {
             Some(s) => s,
             None => {
                 warnf!("缓存:用户 {username} 拉取 ACL 失败,跳过授权", &["SMB"]);
-                return;
+                return; // 拉取失败:保持现状,下次认证/周期刷新再试
             }
         };
         infof!(
@@ -212,7 +232,7 @@ impl UserCache {
                 warnf!("缓存:用户 {username} 授权 {} upsert 失败:{e}", &["SMB"], s.share_name);
                 continue;
             }
-            // 经注册表包装授权(协议层 ACL + 实例底账同步,重建不丢授权)
+            // 经注册表包装授权(协议层 ACL + 独立底账双写,重建不丢授权)
             if let Err(e) = registry
                 .grant_user(&s.share_name, username, access_from_str(&s.mode), handle)
                 .await
@@ -228,7 +248,7 @@ impl UserCache {
             let revoke = old
                 .map(|o| o.difference(&granted).cloned().collect())
                 .unwrap_or_default();
-            table.insert(username.to_string(), granted);
+            table.insert(username.to_string(), granted); // 基准更新为最新清单
             revoke
         };
         for name in to_revoke {

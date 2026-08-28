@@ -1,21 +1,24 @@
 //! ============================================================================
-//! sync.rs —— 用户/共享/ACL 同步(驱动桶实例注册表 + ConfigHandle)
+//! sync.rs —— 共享对账 + 增量推送 + 认证用户周期刷新
 //! ============================================================================
 //!
-//! 数据流(用户维度已改为"按需缓存",见 user_cache.rs):
+//! 数据流(用户维度已改为"按需缓存 + 认证用户周期刷新",见 user_cache.rs):
 //! ```text
-//!   Go 网关(权威源:users/buckets/ACL 表)
-//!      │ ① 启动/重连:MSG_OPERATE(CodeAuthSnapshot) 全量快照(仅取共享段)
-//!      │ ② 常驻:MSG_AUTH_PUSH 增量变更(用户/共享/ACL upsert|delete)
-//!      │ ③ 按需:MSG_OPERATE(CodeAuthQueryUser) 认证未命中时拉单用户
+//!   Go 网关(权威源:users/buckets 表)
+//!      │ ① 启动/重连:MSG_OPERATE(CodeAuthSnapshot) 全量快照(仅共享段)
+//!      │ ② 常驻:MSG_AUTH_PUSH 增量变更(共享/ACL upsert|delete)
+//!      │ ③ 按需:MSG_OPERATE(CodeAuthQueryUser/Acl) 认证时拉单用户
 //!      ▼
 //!   sync.rs ──► BucketRegistry(桶实例表,一个桶 = 一台 SMB 服务端)
 //!      │           │  桶实例增删查 + 桶级元数据(配额/状态)
 //!      │           ▼  同步调用
 //!      │        ConfigHandle(add_user_nt_hash / add_share / grant...)
 //!      ▼
-//!   用户表:不再全量镜像,认证时经 UserCache 按需拉取并写入内存表;
-//!   桶(共享)一律经注册表 upsert/delete(保持全量对账)。
+//!   用户维度:
+//!     - 认证时经 UserCache 按需拉取凭据 + 授权(连接用户维度);
+//!     - 周期刷新(本模块 ticker):对**认证过的用户**逐个重拉凭据/ACL,
+//!       收敛改密/禁用/权限变更(窗口 = 对账周期);
+//!   桶(共享)一律经注册表 upsert/delete(保持全量清单对账)。
 //! ```
 
 use std::sync::Arc; // Arc:连接/注册表跨任务共享

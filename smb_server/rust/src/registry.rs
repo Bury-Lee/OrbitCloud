@@ -13,6 +13,28 @@
 //!      ▼
 //!   BucketInstance(桶的运行时形态:后端 + 桶级元数据 + 库级共享)
 //! ```
+//!
+//! ## ACL 数据流(三处必须保持一致,缺一不可)
+//!
+//! ```text
+//!   权威:Go 网关(QUERY_ACL 按用户返回可见共享清单)
+//!     │ 认证时按需拉取(user_cache.ensure_user_acl)
+//!     ▼
+//!   ① 协议层 ACL(ShareBindings.acl,patched-ixr 树连接校验的真相)
+//!     ▲ ② 独立底账(acl_map,重建时的 legacy 来源)── grant_user/revoke_user 双写
+//!     │
+//!     └── ③ 快照对账重建(upsert 重建路径):legacy(底账)+ info.users(快照)
+//!              合并后:重建协议层授权 + 写回底账(保持 ①② 同步)
+//! ```
+//!
+//! 一致性要点:
+//! - **协议层 ACL 是认证/树连接的判定真相**(TREE_CONNECT 读它);
+//! - **acl_map 底账是重建时的 legacy 来源**:快照不再携带聚合 ACL,
+//!   重建若以"本次 upsert 的 info.users"为基底,会把多用户授权清成
+//!   单用户(静默丢失);底账必须始终 = 协议层授权的完整镜像;
+//! - 因此 grant_user/revoke_user 必须**双写**(协议层 + 底账),且不能依赖
+//!   BucketInstance(Arc 共享不可变)内部字段——底账独立成 map 才能无
+//!   条件同步。
 
 use std::collections::HashMap; // HashMap:注册表底层容器(共享名 → 实例)
 use std::sync::Arc; // Arc:实例共享所有权(多任务并发持有)
@@ -32,8 +54,6 @@ pub struct BucketInstance {
     pub bucket_name: String,
     /// 共享级默认权限:"readwrite" | "readonly"。
     pub mode: String,
-    /// ACL 用户清单(用户名 → 访问级别;空 = 仅 mode 生效)。
-    pub users: HashMap<String, Access>,
     /// 桶容量配额(字节;0 = 不限;FS_SIZE_INFORMATION 上报)。
     pub quota: u64,
     /// 桶已用空间(字节;上报剩余容量)。
@@ -71,6 +91,11 @@ impl BucketInstance {
 pub struct BucketRegistry {
     /// 实例表:共享名 → 桶实例(Arc 共享,后端/库共享可被多任务并发使用)。
     inner: tokio::sync::RwLock<HashMap<String, Arc<BucketInstance>>>, // 异步读写锁:读多写少
+    /// ACL 底账:共享名 → (用户名 → 访问级别)。
+    /// 独立于 BucketInstance(实例是 Arc 共享的不可变元数据;ACL 由认证
+    /// 按需授权动态增删,放这里避免依赖 Arc 唯一引用的 get_mut,也保证
+    /// 重建时的 legacy 始终是完整授权,多用户不丢、已撤销不复活)。
+    acl_map: tokio::sync::RwLock<HashMap<String, HashMap<String, Access>>>,
     /// 用户名 → users.id 索引(构造 RemoteBackend 时注入,操作身份映射)。
     users: UserIDIndex,
 }
@@ -86,6 +111,7 @@ impl BucketRegistry {
         Self {
             inner: tokio::sync::RwLock::new(HashMap::new()), // 空 map + 锁
             users: UserIDIndex::new(), // 用户名 → users.id 索引(操作身份)
+            acl_map: tokio::sync::RwLock::new(HashMap::new()), // 独立 ACL 底账
         }
     }
 
@@ -126,21 +152,18 @@ impl BucketRegistry {
         // 定时对账(apply_snapshot)会反复 upsert 全部共享;若定义未变仍走
         // remove_share + add_share,库侧 remove_share 会关闭该共享全部活跃
         // 树连接(server.rs close_trees_for_share),导致周期踢掉所有客户端。
+        // ACL 底账在独立 acl_map(本路径不动;info.users 是"本次触发 upsert
+        // 的用户"单用户视角,绝不写底账)。
         {
             let map = self.inner.read().await; // 取读锁查现有实例
             if let Some(existing) = map.get(&info.share_name) { // 已有同名单实例?
                 if existing.same_definition(info) { // 定义(名/桶/模式/状态)未变?
-                    // 保留现有 ACL 底账:info.users 是"本次触发 upsert 的用户"
-                    // (认证时 QUERY_ACL 单用户视角),覆盖会导致多用户授权在
-                    // 重建时静默丢失(legacy 只剩最后触发者)。
-                    let existing_users = existing.users.clone();
                     drop(map); // 释放读锁(下面取写锁覆盖实例)
                     let inst = Arc::new(BucketInstance { // 构造仅元数据刷新的新实例
                         share_name: info.share_name.clone(), // 共享名
                         bucket_id: info.bucket_id, // 桶主键
                         bucket_name: info.bucket_name.clone(), // 桶显示名
                         mode: info.mode.clone(), // 权限模式
-                        users: existing_users, // 保留现有 ACL(多用户授权不丢)
                         quota: info.quota as u64, // 配额(可能已变)
                         used_space: info.used_space as u64, // 已用空间(可能已变)
                         status: info.status, // 桶状态
@@ -155,17 +178,18 @@ impl BucketRegistry {
             }
         }
 
-        // 合并 ACL:保留旧实例已按需授权的用户(快照 ACL 为空,认证时经
-        // QUERY_ACL 动态授权;重建不清空,否则已认证用户全部失去访问权),
-        // 叠加快照携带的用户(协议兼容)。
+        // ---- 重建路径:定义变化(模式/状态等)→ 协议层共享整体重建 ----
+        // 重建 = remove_share + add_share(新协议层 ACL 为空)+ 逐用户重新授权。
+        // 授权基底必须 = 完整授权,而不是"本次 upsert 的 info.users":
+        //   - info.users 是触发本次 upsert 的来源(快照对账 = 空;
+        //     认证按需 = 仅该用户),直接用它重建会把多用户授权清成单用户;
+        //   - 因此基底取独立底账 acl_map(认证时 grant_user/revoke_user 维护,
+        //     始终 = 协议层授权的完整镜像),再叠加快照携带的用户(协议兼容)。
         let legacy_acl: std::collections::HashMap<String, Access> = {
-            let map = self.inner.read().await; // 取读锁查旧实例
-            map.get(&info.share_name)
-                .map(|e| e.users.clone()) // 旧实例 ACL(按需授权结果)
-                .unwrap_or_default() // 无旧实例 = 空
+            self.acl_map.read().await.get(&info.share_name).cloned().unwrap_or_default()
         };
-        let mut merged_users = legacy_acl; // 以旧授权为基底
-        for u in &info.users { // 叠加快照用户
+        let mut merged_users = legacy_acl; // 重建基底 = 独立底账(完整授权)
+        for u in &info.users { // 叠加快照携带的用户(增量授权)
             merged_users.insert(u.username.clone(), access_from_str(&u.access));
         }
 
@@ -176,7 +200,6 @@ impl BucketRegistry {
             bucket_id: info.bucket_id, // 桶主键
             bucket_name: info.bucket_name.clone(), // 桶显示名
             mode: info.mode.clone(), // 共享默认权限模式
-            users: merged_users.clone(), // 合并后的 ACL(旧授权 + 快照)
             quota: info.quota as u64, // 容量配额
             used_space: info.used_space as u64, // 已用空间
             status: info.status, // 桶状态
@@ -194,7 +217,8 @@ impl BucketRegistry {
             .add_share(share) // 注册新共享(要求用户已注册)
             .await
             .map_err(|e| format!("注册表:注册共享 {} 失败:{:?}", info.share_name, e))?; // 注册失败终止
-        for (username, acc) in &merged_users { // 逐用户授予访问权限(合并后的 ACL)
+        // 逐用户授予访问权限(合并后的 ACL:legacy 底账 + 快照用户)
+        for (username, acc) in &merged_users {
             config
                 .grant_share_user(&info.share_name, username, *acc) // 授权:用户名 → 共享
                 .await
@@ -210,6 +234,10 @@ impl BucketRegistry {
             let mut map = self.inner.write().await; // 取写锁
             map.insert(info.share_name.clone(), inst); // 写入/覆盖实例(保持"共享名→最新实例"唯一映射)
         }
+        // 重建后把 merged 授权写回独立底账:此时协议层授权 = merged_users
+        // (上方逐用户 grant),底账同步回写使两者一致——后续 grant_user/
+        // revoke_user 从这一致状态继续双写。
+        self.acl_map.write().await.insert(info.share_name.clone(), merged_users);
         infof!(
             "注册表:共享 {} (桶 {}) 已上线,{} 个用户", // 记录 upsert 结果(便于排查)
             &["SMB"], // 前缀标签
@@ -233,13 +261,19 @@ impl BucketRegistry {
             let mut map = self.inner.write().await; // 取写锁
             map.remove(share_name); // 从注册表移除实例(此后 TREE_CONNECT 该名 → 未知共享被拒)
         }
+        self.acl_map.write().await.remove(share_name); // 清理独立 ACL 底账
         infof!("注册表:共享 {} 已下线", &["SMB"], share_name); // 记录下线
         Ok(())
     }
 
-    /// 授权用户访问共享(认证按需授权/周期刷新):协议层 ACL 写入 + 实例
-    /// ACL 底账同步(重建 legacy 的来源,必须与协议层一致,否则多用户授权
-    /// 在重建时会静默丢失)。
+    /// 授权用户访问共享(认证按需授权/周期刷新)。
+    ///
+    /// **必须双写**:
+    ///   ① 协议层 ACL(grant_share_user)——TREE_CONNECT 判定真相,立即生效;
+    ///   ② 独立底账 acl_map——下次重建(定义变化触发 remove_share+add_share)
+    ///      的 legacy 基底。只写①不写②,重建时该用户授权会静默丢失;
+    ///      只写②不写①,授权不生效。底账独立成 map 而非 BucketInstance
+    ///      内部字段,是因为实例是 Arc 共享的不可变元数据,无法可靠原地修改。
     pub async fn grant_user(
         &self,
         share_name: &str,
@@ -247,44 +281,48 @@ impl BucketRegistry {
         access: Access,
         config: &ConfigHandle,
     ) -> Result<(), String> {
+        // ① 协议层 ACL 写入(立即生效;校验用户已注册)
         config
             .grant_share_user(share_name, username, access)
             .await
             .map_err(|e| format!("注册表:授权 {} 于 {} 失败:{e:?}", username, share_name))?;
-        self.sync_instance_user(share_name, username, true).await; // 实例 ACL 同步写入
+        // ② 独立底账写入(重建 legacy 基底;entry 不存在则创建)
+        self.acl_map
+            .write()
+            .await
+            .entry(share_name.to_string())
+            .or_default()
+            .insert(username.to_string(), access);
         Ok(())
     }
 
-    /// 撤销用户对共享的访问(权限收紧/删号清理):协议层 ACL 移除 + 实例
-    /// ACL 底账同步(与 grant_user 对称,防重建时已撤销授权"复活")。
+    /// 撤销用户对共享的访问(权限收紧/删号清理)。
+    ///
+    /// 与 grant_user 对称的双写:
+    ///   ① 协议层 ACL 移除(立即生效:该用户 TREE_CONNECT 被拒);
+    ///   ② 独立底账移除——只写①不写②,下次重建时 legacy 仍含该用户,
+    ///      已撤销的授权会在重建中"复活"。
+    /// 底账条目清空后删除该共享键,防无授权共享残留膨胀。
     pub async fn revoke_user(
         &self,
         share_name: &str,
         username: &str,
         config: &ConfigHandle,
     ) -> Result<(), String> {
+        // ① 协议层 ACL 移除(立即生效)
         config
             .revoke_share_user(share_name, username)
             .await
             .map_err(|e| format!("注册表:撤销 {} 于 {} 失败:{e:?}", username, share_name))?;
-        self.sync_instance_user(share_name, username, false).await; // 实例 ACL 同步移除
-        Ok(())
-    }
-
-    /// 同步实例 ACL 底账:grant=true 写入,grant=false 移除。
-    /// Arc::get_mut 失败(实例被其他引用持有)时保守跳过——协议层 ACL 已生效,
-    /// 底账在下次重建时以协议层为准收敛。
-    async fn sync_instance_user(&self, share_name: &str, username: &str, grant: bool) {
-        let mut map = self.inner.write().await;
-        if let Some(inst) = map.get_mut(share_name) {
-            if let Some(inner) = Arc::get_mut(inst) {
-                if grant {
-                    inner.users.insert(username.to_string(), Access::ReadWrite);
-                } else {
-                    inner.users.remove(username);
-                }
+        // ② 独立底账移除(防重建"复活")
+        let mut map = self.acl_map.write().await;
+        if let Some(users) = map.get_mut(share_name) {
+            users.remove(username);
+            if users.is_empty() {
+                map.remove(share_name); // 无授权残留:删除键防膨胀
             }
         }
+        Ok(())
     }
 
     /// 全量快照替换(启动/重连/定期对账时由 sync 调用)。
