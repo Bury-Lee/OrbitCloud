@@ -15,7 +15,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"orbitcloud/common"
 	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/model"
@@ -24,31 +23,6 @@ import (
 
 // recyclePurgeBatch 单批扫描上限(防一次查询过载;循环直到清完)。
 const recyclePurgeBatch = 100
-
-// ListRecycleBinArg 回收站列表入参。
-type ListRecycleBinArg struct {
-	UserID uint           // 归属者 users.id(仅查自己的回收站)
-	Opt    *common.Option // 分页参数(common.ParseOption 从查询参数构造;nil = 默认第一页)
-}
-
-// ListRecycleBin 分页查询用户自己的回收站文件(软删行,deleted_at 倒序,
-// 统一走 common.PageQuery,响应含 total/total_pages/has_more/next_cursor,
-// 供回收站相关接口(含后续提前删除)共用同一分页形态)。
-// 他人归属/未删除的文件不出现。
-func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (*common.PaginatedResult[model.File], error) {
-	opt := arg.Opt
-	if opt == nil {
-		opt = common.NewOption(1, 10)
-	}
-	opt.DefaultOrder = "deleted_at DESC, id DESC"
-	opt.Filters = []func(*gorm.DB) *gorm.DB{
-		func(db *gorm.DB) *gorm.DB {
-			// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤)
-			return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID)
-		},
-	}
-	return common.PageQuery(model.File{}, *opt, nil)
-}
 
 // CleanExpiredRecycleBinArg 回收站过期清理入参。
 type CleanExpiredRecycleBinArg struct {

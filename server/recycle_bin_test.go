@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"orbitcloud/common"
 	"orbitcloud/core"
 	"orbitcloud/model"
 	"orbitcloud/utils"
@@ -168,73 +167,5 @@ func TestCleanExpiredRecycleBin(t *testing.T) {
 	// 幂等:再跑一轮无更多可清条目
 	if _, _, err := CleanExpiredRecycleBin(ctx, CleanExpiredRecycleBinArg{Cutoff: time.Now().AddDate(0, 0, -30)}); err != nil {
 		t.Fatalf("re-clean: %v", err)
-	}
-}
-
-// TestListRecycleBin 回收站查询:只返回"已删除且归属自己"的文件,
-// 他人归属/未删除的文件不出现;deleted_at 倒序,common.Paginate 分页封装生效。
-func TestListRecycleBin(t *testing.T) {
-	newP0TestDB(t)
-	ctx := context.Background()
-	admin := mkUserP0(t, "rbq-admin", model.Admin)
-	u2 := mkUserP0(t, "rbq-u2", model.NormalUser)
-	b := mkBucketP0(t, "rbq-bucket", model.NormalUser, admin.ID)
-
-	// 自己的回收站文件 ×2(先删的 deleted_at 更早,期望倒序后在后)
-	own1 := mkFileP0(t, b.ID, 0, "own1.txt", 10)
-	own2 := mkFileP0(t, b.ID, 0, "own2.txt", 20)
-	// 他人归属的文件(u2 删除)
-	other := mkFileP0(t, b.ID, 0, "other.txt", 30)
-	// 自己未删除的文件(不应出现在回收站)
-	active := mkFileP0(t, b.ID, 0, "active.txt", 40)
-	_ = active
-	core.DB.Model(&model.File{}).Where("id = ?", other.ID).Update("uploaded_by", u2.ID)
-
-	for _, f := range []*model.File{own1, other} {
-		if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f.ID}); err != nil {
-			t.Fatalf("delete %d: %v", f.ID, err)
-		}
-	}
-	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: own2.ID}); err != nil {
-		t.Fatalf("delete own2: %v", err)
-	}
-	// 错开删除时间(own1 更早),保证 deleted_at 倒序断言确定性
-	backdateSoftDelete(t, &model.File{}, own1.ID, time.Now().Add(-time.Hour))
-	// active 不删
-
-	// 自己的回收站:own1/own2(deleted_at 倒序 → own2 在前),common.Paginate 封装
-	res, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Opt: common.NewOption(1, 50)})
-	if err != nil {
-		t.Fatalf("list recycle bin: %v", err)
-	}
-	if len(res.List) != 2 || res.TotalPages != 1 || res.HasMore {
-		t.Fatalf("list = %d items / pages %d / has_more %v, want 2 / 1 / false", len(res.List), res.TotalPages, res.HasMore)
-	}
-	if res.List[0].ID != own2.ID || res.List[1].ID != own1.ID {
-		t.Fatalf("order = [%d, %d], want [own2, own1](deleted_at 倒序)", res.List[0].ID, res.List[1].ID)
-	}
-	// 软删行(带 deleted_at 供前端展示删除时间)
-	for i := range res.List {
-		if !res.List[i].DeletedAt.Valid {
-			t.Fatalf("file %d missing deleted_at", res.List[i].ID)
-		}
-	}
-
-	// 他人视角:只看到自己归属的 other
-	res2, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: u2.ID, Opt: common.NewOption(1, 50)})
-	if err != nil {
-		t.Fatalf("list recycle bin (u2): %v", err)
-	}
-	if len(res2.List) != 1 || res2.List[0].ID != other.ID {
-		t.Fatalf("u2 recycle = %+v, want [other]", res2.List)
-	}
-
-	// 分页:page_size=1 只回一页,total_pages=2 / has_more
-	paged, err := ListRecycleBin(ctx, ListRecycleBinArg{UserID: admin.ID, Opt: common.NewOption(1, 1)})
-	if err != nil {
-		t.Fatalf("paged list: %v", err)
-	}
-	if len(paged.List) != 1 || paged.List[0].ID != own2.ID || paged.TotalPages != 2 || !paged.HasMore {
-		t.Fatalf("page1 = %+v(pages %d, has_more %v), want [own2] / 2 pages / has more", paged.List, paged.TotalPages, paged.HasMore)
 	}
 }

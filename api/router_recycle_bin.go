@@ -5,5 +5,6 @@ import "github.com/gin-gonic/gin"
 
 // RecycleBinRouter 注册回收站模块路由(全部需 AuthMiddleware)。
 func RecycleBinRouter(authed *gin.RouterGroup) {
-	authed.GET("/recycle-bin", AuthMiddleware, App.RecycleBin.ListRecycleBin)
+	authed.GET("/recycle-bin/files", AuthMiddleware, App.RecycleBin.ListRecycleFile)
+	authed.GET("/recycle-bin/folders", AuthMiddleware, App.RecycleBin.ListRecycleFolder)
 }

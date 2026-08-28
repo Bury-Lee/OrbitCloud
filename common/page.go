@@ -17,12 +17,12 @@ import (
 // PageInfo 通用分页请求参数
 type PageInfo struct {
 	// 游标定位
-	Cursor int64 `json:"cursor"` // 起始游标(从这条记录开始)
+	Cursor int64 `json:"cursor" form:"cursor"` // 起始游标(从这条记录开始)
 	// 页码偏移
-	Page     int    `json:"page"`      // 从 cursor 开始的第几页(从 1 开始)
-	PageSize int    `json:"page_size"` // 每页条数
-	Key      string // 模糊匹配关键词
-	Order    string // 排序方式
+	Page     int    `json:"page" form:"page"`         // 从 cursor 开始的第几页(从 1 开始)
+	PageSize int    `json:"page_size" form:"page_size"` // 每页条数
+	Key      string `json:"key" form:"key"`           // 模糊匹配关键词
+	Order    string `json:"order" form:"order"`       // 排序方式
 }
 
 // TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段),独立字段
