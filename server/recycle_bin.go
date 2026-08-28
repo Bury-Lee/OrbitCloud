@@ -57,17 +57,22 @@ type CleanExpiredRecycleBinArg struct {
 }
 
 // CleanExpiredRecycleBin 物理清除超过保留期的回收站条目。
-// 先清过期文件(逐条),再清过期目录(整棵子树深度优先);分批执行直到清完。
-// 返回清除的文件/文件夹行数;单条失败即中止(已清部分生效,下次续跑)。
+// 先清过期文件(逐条),再清过期目录(整棵子树深度优先);分批 keyset 游标累计
+// (id 升序,每批只扫游标之后增量,避免从头全表扫描)。返回清除的文件/文件夹行数;
+// 单条失败即中止(已清部分生效,下次续跑)。
 func CleanExpiredRecycleBin(ctx context.Context, arg CleanExpiredRecycleBinArg) (files, folders int64, err error) {
 	cutoff := arg.Cutoff
 
 	// 1. 过期文件(软删行,deleted_at < cutoff):分批逐条物理清除
+	var lastFileID uint
 	for {
 		var rows []model.File
-		if err := core.DB.WithContext(ctx).Unscoped().
-			Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).
-			Order("deleted_at ASC").Limit(recyclePurgeBatch).Find(&rows).Error; err != nil {
+		q := core.DB.WithContext(ctx).Unscoped().Model(&model.File{}).
+			Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff)
+		if lastFileID > 0 {
+			q = q.Where("id > ?", lastFileID)
+		}
+		if err := q.Order("id ASC").Limit(recyclePurgeBatch).Find(&rows).Error; err != nil {
 			return files, folders, fmt.Errorf("clean recycle bin: query files: %w", err)
 		}
 		if len(rows) == 0 {
@@ -79,17 +84,22 @@ func CleanExpiredRecycleBin(ctx context.Context, arg CleanExpiredRecycleBinArg) 
 			}
 			files++
 		}
+		lastFileID = rows[len(rows)-1].ID
 		if len(rows) < recyclePurgeBatch {
 			break // 不足一批 = 已清完
 		}
 	}
 
 	// 2. 过期目录(软删行):整棵子树物理清除(含未逐条标记的子孙)
+	var lastFolderID uint
 	for {
 		var rows []model.Folder
-		if err := core.DB.WithContext(ctx).Unscoped().
-			Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).
-			Order("deleted_at ASC").Limit(recyclePurgeBatch).Find(&rows).Error; err != nil {
+		q := core.DB.WithContext(ctx).Unscoped().Model(&model.Folder{}).
+			Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff)
+		if lastFolderID > 0 {
+			q = q.Where("id > ?", lastFolderID)
+		}
+		if err := q.Order("id ASC").Limit(recyclePurgeBatch).Find(&rows).Error; err != nil {
 			return files, folders, fmt.Errorf("clean recycle bin: query folders: %w", err)
 		}
 		if len(rows) == 0 {
@@ -101,6 +111,7 @@ func CleanExpiredRecycleBin(ctx context.Context, arg CleanExpiredRecycleBinArg) 
 			}
 			folders++
 		}
+		lastFolderID = rows[len(rows)-1].ID
 		if len(rows) < recyclePurgeBatch {
 			break
 		}
