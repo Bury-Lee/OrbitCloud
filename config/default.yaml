@@ -26,7 +26,7 @@ app:
 
   # 版本号(与 --version 输出一致)
   # 类型: string | 可选 | 默认: 0.1.0
-  version: 1.4.4
+  version: 1.4.5
 
   # 运行环境
   # 类型: string | 可选 | 默认: dev | 取值: dev | test | prod

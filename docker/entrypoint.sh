@@ -20,7 +20,7 @@ def() {
 
 # ---- app ----
 def ORBITCLOUD_APP_NAME        "orbitcloud"
-def ORBITCLOUD_APP_VERSION     "1.4.4"
+def ORBITCLOUD_APP_VERSION     "1.4.5"
 def ORBITCLOUD_APP_ENVIRONMENT "prod"
 def ORBITCLOUD_APP_DEBUG       "false"
 def ORBITCLOUD_APP_TIMEZONE     "Asia/Shanghai"
