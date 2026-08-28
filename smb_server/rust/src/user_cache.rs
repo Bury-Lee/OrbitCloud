@@ -106,14 +106,14 @@ impl UserCache {
                 if let Err(e) = handle.remove_user(username).await {
                     warnf!("缓存:移除用户 {username} 失败:{e:?}", &["SMB"]);
                 }
-                // 全量 revoke 该用户已授权共享
+                // 全量 revoke 该用户已授权共享(经注册表包装,实例底账同步)
                 let to_revoke: Vec<String> = {
                     let mut table = self.acl_table.lock().unwrap();
                     table.remove(username).unwrap_or_default().into_iter().collect()
                 };
                 for name in to_revoke {
-                    if let Err(e) = handle.revoke_share_user(&name, username).await {
-                        warnf!("缓存:用户 {username} 撤销 {name} 失败:{e:?}", &["SMB"]);
+                    if let Err(e) = registry.revoke_user(&name, username, handle).await {
+                        warnf!("缓存:用户 {username} 撤销 {name} 失败:{e}", &["SMB"]);
                     }
                 }
                 self.auth_users.lock().unwrap().remove(username);
@@ -212,11 +212,12 @@ impl UserCache {
                 warnf!("缓存:用户 {username} 授权 {} upsert 失败:{e}", &["SMB"], s.share_name);
                 continue;
             }
-            if let Err(e) = handle
-                .grant_share_user(&s.share_name, username, access_from_str(&s.mode))
+            // 经注册表包装授权(协议层 ACL + 实例底账同步,重建不丢授权)
+            if let Err(e) = registry
+                .grant_user(&s.share_name, username, access_from_str(&s.mode), handle)
                 .await
             {
-                warnf!("缓存:用户 {username} 授权 {} 失败:{e:?}", &["SMB"], s.share_name);
+                warnf!("缓存:用户 {username} 授权 {} 失败:{e}", &["SMB"], s.share_name);
             }
         }
         // diff:上轮已授权但本轮不再可见 → revoke(权限收紧即时)
@@ -231,8 +232,8 @@ impl UserCache {
             revoke
         };
         for name in to_revoke {
-            if let Err(e) = handle.revoke_share_user(&name, username).await {
-                warnf!("缓存:用户 {username} 撤销 {name} 失败:{e:?}", &["SMB"]);
+            if let Err(e) = registry.revoke_user(&name, username, handle).await {
+                warnf!("缓存:用户 {username} 撤销 {name} 失败:{e}", &["SMB"]);
             }
         }
     }

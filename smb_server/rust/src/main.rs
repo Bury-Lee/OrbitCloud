@@ -105,6 +105,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 认证在运行期发生,届时从槽位取已填充的句柄。
     let handle_slot: Arc<std::sync::Mutex<Option<ConfigHandle>>> =
         Arc::new(std::sync::Mutex::new(None));
+    // 当前连接槽位:断线重连由监督任务替换新连接,resolver 每次认证从槽位取
+    // 最新连接(避免持死旧连接导致重连后认证全部失败)。
+    let conn_slot: Arc<std::sync::Mutex<Arc<GatewayClient>>> =
+        Arc::new(std::sync::Mutex::new(Arc::clone(&conn)));
     let server: SmbServer = SmbServer::builder() // 构建 SMB 服务端
         .listen(listen) // 监听地址(如 0.0.0.0:2445)
         .netbios_name(&cfg.smb.netbios_name) // NetBIOS 显示名
@@ -115,12 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             //      (注册表 upsert + grant;权限收紧即时 revoke)。
             let registry2 = Arc::clone(&registry);
             let cache2 = user_cache.clone();
-            let conn2 = Arc::clone(&conn);
+            let conn2 = Arc::clone(&conn_slot);
             let handle2 = Arc::clone(&handle_slot);
             move |username: String| {
                 let registry3 = Arc::clone(&registry2);
                 let cache3 = cache2.clone();
-                let conn3 = Arc::clone(&conn2);
+                // 取当前连接(重连后自动指向新连接);先克隆出锁作用域再 await
+                let conn3 = conn2.lock().unwrap().clone();
                 let handle3 = Arc::clone(&handle2);
                 Box::pin(async move {
                     let Some(cached) = cache3
@@ -174,6 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_id2 = client_id.clone(); // 预克隆客户端标识(重连握手用)
     let chbuf = cfg.gateway.channel_buffer; // 预取管道容量(重连建管道用)
     let rpc_timeout2 = rpc_timeout; // 预取 RPC 超时(重连建客户端用)
+    let conn_slot2 = Arc::clone(&conn_slot); // 连接槽位(重连成功后同步,resolver 取用)
     {
         let registry2 = Arc::clone(&registry); // 克隆注册表引用给同步任务
         let handle2 = handle.clone(); // 克隆配置句柄给同步任务
@@ -201,6 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match GatewayClient::connect(&addr, key2.clone(), client_id2.clone(), chbuf, rpc_timeout2).await { // 重连+握手
                 Ok((new_conn, new_push_rx)) => { // 重连成功
                     current = Arc::clone(&new_conn); // 换用新连接(后续轮询检查它)
+                    *conn_slot2.lock().unwrap() = Arc::clone(&new_conn); // 同步连接槽位(resolver 用)
                     if let Some(t) = sync_task.take() { // 取出旧同步任务句柄
                         t.abort(); // 终止旧任务(绑定的是已死连接)
                     }

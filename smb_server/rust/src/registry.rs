@@ -129,18 +129,18 @@ impl BucketRegistry {
         {
             let map = self.inner.read().await; // 取读锁查现有实例
             if let Some(existing) = map.get(&info.share_name) { // 已有同名单实例?
-                if existing.same_definition(info) { // 定义(名/桶/模式/ACL)未变?
+                if existing.same_definition(info) { // 定义(名/桶/模式/状态)未变?
+                    // 保留现有 ACL 底账:info.users 是"本次触发 upsert 的用户"
+                    // (认证时 QUERY_ACL 单用户视角),覆盖会导致多用户授权在
+                    // 重建时静默丢失(legacy 只剩最后触发者)。
+                    let existing_users = existing.users.clone();
                     drop(map); // 释放读锁(下面取写锁覆盖实例)
                     let inst = Arc::new(BucketInstance { // 构造仅元数据刷新的新实例
                         share_name: info.share_name.clone(), // 共享名
                         bucket_id: info.bucket_id, // 桶主键
                         bucket_name: info.bucket_name.clone(), // 桶显示名
                         mode: info.mode.clone(), // 权限模式
-                        users: info // ACL(与旧实例一致,直接重建)
-                            .users
-                            .iter()
-                            .map(|u| (u.username.clone(), access_from_str(&u.access)))
-                            .collect(),
+                        users: existing_users, // 保留现有 ACL(多用户授权不丢)
                         quota: info.quota as u64, // 配额(可能已变)
                         used_space: info.used_space as u64, // 已用空间(可能已变)
                         status: info.status, // 桶状态
@@ -222,9 +222,9 @@ impl BucketRegistry {
 
     /// 删除/下线桶实例(删桶、桶禁用时由 sync 调用)。
     ///
-    /// 返回值:Ok(());Err(库移除失败——不存在视为成功)。
+    /// 返回:Ok(());Err(库移除失败——不存在视为成功)。
     pub async fn delete(&self, share_name: &str, config: &ConfigHandle) -> Result<(), String> {
-        if let Err(e) = config.remove_share(share_name).await { // 协议层移除:库自动关闭该共享全部活跃树连接
+        if let Err(e) = config.remove_share(share_name).await { // 协议层移除(库自动关闭该共享全部活跃树连接)
             if !format!("{:?}", e).contains("UnknownShare") { // 非"不存在"错误?
                 return Err(format!("注册表:移除共享 {} 失败:{:?}", share_name, e)); // 真实错误:终止
             }
@@ -235,6 +235,56 @@ impl BucketRegistry {
         }
         infof!("注册表:共享 {} 已下线", &["SMB"], share_name); // 记录下线
         Ok(())
+    }
+
+    /// 授权用户访问共享(认证按需授权/周期刷新):协议层 ACL 写入 + 实例
+    /// ACL 底账同步(重建 legacy 的来源,必须与协议层一致,否则多用户授权
+    /// 在重建时会静默丢失)。
+    pub async fn grant_user(
+        &self,
+        share_name: &str,
+        username: &str,
+        access: Access,
+        config: &ConfigHandle,
+    ) -> Result<(), String> {
+        config
+            .grant_share_user(share_name, username, access)
+            .await
+            .map_err(|e| format!("注册表:授权 {} 于 {} 失败:{e:?}", username, share_name))?;
+        self.sync_instance_user(share_name, username, true).await; // 实例 ACL 同步写入
+        Ok(())
+    }
+
+    /// 撤销用户对共享的访问(权限收紧/删号清理):协议层 ACL 移除 + 实例
+    /// ACL 底账同步(与 grant_user 对称,防重建时已撤销授权"复活")。
+    pub async fn revoke_user(
+        &self,
+        share_name: &str,
+        username: &str,
+        config: &ConfigHandle,
+    ) -> Result<(), String> {
+        config
+            .revoke_share_user(share_name, username)
+            .await
+            .map_err(|e| format!("注册表:撤销 {} 于 {} 失败:{e:?}", username, share_name))?;
+        self.sync_instance_user(share_name, username, false).await; // 实例 ACL 同步移除
+        Ok(())
+    }
+
+    /// 同步实例 ACL 底账:grant=true 写入,grant=false 移除。
+    /// Arc::get_mut 失败(实例被其他引用持有)时保守跳过——协议层 ACL 已生效,
+    /// 底账在下次重建时以协议层为准收敛。
+    async fn sync_instance_user(&self, share_name: &str, username: &str, grant: bool) {
+        let mut map = self.inner.write().await;
+        if let Some(inst) = map.get_mut(share_name) {
+            if let Some(inner) = Arc::get_mut(inst) {
+                if grant {
+                    inner.users.insert(username.to_string(), Access::ReadWrite);
+                } else {
+                    inner.users.remove(username);
+                }
+            }
+        }
     }
 
     /// 全量快照替换(启动/重连/定期对账时由 sync 调用)。
