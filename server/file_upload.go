@@ -26,10 +26,11 @@ import (
 
 // UploadFileArg 上传文件入参。
 type UploadFileArg struct {
-	UserID   uint      // 操作者 users.id
-	BucketID uint      // 目标桶 buckets.id
-	DirPath  string    // 目标目录路径(mkdir -p;空串 = 桶根)
-	Filename string    // 文件名(经 ValidateItemName 校验)
+	UserID   uint   // 操作者 users.id
+	BucketID uint   // 目标桶 buckets.id
+	DirPath  string // 目标目录路径(mkdir -p;空串 = 桶根)
+	Filename string // 文件名(经 ValidateItemName 校验)
+	FileType string
 	Reader   io.Reader // 文件内容流
 }
 
@@ -112,7 +113,7 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 		FolderID:   folderID,
 		Name:       name,
 		FileSize:   size,
-		FileType:   mime.TypeByExtension(filepath.Ext(name)),
+		FileType:   arg.FileType,
 		MD5:        md5Hex,
 		UploadedBy: userID,
 	}

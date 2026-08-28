@@ -70,7 +70,10 @@ func (FileAPI) UploadFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	f, err := server.UploadFile(ctx, server.UploadFileArg{UserID: userID, BucketID: bucketID, DirPath: dirPath, Filename: fh.Filename, Reader: file})
+	f, err := server.UploadFile(ctx, server.UploadFileArg{
+		UserID: userID, BucketID: bucketID, DirPath: dirPath,
+		Filename: fh.Filename, FileType: c.PostForm("file_type"), Reader: file,
+	})
 	if err != nil {
 		respondError(c, err)
 		return

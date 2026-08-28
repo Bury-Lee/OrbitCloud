@@ -3,6 +3,7 @@
 import axios from 'axios'
 import http from './http'
 import { TOKEN_KEY } from './http'
+import { simplifyFileType } from '@/utils/fileType'
 import type {
   BatchResult,
   BatchUploadResult,
@@ -108,6 +109,7 @@ export function uploadFile(
 ): Promise<FileItem> {
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('file_type', simplifyFileType(file.name)) // 简化 MIME,后端不存长串
   return http.post(`/buckets/${bucketId}/files`, fd, {
     params: { path: dirPath },
     headers: { 'Content-Type': 'multipart/form-data' },
