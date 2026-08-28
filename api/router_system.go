@@ -4,12 +4,12 @@ package api
 import "github.com/gin-gonic/gin"
 
 // SystemRouter 注册系统运维路由(管理员):状况查询、日志浏览/下载。
+// 中间件顺序:AuthMiddleware 必须先于 AdminMiddleware(组级参数按序执行)。
 func SystemRouter(authed *gin.RouterGroup) {
-	admin := authed.Group("")
-	admin.Use(AdminMiddleware)
+	admin := authed.Group("", AuthMiddleware, AdminMiddleware)
 	{
-		admin.GET("/system/status", AuthMiddleware, App.System.Status)
-		admin.GET("/logs", AuthMiddleware, App.System.ListLogs)
-		admin.GET("/logs/download", AuthMiddleware, App.System.DownloadLog)
+		admin.GET("/system/status", App.System.Status)
+		admin.GET("/logs", App.System.ListLogs)
+		admin.GET("/logs/download", App.System.DownloadLog)
 	}
 }
