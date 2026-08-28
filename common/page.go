@@ -115,6 +115,17 @@ func ParseOption(values url.Values) *Option {
 //	})
 //	res, err := common.PageQuery(model.ShareLink{}, *opt, nil)
 func PageQuery[T any](model T, opt Option, timeInfo *TimeInfo) (*PaginatedResult[T], error) {
+	// 分页参数归一(调用方直接构造 Option 时的防御:page<1 → 1,pageSize 0/负 → 10,超 100 → 100)
+	if opt.Page < 1 {
+		opt.Page = 1
+	}
+	if opt.PageSize <= 0 {
+		opt.PageSize = 10
+	}
+	if opt.PageSize > 100 {
+		opt.PageSize = 100
+	}
+
 	// 时间范围(created_at 闭区间;timeInfo 为 nil = 不限)
 	startTime, endTime := time.Time{}, time.Time{}
 	if timeInfo != nil {
