@@ -126,7 +126,7 @@
 |---|---|
 | POST `/buckets/:id/dirs` | 新建文件夹:`{"name", "path"?}`(mkdir -p 建父链) |
 | POST `/buckets/:id/dirs/:fid/move` | 移动/重命名文件夹 |
-| DELETE `/buckets/:id/dirs/:fid` | 删除文件夹:置 `isable=false` → 落 DeleteTask → 后台深度优先硬删(崩溃可续跑) |
+| DELETE `/buckets/:id/dirs/:fid` | 删除文件夹:置 `isable=false` + 软删进回收站(记录/对象/用量保留,超保留期由 cron 物理清除) |
 | POST `/buckets/:id/dirs/:fid/copy` | 复制文件夹(落 CopyTask 后台处理) |
 
 ### 文件操作
@@ -135,7 +135,7 @@
 |---|---|
 | POST `/buckets/:id/files/:fid/copy` | 复制:`{"target_folder_id"?}` |
 | POST `/buckets/:id/files/:fid/move` | 移动/重命名:`{"name"?, "target_folder_id"?}` |
-| DELETE `/buckets/:id/files/:fid` | 删除文件(立即删对象 + 记录) |
+| DELETE `/buckets/:id/files/:fid` | 删除文件:软删进回收站(记录/对象/用量保留,超保留期由 cron 物理清除) |
 
 ### 批量操作(≤ 100 条,逐条独立)
 
