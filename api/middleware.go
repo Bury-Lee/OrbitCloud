@@ -182,13 +182,16 @@ func RequestLogMiddleware(c *gin.Context) {
 //   - 池有界队列满时 SubmitCtx 阻塞 → 背压自然传导至 HTTP Server → 客户端。
 //   - 流式接口(下载/预览/流媒体/批量下载)不用此中间件,改用 StreamingPoolMiddleware。
 func ExecPoolMiddleware(c *gin.Context) {
-	done := make(chan struct{}, 1)
+	done := make(chan struct{})
 	core.ExecPool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+		defer close(done)
 		c.Next()
-		close(done)
 		return nil
 	}))
-	<-done
+	select {
+	case <-done:
+	case <-c.Done():
+	}
 }
 
 // StreamingPoolMiddleware 流式请求准入中间件(下载/预览/流媒体/批量下载)。
