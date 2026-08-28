@@ -263,8 +263,9 @@ func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
 	}
 }
 
-// SMB 删除目录(Unlink)复用 server 层 DeleteDir + ProcessDeleteTask:
-// 目录树(含子目录/文件/分享)全部物理清理,桶与用户用量按归属者归还。
+// SMB 删除目录(Unlink)复用 server 层 DeleteDir:
+// 目录树进回收站(Isable=false + 软删),记录/对象/用量保留,仅目录自身分享级联删除;
+// 子树内条目不可达(读路径 404),不落物理清理任务。
 func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	db := newITDB(t)
 	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
@@ -307,36 +308,56 @@ func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	info, _ := resolveSession(ctx, u.ID)
 	ctx = withSession(ctx, info)
 
-	// Unlink 目录(复用 server.DeleteDir + ProcessDeleteTask 同步完成)
+	// Unlink 目录(复用 server.DeleteDir:进回收站,不物理清理)
 	if err := svc.Unlink(ctx, &UnlinkArgs{BucketID: b.ID, Path: "/dir"}); err != nil {
 		t.Fatalf("unlink dir: %v", err)
 	}
 
-	// 目录树记录与对象全部删除
+	// 目录树记录保留:顶层 dir 软删(isable=false + deleted_at);子目录不逐条标记
+	// (祖先链经软删过滤后不可达),文件未标记(均保留,对象可恢复)
 	var cnt int64
-	for _, table := range []any{&model.Folder{}, &model.File{}} {
-		if err := core.DB.Unscoped().Model(table).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 0 {
-			t.Fatalf("%T rows = %d, want 0", table, cnt)
-		}
+	if err := core.DB.Unscoped().Model(&model.Folder{}).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 2 {
+		t.Fatalf("folder rows = %d, want 2(回收站保留)", cnt)
 	}
-	// 分享级联删除
-	if err := core.DB.Unscoped().Model(&model.ShareLink{}).Where("creator_id = ?", u.ID).Count(&cnt).Error; err != nil || cnt != 0 {
-		t.Fatalf("share rows = %d, want 0(级联删除)", cnt)
+	var d1 model.Folder
+	if err := core.DB.Unscoped().First(&d1, dir.ID).Error; err != nil {
+		t.Fatalf("dir should be retained: %v", err)
 	}
-	// 用量归还(150-100-50=0)
+	if d1.Isable || !d1.DeletedAt.Valid {
+		t.Fatalf("dir should be isable=false + soft-deleted: %+v", d1)
+	}
+	// 子目录不逐条标记(保留 isable=true/deleted_at 空),其不可达由祖先链
+	// 判定保证:顶层 dir 已被软删,loadFolder(dir) 经软删过滤 404
+	var d2 model.Folder
+	if err := core.DB.Unscoped().First(&d2, sub.ID).Error; err != nil {
+		t.Fatalf("sub should be retained: %v", err)
+	}
+	if err := core.DB.Unscoped().Model(&model.File{}).Where("bucket_id = ?", b.ID).Count(&cnt).Error; err != nil || cnt != 2 {
+		t.Fatalf("file rows = %d, want 2(回收站保留)", cnt)
+	}
+	// 目录自身分享级联删除;子树内文件分享保留(访问侧经软删过滤 404)
+	if err := core.DB.Unscoped().Model(&model.ShareLink{}).Where("creator_id = ?", u.ID).Count(&cnt).Error; err != nil || cnt != 1 {
+		t.Fatalf("share rows = %d, want 1(仅文件分享保留)", cnt)
+	}
+	// 用量不归还(回收站软删不归还;清除才归还)
 	var uu model.User
-	if err := core.DB.First(&uu, u.ID).Error; err != nil || uu.UsedSpace != 0 {
-		t.Fatalf("user used = %d, want 0", uu.UsedSpace)
+	if err := core.DB.First(&uu, u.ID).Error; err != nil || uu.UsedSpace != 150 {
+		t.Fatalf("user used = %d, want 150(软删不归还)", uu.UsedSpace)
 	}
 	var bb model.Bucket
-	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 0 {
-		t.Fatalf("bucket used = %d, want 0", bb.UsedSpace)
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 150 {
+		t.Fatalf("bucket used = %d, want 150(软删不归还)", bb.UsedSpace)
 	}
-	// 对象已删
-	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f1.ID)]; ok {
-		t.Fatal("f1 object should be deleted")
+	// 对象保留(回收站可恢复)
+	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f1.ID)]; !ok {
+		t.Fatal("f1 object should be retained in recycle bin")
 	}
-	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f2.ID)]; ok {
-		t.Fatal("f2 object should be deleted")
+	if _, ok := core.Storage.(*memStorage).objects["orbitcloud-"+fmt.Sprint(b.ID)+"/"+fmt.Sprint(f2.ID)]; !ok {
+		t.Fatal("f2 object should be retained in recycle bin")
+	}
+	// 回收站内目录不可见:常规查询(软删自动过滤)视为不存在
+	var vis model.Folder
+	if err := core.DB.First(&vis, dir.ID).Error; err != gorm.ErrRecordNotFound {
+		t.Fatalf("recycled dir should be invisible (soft-delete filtered), got %v", err)
 	}
 }
