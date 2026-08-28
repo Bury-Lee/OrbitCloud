@@ -32,7 +32,7 @@ type ListRecycleBinArg struct {
 }
 
 // ListRecycleBin 分页查询用户自己的回收站文件(软删行,deleted_at 倒序,
-// 走 common.Paginate 统一分页封装,响应含 total_pages/has_more/next_cursor,
+// 统一走 common.PageQuery,响应含 total/total_pages/has_more/next_cursor,
 // 供回收站相关接口(含后续提前删除)共用同一分页形态)。
 // 他人归属/未删除的文件不出现。
 func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (*common.PaginatedResult[model.File], error) {
@@ -47,8 +47,7 @@ func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (*common.Paginat
 			return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID)
 		},
 	}
-	files := []model.File{}
-	return common.Paginate(core.DB.WithContext(ctx), opt, &files)
+	return common.PageQuery(model.File{}, *opt, nil)
 }
 
 // CleanExpiredRecycleBinArg 回收站过期清理入参。

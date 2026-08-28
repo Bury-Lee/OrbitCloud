@@ -247,19 +247,17 @@ type ListUsersArg struct {
 	PageSize int // 页大小(缺省 50,上限 500)
 }
 
-// ListUsers 分页列出用户(按 created_at 倒序;分页统一走 common.Paginate)。
+// ListUsers 分页列出用户(按 created_at 倒序;统一走 common.PageQuery)。
 func ListUsers(ctx context.Context, arg ListUsersArg) (total int64, items []model.User, err error) {
 	page, pageSize := arg.Page, arg.PageSize
 	opt := common.NewOption(page, pageSize)
 	opt.DefaultOrder = "created_at DESC"
 
-	items = []model.User{}
-	if _, err := common.Paginate(core.DB.WithContext(ctx), opt, &items); err != nil {
+	res, err := common.PageQuery(model.User{}, *opt, nil)
+	if err != nil {
 		return 0, nil, fmt.Errorf("list users: %w", err)
 	}
-	if err := core.DB.WithContext(ctx).Model(&model.User{}).Count(&total).Error; err != nil {
-		return 0, nil, fmt.Errorf("list users count: %w", err)
-	}
+	items, total = res.List, res.Total
 
 	// 脱敏:禁止哈希外泄
 	for i := range items {

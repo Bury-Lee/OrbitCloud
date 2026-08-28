@@ -10,6 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+
+	"orbitcloud/core"
 )
 
 // PageInfo 通用分页请求参数
@@ -41,6 +43,7 @@ type Option struct {
 // PaginatedResult 通用分页响应
 type PaginatedResult[T any] struct {
 	List       []T   `json:"list"`        // 当前页数据列表
+	Total      int64 `json:"total"`       // 总条数(与 List 同一过滤口径)
 	Page       int   `json:"page"`        // 当前页码
 	PageSize   int   `json:"page_size"`   // 每页条数
 	TotalPages int   `json:"total_pages"` // 总页数
@@ -97,6 +100,27 @@ func ParseOption(values url.Values) *Option {
 		}
 	}
 	return opt
+}
+
+// PageQuery 统一分页查询入口(推荐全项目使用):model 同时确定"表"与"行类型",
+// opt 携带分页/排序/过滤参数(NewOption / ParseOption 构造),timeInfo 携带
+// 时间范围(created_at 闭区间;nil = 不限)。内部走全局 core.DB,不依赖 gin;
+// 返回统一 PaginatedResult(含 Total,调用方无需再单独 Count)。
+//
+// 用法:
+//
+//	opt := common.ParseOption(c.Request.URL.Query()) // 或 common.NewOption(page, pageSize)
+//	opt.DefaultOrder = "created_at DESC"
+//	opt.Filters = append(opt.Filters, func(db *gorm.DB) *gorm.DB {
+//		return db.Where("creator_id = ?", userID)
+//	})
+//	res, err := common.PageQuery(model.ShareLink{}, *opt, nil)
+func PageQuery[T any](model T, opt Option, timeInfo *TimeInfo) (*PaginatedResult[T], error) {
+	if timeInfo != nil {
+		opt.TimeInfo = *timeInfo // 参数优先,覆盖 opt 内嵌的时间范围
+	}
+	items := new([]T)
+	return Paginate(core.DB, &opt, items)
 }
 
 // Paginate 统一分页查询入口
@@ -171,6 +195,7 @@ func Paginate[T any](db *gorm.DB, opt *Option, result *[]T) (*PaginatedResult[T]
 
 	return &PaginatedResult[T]{
 		List:       *result,
+		Total:      total,
 		Page:       opt.Page,
 		PageSize:   opt.PageSize,
 		TotalPages: totalPages,

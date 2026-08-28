@@ -202,20 +202,21 @@ type ListSharesArg struct {
 	PageSize int  // 页大小(缺省 50,上限 500)
 }
 
-// ListShares 分页列出当前用户创建的分享(按 created_at 倒序)。
+// ListShares 分页列出当前用户创建的分享(按 created_at 倒序;统一走 common.PageQuery)。
 func ListShares(ctx context.Context, arg ListSharesArg) (total int64, items []model.ShareLink, err error) {
 	userID, page, pageSize := arg.UserID, arg.Page, arg.PageSize
-	// 分页(统一走 common.Paginate)
+	// 分页(统一走 common.PageQuery)
 	opt := common.NewOption(page, pageSize)
 	opt.DefaultOrder = "created_at DESC"
+	opt.Filters = []func(*gorm.DB) *gorm.DB{
+		func(db *gorm.DB) *gorm.DB { return db.Where("creator_id = ?", userID) },
+	}
 
-	items = []model.ShareLink{}
-	if _, err := common.Paginate(core.DB.WithContext(ctx).Where("creator_id = ?", userID), opt, &items); err != nil {
+	res, err := common.PageQuery(model.ShareLink{}, *opt, nil)
+	if err != nil {
 		return 0, nil, fmt.Errorf("list shares: %w", err)
 	}
-	if err := core.DB.WithContext(ctx).Model(&model.ShareLink{}).Where("creator_id = ?", userID).Count(&total).Error; err != nil {
-		return 0, nil, fmt.Errorf("list shares count: %w", err)
-	}
+	items, total = res.List, res.Total
 
 	// 脱敏
 	for i := range items {
