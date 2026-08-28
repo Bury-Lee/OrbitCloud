@@ -1,4 +1,4 @@
-﻿package core
+package core
 
 // storage_range_test.go —— local 驱动 GetRange 白盒测试:
 // 区间裁剪 / EOF 语义 / 句柄关闭 / 对象缺失映射。
@@ -70,10 +70,10 @@ func TestLocalGetRangeEdge(t *testing.T) {
 	cases := []struct {
 		start, end int64
 	}{
-		{0, 0},           // 首字节
-		{0, size - 1},    // 整文件
+		{0, 0},               // 首字节
+		{0, size - 1},        // 整文件
 		{size - 1, size - 1}, // 末字节
-		{3, 3},           // 单字节
+		{3, 3},               // 单字节
 	}
 	for _, tc := range cases {
 		rc, err := st.GetRange(context.Background(), "b1", "1", tc.start, tc.end)

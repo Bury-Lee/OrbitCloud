@@ -5,6 +5,7 @@
 //   - 复制链路:操作者记账 + 已超额拒绝;
 //   - 删除链路:按文件归属者归还用户用量;
 //   - 管理员改配额(UpdateUser.Quota)。
+//
 // 基于内存 SQLite + 内存存储 mock(与 p0_acl_test.go 同环境)。
 package server
 
@@ -57,7 +58,7 @@ func TestCheckBucketQuota(t *testing.T) {
 	})
 
 	t.Run("negative_or_zero_delta_passes_without_query", func(t *testing.T) {
-		b := mkQuotaBucket(t, "q-full", 10, 10) // 已满
+		b := mkQuotaBucket(t, "q-full", 10, 10)                                 // 已满
 		if err := CheckBucketQuota(context.Background(), b.ID, 0); err != nil { // 0 增量
 			t.Fatalf("delta=0 should pass, got %v", err)
 		}
@@ -219,8 +220,8 @@ func TestUserQuotaOnCopy(t *testing.T) {
 	admin := mkUserP0(t, "uq-copy-admin", model.Admin)
 	owner := mkUserQuota(t, "uq-owner", nil, 0) // 源文件归属者(不限)
 	quota := int64(100)
-	overOperator := mkUserQuota(t, "uq-over-operator", &quota, 110)   // 已超额
-	normalOperator := mkUserQuota(t, "uq-operator", &quota, 90)       // 未超额
+	overOperator := mkUserQuota(t, "uq-over-operator", &quota, 110) // 已超额
+	normalOperator := mkUserQuota(t, "uq-operator", &quota, 90)     // 未超额
 	b1 := mkBucketP0(t, "uq-src", model.NormalUser, admin.ID)
 	b2 := mkBucketP0(t, "uq-dst", model.NormalUser, admin.ID)
 
@@ -502,4 +503,3 @@ func TestCopyTaskQuotaAbandoned(t *testing.T) {
 		t.Fatalf("dst file rows = %d, want 0", cnt)
 	}
 }
-

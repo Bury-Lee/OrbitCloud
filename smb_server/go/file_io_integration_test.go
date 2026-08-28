@@ -38,7 +38,11 @@ func newITDB(t *testing.T) *gorm.DB {
 // 期望:200B = E*100 + 零*50 + F*50(截断区零填充,不复活)
 func TestTruncateThenWriteBeyondIntegration(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	// 用户 + 桶 + 文件记录(200B)+ 对象
 	u := &model.User{Username: "admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1}
@@ -110,7 +114,11 @@ func TestTruncateThenWriteBeyondIntegration(t *testing.T) {
 // 纯截断(无写)也必须落盘。
 func TestTruncateOnlyIntegration(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	u := &model.User{Username: "admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1}
 	core.DB.Create(u)
@@ -149,7 +157,11 @@ func TestTruncateOnlyIntegration(t *testing.T) {
 // 且打开时记录与对象保持旧值(崩溃/断连不丢数据)。
 func TestOverwriteOpenSymmetricAccounting(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	q := int64(1000)
 	u := &model.User{Username: "ow-admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, Quota: &q, UsedSpace: 200}
@@ -217,7 +229,11 @@ func TestOverwriteOpenSymmetricAccounting(t *testing.T) {
 // 覆盖打开扩大内容(200→300):配额审查按真实增量(100)而非全量(300),未超额放行。
 func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	q := int64(400)
 	u := &model.User{Username: "ow-grow", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, Quota: &q, UsedSpace: 200}
@@ -268,7 +284,11 @@ func TestOverwriteOpenGrowQuotaCheck(t *testing.T) {
 // 子树内条目不可达(读路径 404),不落物理清理任务。
 func TestUnlinkDirUsesServerDelete(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	u := &model.User{Username: "unlink-admin", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, UsedSpace: 150}
 	if err := core.DB.Create(u).Error; err != nil {

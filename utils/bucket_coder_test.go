@@ -18,9 +18,9 @@ func TestBucketEncoderKnown(t *testing.T) {
 		{9, "orbitcloud-9"},
 		{10, "orbitcloud-a"},
 		{35, "orbitcloud-z"},
-		{36, "orbitcloud-01"},  // 36 = 1*36 + 0,小端:低位 0 在前 → "01"
-		{37, "orbitcloud-11"},  // 37 = 1*36 + 1
-		{100, "orbitcloud-s2"}, // 100 = 2*36 + 28(28 → 's'),小端:余数在前
+		{36, "orbitcloud-01"},    // 36 = 1*36 + 0,小端:低位 0 在前 → "01"
+		{37, "orbitcloud-11"},    // 37 = 1*36 + 1
+		{100, "orbitcloud-s2"},   // 100 = 2*36 + 28(28 → 's'),小端:余数在前
 		{1296, "orbitcloud-001"}, // 1296 = 36*36,逐位取余 → "001"
 	}
 	for _, tc := range cases {
@@ -34,7 +34,7 @@ func TestBucketEncoderKnown(t *testing.T) {
 // 证明编码无损、无碰撞(编码函数与字符集索引一致)。
 func TestBucketEncoderRoundTrip(t *testing.T) {
 	ids := []uint{0, 1, 2, 9, 10, 35, 36, 37, 100, 1296, 46655, 46656,
-		123456789, 1<<31 - 1, 1<<32 - 1, ^uint(0)>>1, ^uint(0)}
+		123456789, 1<<31 - 1, 1<<32 - 1, ^uint(0) >> 1, ^uint(0)}
 	for _, id := range ids {
 		enc := BucketEncoder(id)
 		if !strings.HasPrefix(enc, bucketPrefix) {

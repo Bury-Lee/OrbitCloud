@@ -91,7 +91,7 @@ func TestFlushTruncateThenWriteBeyond(t *testing.T) {
 	st.objects["b/1"] = bytes.Repeat([]byte{'A'}, 200)
 
 	spec := writeSpec{
-		size:      250, // 截断 100 后写扩展:Write(150, 100) → EOF 250
+		size:       250, // 截断 100 后写扩展:Write(150, 100) → EOF 250
 		truncateAt: 100, // 截断点:对象 [100,∞) 旧数据作废
 		segments: []writeRange{
 			{off: 150, end: 250, data: bytes.Repeat([]byte{'B'}, 100)},
@@ -171,7 +171,7 @@ func TestFlushNormalWriteNoTruncate(t *testing.T) {
 	st.objects["b/1"] = bytes.Repeat([]byte{'A'}, 200)
 
 	spec := writeSpec{
-		size:      200,
+		size:       200,
 		truncateAt: -1,
 		segments: []writeRange{
 			{off: 0, end: 50, data: bytes.Repeat([]byte{'B'}, 50)},
@@ -192,7 +192,7 @@ func TestFlushNewFileObjectMissing(t *testing.T) {
 	st := newMemStorage() // 无对象
 
 	spec := writeSpec{
-		size:      100,
+		size:       100,
 		truncateAt: -1,
 		segments: []writeRange{
 			{off: 0, end: 100, data: bytes.Repeat([]byte{'C'}, 100)},
@@ -211,7 +211,7 @@ func TestFlushSegmentsBeyondEOFDiscarded(t *testing.T) {
 	st.objects["b/1"] = bytes.Repeat([]byte{'A'}, 200)
 
 	spec := writeSpec{
-		size:      120, // Truncate(120) 后 EOF 收缩
+		size:       120, // Truncate(120) 后 EOF 收缩
 		truncateAt: 120,
 		segments: []writeRange{
 			{off: 150, end: 200, data: bytes.Repeat([]byte{'B'}, 50)}, // 超出 EOF

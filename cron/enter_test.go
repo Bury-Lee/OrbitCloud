@@ -2,6 +2,7 @@
 //   - 用量漂移修正(以 files 表为权威);
 //   - 软删行仍计入(Unscoped 口径:软删不归还用量,与记账语义一致);
 //   - 无漂移不动。
+//
 // 基于内存 SQLite(config.InitDB 建表,与 p0 测试同模式)。
 package cron
 

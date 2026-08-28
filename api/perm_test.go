@@ -66,8 +66,8 @@ func TestPermCanManageBucket(t *testing.T) {
 	defer dropPermTestDB(db)
 	ctx := context.Background()
 
-	owner := mkPermUser(t, "owner", model.NormalUser)     // 3 级
-	peer := mkPermUser(t, "peer", model.NormalUser)       // 3 级
+	owner := mkPermUser(t, "owner", model.NormalUser) // 3 级
+	peer := mkPermUser(t, "peer", model.NormalUser)   // 3 级
 	lower := mkPermUser(t, "lower", model.PermissionLevel(4))
 	admin := mkPermUser(t, "admin", model.Admin)
 
