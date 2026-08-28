@@ -50,5 +50,8 @@ services:
       # ---- 回收站:软删保留 30 天,超期自动物理清除(<=0 永久保留) ----
       ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS: "30"
 
+      # ---- 日志:落盘到 /data/logs(系统运维页可浏览/下载;留空=仅 stdout) ----
+      ORBITCLOUD_LOG_OUTPUT_PATH: "/data/logs"
+
 volumes:
   orbitcloud-data:

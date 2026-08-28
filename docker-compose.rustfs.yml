@@ -80,6 +80,9 @@ services:
       # ---- 回收站:保留 30 天,超期 cron 物理清除 ----
       ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS: "30"
 
+      # ---- 日志:落盘到 /data/logs(系统运维页可浏览/下载;留空=仅 stdout) ----
+      ORBITCLOUD_LOG_OUTPUT_PATH: "/data/logs"
+
 volumes:
   pg-data:
   rustfs-data:

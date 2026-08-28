@@ -71,7 +71,9 @@ func Router() *gin.Engine {
 	ShareRouter(pub, authed)
 	DownloadRouter(authed)
 	RecycleBinRouter(authed)
-	SystemRouter(authed)
+	// 系统运维(管理员):/logs/download 为流式下载,必须走 streamAuthed
+	// 原地执行(ExecPool 池协程流式写会导致 wrote more than Content-Length)
+	SystemRouter(streamAuthed)
 	// pprof 管理接口(管理员,按需采样):走 streamAuthed 组,不占执行池
 	PprofRouter(streamAuthed)
 	return r
