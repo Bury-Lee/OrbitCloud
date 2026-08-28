@@ -154,6 +154,14 @@ type Bucket struct {
 	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
 }
 
+// RecycleBin 回收站配置(OrbitCloud.yaml 的 recycle_bin 段)。
+type RecycleBin struct {
+	// RetentionDays 回收站保留天数;>0 = 软删(进回收站)超过该天数由 cron
+	// 物理清除(删对象+删记录+归还用量);<=0 = 永久保留,不自动清理。
+	// 默认 30。
+	RetentionDays int `yaml:"retention_days" json:"retention_days"`
+}
+
 // Config 总配置结构
 type Config struct {
 	App         App         `yaml:"app" json:"app"`
@@ -164,6 +172,7 @@ type Config struct {
 	Log         Log         `yaml:"log" json:"log"`
 	Storage     Storage     `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
 	Bucket      Bucket      `yaml:"bucket" json:"bucket"`   // 桶相关配置
+	RecycleBin  RecycleBin  `yaml:"recycle_bin" json:"recycle_bin"` // 回收站配置
 
 	Health      Health      `yaml:"health" json:"health"`
 	Pool        Pool        `yaml:"pool" json:"pool"`
