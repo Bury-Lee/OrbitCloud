@@ -1,19 +1,21 @@
 //! ============================================================================
-//! user_cache.rs —�?用户快照缓存(大 key 库):认证按需拉取的核心
+//! user_cache.rs —�?用户快照缓存(大 key 库):认证按需拉取 + 认证用户周期刷新
 //! ============================================================================
 //!
-//! 取代"全量用户表对账":Rust 侧不再镜像全库用户,只缓存**实际被连接/认证**
-//! 的用户快照。查询三级路径:
+//! 取代"全量用户表对账":Rust 侧不再镜像全库用户,只缓存**实际被认证过的**
+//! 用户快照。查询三级路径:
 //!   1. 本地缓存命中且未过期(TTL 由 Moka 后台自动驱逐)→ 直接用;
 //!   2. 未命中/已过期 → 向 Go 网关发 CODE_AUTH_QUERY_USER 按需拉取;
 //!   3. 拉取结果回填缓存(含 users_index 身份映射),后续认证零 RPC。
 //!
-//! 一致性:
-//!   - 变更即时性由保留的增量推送(MSG_AUTH_PUSH upsert/delete)保证——
-//!     upsert 直接覆盖缓存,delete 立即失效(见 sync.rs apply_push);
-//!   - TTL 只是"无变更时"的兜底刷新,不承担安全语义;
-//!   - 用户不存在/禁用:不缓存 None(推送可随时纠正),认证方按
-//!     LOGON_FAILURE 处理。
+//! 一致性(认证用户周期刷新,收敛窗口 = 对账周期):
+//!   - 凭据:改密/禁用后经周期刷新(QUERY_USER)更新协议层用户表,
+//!     旧凭据最长一个周期内失效;
+//!   - 授权:周期刷新时 QUERY_ACL → grant/revoke diff,权限收紧最长一个
+//!     周期内生效;
+//!   - 删号/禁用:周期刷新发现用户不存在 → 移除凭据表/索引/全部授权并
+//!     移出刷新集合(集合规模 = 实际使用过的用户,自动收缩);
+//!   - 用户不存在/禁用:不缓存 None(认证方按 LOGON_FAILURE 处理)。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -43,6 +45,10 @@ pub struct UserCache {
     /// 用户 → 已授权共享名集合(ACL diff 基准;认证时按需刷新,
     /// 权限收紧(用户不再可见某桶)即时 revoke)。
     acl_table: Arc<std::sync::Mutex<HashMap<String, HashSet<String>>>>,
+    /// 认证过的用户集合(周期刷新维度):凭据与 ACL 每周期收敛一次;
+    /// 用户删号/禁用后由 refresh_user 自动收缩。规模 = 实际使用过的用户,
+    /// 不是全库。
+    auth_users: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl UserCache {
@@ -54,6 +60,61 @@ impl UserCache {
                 .max_capacity(capacity.max(1))
                 .build(),
             acl_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            auth_users: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// 登记认证过的用户(认证成功后调用;周期刷新维度)。
+    pub fn mark_authenticated(&self, username: &str) {
+        self.auth_users.lock().unwrap().insert(username.to_string());
+    }
+
+    /// 取认证用户集合快照(周期刷新遍历用)。
+    pub fn authenticated_users_list(&self) -> Vec<String> {
+        self.auth_users.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// 周期刷新单个认证用户(凭据 + ACL,收敛改密/禁用/权限变更):
+    /// - 用户有效 → 刷新凭据(Moka + users_index)并重做 ACL diff;
+    /// - 用户不存在/禁用(删号/禁用)→ 移除凭据表/索引/授权并移出集合;
+    /// - RPC 失败 → 跳过本轮(临时故障不踢人,下轮再试)。
+    pub async fn refresh_user(
+        &self,
+        conn: &Arc<GatewayClient>,
+        registry: &BucketRegistry,
+        handle: &ConfigHandle,
+        users_index: &UserIDIndex,
+        username: &str,
+    ) {
+        match self.fetch(conn, username).await {
+            Ok(Some(cached)) => {
+                self.inner.insert(username.to_string(), cached.clone());
+                users_index.upsert(username, cached.user_id).await;
+                self.ensure_user_acl(conn, registry, handle, username).await;
+            }
+            Ok(None) => {
+                // 用户不存在/禁用:清理凭据与授权(收敛删号/禁用)
+                infof!("缓存:周期刷新用户 {username} 不存在/禁用,清理凭据与授权", &["SMB"]);
+                self.inner.invalidate(username);
+                users_index.remove(username).await;
+                if let Err(e) = handle.remove_user(username).await {
+                    warnf!("缓存:移除用户 {username} 失败:{e:?}", &["SMB"]);
+                }
+                // 全量 revoke 该用户已授权共享
+                let to_revoke: Vec<String> = {
+                    let mut table = self.acl_table.lock().unwrap();
+                    table.remove(username).unwrap_or_default().into_iter().collect()
+                };
+                for name in to_revoke {
+                    if let Err(e) = handle.revoke_share_user(&name, username).await {
+                        warnf!("缓存:用户 {username} 撤销 {name} 失败:{e:?}", &["SMB"]);
+                    }
+                }
+                self.auth_users.lock().unwrap().remove(username);
+            }
+            Err(()) => {
+                warnf!("缓存:周期刷新用户 {username} RPC 失败,跳过本轮", &["SMB"]);
+            }
         }
     }
 
@@ -75,12 +136,12 @@ impl UserCache {
             return Some(hit);
         }
         match self.fetch(conn, username).await {
-            Some(cached) => {
+            Ok(Some(cached)) => {
                 self.inner.insert(username.to_string(), cached.clone());
                 users_index.upsert(username, cached.user_id).await;
                 Some(cached)
             }
-            None => None,
+            Ok(None) | Err(()) => None,
         }
     }
 
@@ -221,7 +282,12 @@ impl UserCache {
     }
 
     /// RPC 拉取单个用户快照(CODE_AUTH_QUERY_USER)。
-    async fn fetch(&self, conn: &Arc<GatewayClient>, username: &str) -> Option<CachedUser> {
+    /// 返回:Ok(Some)= 有效用户;Ok(None)= 不存在/禁用;Err = RPC/解析失败。
+    async fn fetch(
+        &self,
+        conn: &Arc<GatewayClient>,
+        username: &str,
+    ) -> Result<Option<CachedUser>, ()> {
         let req = OperateRequest {
             code: CODE_AUTH_QUERY_USER, // 查询用户凭据(按需)
             auth_user: Some(AuthUserArgs {
@@ -233,41 +299,44 @@ impl UserCache {
             Ok(b) => b,
             Err(e) => {
                 errorf!("缓存:编码查询用户请求失败 {username}: {e}", &["SMB"]);
-                return None;
+                return Err(());
             }
         };
         let resp_body = match conn.call(MSG_OPERATE, body).await {
             Ok(b) => b,
             Err(code) => {
                 warnf!("缓存:查询用户 {username} RPC 失败(code {code})", &["SMB"]);
-                return None;
+                return Err(());
             }
         };
         let (json_bytes, _) = match split_operate_body(&resp_body) {
             Ok(parts) => parts,
             Err(e) => {
                 errorf!("缓存:拆查询用户响应失败 {username}: {e}", &["SMB"]);
-                return None;
+                return Err(());
             }
         };
         let resp: OperateResponse = match serde_json::from_slice(json_bytes) {
             Ok(r) => r,
             Err(e) => {
                 errorf!("缓存:解析查询用户响应失败 {username}: {e}", &["SMB"]);
-                return None;
+                return Err(());
             }
         };
         let result = match resp.auth_user {
             Some(r) => r,
             None => {
                 errorf!("缓存:查询用户响应缺 auth_user 段({username})", &["SMB"]);
-                return None;
+                return Err(());
             }
         };
         if !result.found {
-            return None; // 不存在/禁用:不缓存,认证方 LOGON_FAILURE
+            return Ok(None); // 不存在/禁用:认证方 LOGON_FAILURE
         }
-        let cred = result.cred?;
+        let cred = match result.cred {
+            Some(c) => c,
+            None => return Ok(None), // 无凭据载荷 = 视为不可用
+        };
         // nt_hash_hex(32 字符)→ [u8; 16](转换失败视为凭据损坏,不缓存)
         let hash_bytes = match hex::decode(&cred.nt_hash_hex) {
             Ok(b) if b.len() == 16 => {
@@ -277,7 +346,7 @@ impl UserCache {
             }
             _ => {
                 warnf!("缓存:用户 {username} NT hash 格式非法,拒绝缓存", &["SMB"]);
-                return None;
+                return Ok(None);
             }
         };
         debugf!(
@@ -286,9 +355,9 @@ impl UserCache {
             cred.id,
             cred.permission_level
         );
-        Some(CachedUser {
+        Ok(Some(CachedUser {
             creds: UserCreds { nt_hash: hash_bytes },
             user_id: cred.id,
-        })
+        }))
     }
 }

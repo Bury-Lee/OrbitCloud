@@ -129,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     else {
                         return None;
                     };
+                    // 登记为"认证过的用户"(周期刷新维度:凭据/ACL 每周期收敛)
+                    cache3.mark_authenticated(&username);
                     // 凭据可用后:先把凭据写入协议层用户表(ServerState.ensure_user
                     // 在 resolver 返回后才写表,而 grant 要求表内已存在该用户),
                     // 再按需刷新共享授权(失败不阻断认证,下次再试)。

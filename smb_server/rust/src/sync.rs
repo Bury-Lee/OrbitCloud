@@ -79,9 +79,17 @@ pub async fn sync_loop(
                     }
                 }
             }
-            _ = ticker.tick() => { // 分支 b:定时共享对账(兜底一致性;用户维度已按需,不再全量)
+            _ = ticker.tick() => { // 分支 b:定时对账(共享清单 + 认证用户凭据/ACL 刷新)
                 if let Err(e) = reconcile(&conn, &registry, &handle).await { // 重拉快照并应用共享部分
                     errorf!("同步:对账失败:{e}", &["SMB"]); // 失败仅记错误日志
+                }
+                // 认证用户维度周期刷新(收敛改密/禁用/权限变更,窗口 = 本周期):
+                // 只刷新实际认证过的用户(连接用户维度,非全库),单用户失败仅告警。
+                let users = cache.authenticated_users_list(); // 认证用户集合快照
+                for u in users { // 逐个刷新
+                    cache
+                        .refresh_user(&conn, &registry, &handle, &registry.users_index(), &u)
+                        .await;
                 }
             }
         }
