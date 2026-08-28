@@ -129,10 +129,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     else {
                         return None;
                     };
-                    // 凭据可用后按需刷新共享授权(失败不阻断认证,下次再试)
+                    // 凭据可用后:先把凭据写入协议层用户表(ServerState.ensure_user
+                    // 在 resolver 返回后才写表,而 grant 要求表内已存在该用户),
+                    // 再按需刷新共享授权(失败不阻断认证,下次再试)。
                     // 注意:句柄先克隆出锁作用域再 await(guard 非 Send)
                     let handle_opt = handle3.lock().unwrap().clone();
                     if let Some(h) = handle_opt {
+                        let hash_hex = hex::encode(cached.creds.nt_hash);
+                        if let Err(e) = h.add_user_nt_hash(&username, &hash_hex).await {
+                            warnf!("缓存:写入用户 {username} 凭据失败:{e:?}", &["SMB"]);
+                        }
                         cache3
                             .ensure_user_acl(&conn3, &registry3, &h, &username)
                             .await;
