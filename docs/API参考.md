@@ -114,6 +114,7 @@
 | GET `/recycle-bin/files?page=&page_size=&cursor=&key=&order=&user_id=` | 我的回收站文件(已删除且归属自己的软删行,`deleted_at` 倒序;`user_id` 缺省 = 自己,查他人需管理员;返回统一分页结构 `{list, total, page, page_size, total_pages, has_more, next_cursor}`) |
 | GET `/recycle-bin/folders?page=&page_size=&cursor=&key=&order=&user_id=` | 我的回收站文件夹(语义同上,查 folders 表) |
 | DELETE `/recycle-bin/files/:id` | 永久删除回收站文件(提前清除,不等保留期:删对象+删记录+归还用量+级联删分享);仅归属者或管理员,非回收站条目 404 |
+| POST `/recycle-bin/files/:id/restore` | 恢复回收站文件(取消软删回原位置;父目录已删回桶根,目标位置重名自动重命名),返回恢复后的文件记录 |
 
 ### 下载与预览(流式)
 

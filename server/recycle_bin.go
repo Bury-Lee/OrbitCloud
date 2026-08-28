@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -70,6 +71,69 @@ func DeleteRecycledFile(ctx context.Context, arg DeleteRecycledFileArg) error {
 	}
 	log.Infof("delete recycled file: operator %d file %d purged (recycle bin early clear)", arg.OperatorID, arg.FileID)
 	return nil
+}
+
+// RestoreRecycledFileArg 回收站文件恢复入参。
+type RestoreRecycledFileArg struct {
+	OperatorID uint // 操作者 users.id(操作日志)
+	FileID     uint // 回收站文件 files.id
+}
+
+// RestoreRecycledFile 恢复回收站文件(取消软删,回到原位置):
+// 清除 deleted_at;原父目录已不可用(被删/不存在)则恢复到桶根(folder_id=0);
+// 目标位置同名冲突自动重命名(uniqueName)。返回恢复后的文件记录。
+// 权限校验(归属者或管理员)由 api 层预检,本函数只做可行性:文件须在回收站。
+// 错误语义:文件不存在或不在回收站 → ErrNotFound。
+func RestoreRecycledFile(ctx context.Context, arg RestoreRecycledFileArg) (*model.File, error) {
+	// 可行性:软删行 = 回收站条目
+	var f model.File
+	if err := core.DB.WithContext(ctx).Unscoped().
+		Where("id = ? AND deleted_at IS NOT NULL", arg.FileID).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("restore recycled file %d: query: %w", arg.FileID, err)
+	}
+
+	// 目标位置:原父目录可用则回原处,否则桶根(0)
+	folderID := f.FolderID
+	if folderID != 0 {
+		if _, err := loadFolder(ctx, f.BucketID, folderID); err != nil {
+			folderID = 0 // 父目录已删/不存在 → 恢复到桶根
+		}
+	}
+	// 重名冲突自动重命名(与上传/移动同一套 uniqueName)
+	name := f.Name
+	exists, err := nameExists(ctx, f.BucketID, folderID, name)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		renamed, err := uniqueName(ctx, f.BucketID, folderID, name)
+		if err != nil {
+			return nil, err
+		}
+		name = renamed
+	}
+
+	// 恢复:清除软删(deleted_at → NULL),必要时修正目录/名称
+	updates := map[string]any{"deleted_at": nil, "folder_id": folderID}
+	if name != f.Name {
+		updates["name"] = name
+		updates["name_lower"] = strings.ToLower(name)
+	}
+	if err := core.DB.WithContext(ctx).Unscoped().Model(&model.File{}).
+		Where("id = ?", f.ID).Updates(updates).Error; err != nil {
+		return nil, fmt.Errorf("restore recycled file %d: restore: %w", f.ID, err)
+	}
+	log.Infof("restore recycled file: operator %d file %d (%q) restored to folder %d", arg.OperatorID, f.ID, name, folderID)
+
+	// 恢复后正常路径加载返回(软删已清除)
+	nf, err := loadFile(ctx, f.BucketID, f.ID)
+	if err != nil {
+		return nil, err
+	}
+	return nf, nil
 }
 
 // CleanExpiredRecycleBinArg 回收站过期清理入参。

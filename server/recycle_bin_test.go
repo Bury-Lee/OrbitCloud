@@ -222,3 +222,68 @@ func TestDeleteRecycledFile(t *testing.T) {
 		t.Fatalf("missing file: want ErrNotFound, got %v", err)
 	}
 }
+
+// TestRestoreRecycledFile 回收站文件恢复:取消软删回原位置;父目录已删回桶根;
+// 目标位置重名自动重命名;非回收站条目 → ErrNotFound。
+func TestRestoreRecycledFile(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "rrf-admin", model.Admin)
+	b := mkBucketP0(t, "rrf-bucket", model.NormalUser, admin.ID)
+
+	// 场景 1:桶根文件删除后恢复 → 原位置可见,deleted_at 清除
+	f1 := mkFileP0(t, b.ID, 0, "a.txt", 10)
+	putMemObject(t, b.ID, f1.ID, string(make([]byte, 10)))
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f1.ID}); err != nil {
+		t.Fatalf("delete f1: %v", err)
+	}
+	nf, err := RestoreRecycledFile(ctx, RestoreRecycledFileArg{OperatorID: admin.ID, FileID: f1.ID})
+	if err != nil {
+		t.Fatalf("restore f1: %v", err)
+	}
+	if nf.ID != f1.ID || nf.FolderID != 0 || nf.Name != "a.txt" {
+		t.Fatalf("restored = %+v, want id %d folder 0 name a.txt", nf, f1.ID)
+	}
+	if _, err := GetFile(ctx, GetFileArg{BucketID: b.ID, FileID: f1.ID}); err != nil {
+		t.Fatalf("restored file should be visible: %v", err)
+	}
+
+	// 场景 2:目标位置已有同名活跃文件 → 恢复自动重命名
+	f2 := mkFileP0(t, b.ID, 0, "b.txt", 10)
+	putMemObject(t, b.ID, f2.ID, string(make([]byte, 10)))
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f2.ID}); err != nil {
+		t.Fatalf("delete f2: %v", err)
+	}
+	mkFileP0(t, b.ID, 0, "b.txt", 5) // 同名活跃文件(回收站行不占名)
+	nf2, err := RestoreRecycledFile(ctx, RestoreRecycledFileArg{OperatorID: admin.ID, FileID: f2.ID})
+	if err != nil {
+		t.Fatalf("restore f2: %v", err)
+	}
+	if nf2.Name == "b.txt" {
+		t.Fatalf("restored name = %q, want 自动重命名(目标已被占)", nf2.Name)
+	}
+
+	// 场景 3:父目录已删 → 恢复到桶根
+	dir := mkFolderP0(t, b.ID, 0, admin.ID, "dir")
+	f3 := mkFileP0(t, b.ID, dir.ID, "c.txt", 10)
+	putMemObject(t, b.ID, f3.ID, string(make([]byte, 10)))
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f3.ID}); err != nil {
+		t.Fatalf("delete f3: %v", err)
+	}
+	if _, err := DeleteDir(ctx, DeleteDirArg{UserID: admin.ID, BucketID: b.ID, DirID: dir.ID}); err != nil {
+		t.Fatalf("delete dir: %v", err)
+	}
+	nf3, err := RestoreRecycledFile(ctx, RestoreRecycledFileArg{OperatorID: admin.ID, FileID: f3.ID})
+	if err != nil {
+		t.Fatalf("restore f3: %v", err)
+	}
+	if nf3.FolderID != 0 {
+		t.Fatalf("restored folder = %d, want 0(父目录已删回桶根)", nf3.FolderID)
+	}
+
+	// 场景 4:非回收站条目 → ErrNotFound
+	active := mkFileP0(t, b.ID, 0, "active.txt", 1)
+	if _, err := RestoreRecycledFile(ctx, RestoreRecycledFileArg{OperatorID: admin.ID, FileID: active.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("active file: want ErrNotFound, got %v", err)
+	}
+}

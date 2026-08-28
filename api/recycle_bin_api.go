@@ -95,6 +95,41 @@ func (RecycleBinAPI) DeleteRecycleFile(c *gin.Context) {
 	c.Status(204)
 }
 
+// RestoreRecycleFile 恢复回收站文件(POST /recycle-bin/files/:id/restore):
+// 取消软删回到原位置(父目录已删则回桶根,目标位置重名自动重命名),返回恢复后的文件记录。
+// 校验都在本层:条目须在回收站(404),仅归属者或管理员可恢复(403)。
+func (RecycleBinAPI) RestoreRecycleFile(c *gin.Context) {
+	fileID := parseIDParam(c, "id")
+	if fileID == 0 {
+		return
+	}
+
+	// 可行性预检:文件存在且在回收站
+	file, err := server.GetRecycledFile(c.Request.Context(), server.GetRecycledFileArg{FileID: fileID})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	// 归属校验:归属者本人,或管理员(JWT claims 判定)
+	operatorID := currentUser(c)
+	if file.UploadedBy != operatorID {
+		if claims := ClaimsFrom(c); claims == nil || !claims.PermissionLevel.IsAdmin() {
+			respondError(c, common.ErrForbidden)
+			return
+		}
+	}
+
+	nf, err := server.RestoreRecycledFile(c.Request.Context(), server.RestoreRecycledFileArg{
+		OperatorID: operatorID,
+		FileID:     fileID,
+	})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	common.Success(c, nf)
+}
+
 // ListRecycleFolder 分页返回自己的回收站文件夹(GET /recycle-bin/folders?page=&page_size=&cursor=&key=&order=&user_id=):
 // 语义与 ListRecycleFile 相同,仅查询表为 folders;直接 common.PageQuery,不经过 server 层。
 func (RecycleBinAPI) ListRecycleFolder(c *gin.Context) {
