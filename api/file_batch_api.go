@@ -109,6 +109,7 @@ func (FileAPI) BatchCopy(c *gin.Context) {
 
 	results := server.CopyItems(c.Request.Context(), server.CopyItemsArg{
 		UserID:      userID,
+		SrcBucketID: srcBucketID,
 		DstBucketID: req.DstBucketID,
 		DstDir:      req.DstDir,
 		Items:       req.Items,
@@ -157,6 +158,7 @@ func (FileAPI) BatchMove(c *gin.Context) {
 
 	results := server.MoveItems(c.Request.Context(), server.MoveItemsArg{
 		UserID:      userID,
+		SrcBucketID: srcBucketID,
 		DstBucketID: dstBucketID,
 		DstDir:      req.DstDir,
 		Items:       req.Items,

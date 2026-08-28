@@ -57,6 +57,7 @@ type CopyItem struct {
 // CopyItemsArg 批量复制参数。
 type CopyItemsArg struct {
 	UserID      uint       // 操作者(api 层注入)
+	SrcBucketID uint       // 批量级默认源桶(条目未显式指定 src_bucket_id 时继承)
 	DstBucketID uint       // 批量级默认目标桶
 	DstDir      string     // 批量级默认目标目录
 	Items       []CopyItem // 复制指令列表(≥1 且 ≤ 批量上限)
@@ -67,8 +68,11 @@ type CopyItemsArg struct {
 func CopyItems(ctx context.Context, arg CopyItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {
-		// 缺省值解析:目标桶/目录 = 批量级默认
-		srcBucket := it.SrcBucketID
+		// 缺省值解析:源桶/目标桶/目录 = 批量级默认(条目显式指定优先)
+		srcBucket := arg.SrcBucketID
+		if it.SrcBucketID != 0 {
+			srcBucket = it.SrcBucketID
+		}
 		dstBucket := arg.DstBucketID
 		if it.DstBucketID != nil {
 			dstBucket = *it.DstBucketID
@@ -119,6 +123,7 @@ type MoveItem struct {
 // MoveItemsArg 批量移动/剪切参数。
 type MoveItemsArg struct {
 	UserID      uint
+	SrcBucketID uint       // 批量级默认源桶(条目未显式指定 src_bucket_id 时继承)
 	DstBucketID uint       // 批量级默认目标桶(0 = 同桶)
 	DstDir      string     // 批量级默认目标目录
 	Items       []MoveItem // 移动指令列表
@@ -129,7 +134,10 @@ type MoveItemsArg struct {
 func MoveItems(ctx context.Context, arg MoveItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {
-		srcBucket := it.SrcBucketID
+		srcBucket := arg.SrcBucketID
+		if it.SrcBucketID != 0 {
+			srcBucket = it.SrcBucketID
+		}
 		dstBucket := arg.DstBucketID
 		if it.DstBucketID != nil {
 			dstBucket = *it.DstBucketID
