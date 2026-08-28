@@ -157,6 +157,7 @@ func (a *AuthService) Snapshot(ctx context.Context) (*SnapshotResult, error) {
 			BucketID:   b.ID,        // 桶 ID
 			BucketName: b.Name,      // 桶名
 			Mode:       "readwrite", // 读写模式
+			Users:      []ShareUserAccess{}, // 非 nil 空数组(避免 JSON null 破坏 Rust 反序列化)
 			Quota:      b.Quota,     // 配额
 			UsedSpace:  b.UsedSpace, // 已用
 			Status:     b.Status,    // 桶状态(1 正常/0 禁用)
