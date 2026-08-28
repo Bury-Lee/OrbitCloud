@@ -112,7 +112,7 @@ pub async fn apply_snapshot(
             .map_err(|e| format!("同步:添加用户 {} 失败:{e}", user.username))?; // 单用户失败终止
         users_index.upsert(&user.username, user.id).await; // 用户名 → users.id 登记
     }
-    infof!("同步:快照用户 {} 人", &["SMB"], snap.users.len()); // 记录用户表规模
+    // 快照应用成功不再记录 INFO(周期性对账刷屏);异常由调用方 errorf 记录
 
     registry.apply_snapshot(snap, conn, handle).await?; // 桶/共享:整体交给注册表做差集同步(内部联动协议层)
     Ok(())

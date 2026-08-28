@@ -250,7 +250,6 @@ impl BucketRegistry {
             map.keys().cloned().collect() // 拷贝所有键
         };
         let mut incoming: Vec<String> = Vec::new(); // 记录快照中正常桶的共享名(差集比对用)
-        let mut upserted = 0usize; // 成功 upsert 计数(汇总日志用)
         for info in &snap.shares { // 遍历快照共享
             if info.status != 1 { // 桶被禁用?
                 continue; // 跳过:不注册 = 实例下线(连接意图被拒)
@@ -259,18 +258,15 @@ impl BucketRegistry {
             if let Err(e) = self.upsert(info, conn, config).await { // 逐条 upsert(新增或覆盖更新)
                 warnf!("注册表:应用快照 upsert {} 失败:{}(仅告警)", &["SMB"], info.share_name, e); // 单条失败仅告警,不中断整体快照
             } // 未生效条目留待下次对账/增量推送再收敛
-            upserted += 1; // 计数
         }
-        let mut deleted = 0usize; // 成功下线计数(汇总日志用)
         for name in &current { // 差集处理:旧实例中快照没有的
             if !incoming.contains(name) { // 不在"应存在"集合?
                 if let Err(e) = self.delete(name, config).await { // 一律下线(桶被删除/禁用)
                     warnf!("注册表:应用快照删除 {} 失败:{}(仅告警)", &["SMB"], name, e); // 下线失败仅告警
                 }
-                deleted += 1; // 计数
             }
         }
-        infof!("注册表:快照已应用:{} 新增,{} 删除(原 {} 个)", &["SMB"], upserted, deleted, current.len()); // 记录快照应用汇总
+        // 快照应用成功不再记录 INFO(周期性对账刷屏);异常已由上方 warnf/调用方 errorf 记录
         Ok(())
     }
 
