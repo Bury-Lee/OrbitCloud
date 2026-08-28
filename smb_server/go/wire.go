@@ -27,7 +27,6 @@ import (
 
 	"orbitcloud/config" // 配置类型(SmbGatewayConfig)
 	"orbitcloud/core"   // 单例(DB/Storage)与准入池
-	"orbitcloud/server" // 业务层(NtHashSyncHook 注入)
 	"strings"           // 字符串处理(密钥去空白)
 )
 
@@ -66,20 +65,6 @@ func BuildGateway(cfg config.SmbGatewayConfig) (*Gateway, error) {
 	sessionRegistry = sr
 	handles := NewHandleRegistry()                           // 句柄表
 	files := NewFileOpsService(core.Storage, handles)        // 文件操作服务(全局存储 + 句柄表)
-
-	// 注入用户注册/改密/状态变更即时同步钩子:server 层变更后立即推送,
-	// SMB 侧旧密码立即失效、禁用/降权立即拒登(不等 60s 周期对账)。
-	server.UserChangedHook = func(ctx context.Context, username, plainPassword string) {
-		if plainPassword != "" {
-			// 改密:计算并落库 NT hash 后推送(SetUserNTHash 内部重查,推送含最新状态)
-			if err := auth.SetUserNTHash(ctx, username, plainPassword); err != nil {
-				smbWarnf("smb_gateway: 同步用户 %q NT hash 失败:%v", username, err)
-			}
-		} else {
-			// 仅状态变更(禁用/降权等):重查最新状态推送
-			auth.SyncUserState(ctx, username)
-		}
-	}
 
 	// 4. 网关实例(认证服务与网关绑定:变更推送直连 pushToAll)。
 	gw := NewGateway(cfg.ListenAddr, key, pool, auth, files) // 构造网关
