@@ -39,6 +39,7 @@ func main() {
 		}
 		fmt.Printf("main: %v", err)
 	}
+	core.BootTime = time.Now() // 启动时间(运行时间/状况查询用)
 
 	// 1. 加载配置并初始化全局基础设施(见 appinit 包):配置 → 日志 → 数据库
 	//    (自动建表+重连)→ [日志入库] → JWT → 对象存储 → 协程池,结果存入 core 全局变量。

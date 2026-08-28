@@ -25,6 +25,7 @@ type AppGroup struct {
 	Group      GroupAPI
 	Download   DownloadAPI
 	RecycleBin RecycleBinAPI
+	System     SystemAPI
 	Pprof      PprofAPI
 }
 
@@ -67,6 +68,7 @@ func Router() *gin.Engine {
 	ShareRouter(pub, authed)
 	DownloadRouter(authed)
 	RecycleBinRouter(authed)
+	SystemRouter(authed)
 	// pprof 管理接口(管理员,按需采样):走 streamAuthed 组,不占执行池
 	PprofRouter(streamAuthed)
 	return r
