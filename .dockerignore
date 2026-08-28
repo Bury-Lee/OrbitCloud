@@ -19,3 +19,26 @@ orbitcloud.db
 /.orbitcloud/
 frontend/node_modules
 frontend/dist
+
+# ============================================================
+#  以下为打包补充排除(构建不需要,减小 context 体积)
+# ============================================================
+.gitignore
+/review-tmp/
+/tem/
+/test/
+/other_software/
+/build/
+/tool/
+/deploy/
+/deploy-tool/
+/docs/
+/.alf/
+/.VSCodeCounter/
+docker/orbitcloud/bin/
+docker/smb-gateway/bin/
+docker/rustfs/bin/
+docker/web/web/
+docker/.env
+*.tar
+*.zip
