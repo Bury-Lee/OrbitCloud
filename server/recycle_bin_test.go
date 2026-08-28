@@ -192,7 +192,7 @@ func TestDeleteRecycledFile(t *testing.T) {
 	}
 
 	// 永久删除
-	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: f.ID}); err != nil {
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{FileID: f.ID}); err != nil {
 		t.Fatalf("delete recycled file: %v", err)
 	}
 	if n := countRows(t, &model.File{}, "id = ?", f.ID); n != 0 {
@@ -214,11 +214,11 @@ func TestDeleteRecycledFile(t *testing.T) {
 
 	// 非回收站条目(活跃文件)→ ErrNotFound
 	active := mkFileP0(t, b.ID, 0, "active.txt", 10)
-	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: active.ID}); !errors.Is(err, ErrNotFound) {
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{FileID: active.ID}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("active file: want ErrNotFound, got %v", err)
 	}
 	// 不存在的文件 → ErrNotFound
-	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: 99999}); !errors.Is(err, ErrNotFound) {
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{FileID: 99999}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing file: want ErrNotFound, got %v", err)
 	}
 }
