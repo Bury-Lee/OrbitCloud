@@ -198,6 +198,8 @@ func TestListRecycleBin(t *testing.T) {
 	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: own2.ID}); err != nil {
 		t.Fatalf("delete own2: %v", err)
 	}
+	// 错开删除时间(own1 更早),保证 deleted_at 倒序断言确定性
+	backdateSoftDelete(t, &model.File{}, own1.ID, time.Now().Add(-time.Hour))
 	// active 不删
 
 	// 自己的回收站:own1/own2(deleted_at 倒序 → own2 在前)

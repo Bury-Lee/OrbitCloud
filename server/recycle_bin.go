@@ -38,7 +38,7 @@ func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (*common.Paginat
 	if opt == nil {
 		opt = common.NewOption(1, 10)
 	}
-	opt.DefaultOrder = "deleted_at DESC"
+	opt.DefaultOrder = "deleted_at DESC, id DESC"
 	opt.Filters = []func(*gorm.DB) *gorm.DB{
 		func(db *gorm.DB) *gorm.DB {
 			// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤)
