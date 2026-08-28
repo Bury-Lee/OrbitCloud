@@ -49,8 +49,6 @@ func TestParseOption(t *testing.T) {
 	values.Set("cursor", "123")
 	values.Set("key", "report")
 	values.Set("order", "asc")
-	values.Set("start_time", "2026-01-02T03:04:05Z")
-	values.Set("end_time", "bad-time")
 	opt := ParseOption(values)
 	if opt.Page != 3 {
 		t.Errorf("Page = %d, want 3", opt.Page)
@@ -66,12 +64,6 @@ func TestParseOption(t *testing.T) {
 	}
 	if opt.Order != "asc" {
 		t.Errorf("Order = %q, want asc", opt.Order)
-	}
-	if opt.StartTime.IsZero() {
-		t.Error("StartTime 应解析 RFC3339")
-	}
-	if !opt.EndTime.IsZero() {
-		t.Errorf("EndTime 非法格式应保持零值, got %v", opt.EndTime)
 	}
 
 	// 缺省:空参数 → 默认第 1 页 / 每页 10 条

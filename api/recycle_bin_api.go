@@ -12,6 +12,11 @@ import (
 // RecycleBinAPI 回收站模块接口(无状态)。
 type RecycleBinAPI struct{}
 
+type ListRecycleBinArg struct {
+	common.PageInfo      //查询参数
+	UserID          uint //非管理员只可查询自己的
+}
+
 // ListRecycleBin 分页返回自己的回收站(GET /recycle-bin?page=&page_size=&cursor=&key=&order=):
 // 已删除(软删)且归属自己的文件,deleted_at 倒序;走 common 统一分页封装
 // (ParseOption 解析查询参数构造 Option,WrapPageResponse 输出 PaginatedResult,

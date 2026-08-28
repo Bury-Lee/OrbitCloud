@@ -25,7 +25,7 @@ type PageInfo struct {
 	Order    string // 排序方式
 }
 
-// TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段)
+// TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段),独立字段
 type TimeInfo struct {
 	StartTime time.Time
 	EndTime   time.Time
@@ -33,7 +33,6 @@ type TimeInfo struct {
 
 type Option struct {
 	PageInfo
-	TimeInfo
 	DefaultOrder string                    // 默认排序方式
 	Orderby      string                    // 排序字段
 	Filters      []func(*gorm.DB) *gorm.DB // 额外查询条件
@@ -79,8 +78,9 @@ func NewOption(page, pageSize int) *Option {
 //   - page_size:  每页条数(默认 10)
 //   - key:        模糊搜索关键词
 //   - order:      排序方向(ASC / DESC)
-//   - start_time: 开始时间(RFC3339 格式)
-//   - end_time:   结束时间(RFC3339 格式)
+//
+// 时间范围不在此解析:Option 不承载时间字段,需要时间过滤时由调用方自行
+// 解析参数并构造 TimeInfo 传给 common.PageQuery 的 timeInfo 参数。
 //
 // 推荐用法:调用方构造好 Option 后传入 common.PageQuery,不要在业务代码里
 // 逐个从请求拆字段。
@@ -89,16 +89,6 @@ func ParseOption(values url.Values) *Option {
 	opt.Cursor = int64(intVal(values.Get("cursor"), 0))
 	opt.Key = values.Get("key")
 	opt.Order = values.Get("order")
-	if t := values.Get("start_time"); t != "" {
-		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-			opt.StartTime = parsed
-		}
-	}
-	if t := values.Get("end_time"); t != "" {
-		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-			opt.EndTime = parsed
-		}
-	}
 	return opt
 }
 
@@ -125,9 +115,10 @@ func ParseOption(values url.Values) *Option {
 //	})
 //	res, err := common.PageQuery(model.ShareLink{}, *opt, nil)
 func PageQuery[T any](model T, opt Option, timeInfo *TimeInfo) (*PaginatedResult[T], error) {
-	// 时间范围:参数优先,覆盖 opt 内嵌的时间范围
+	// 时间范围(created_at 闭区间;timeInfo 为 nil = 不限)
+	startTime, endTime := time.Time{}, time.Time{}
 	if timeInfo != nil {
-		opt.TimeInfo = *timeInfo
+		startTime, endTime = timeInfo.StartTime, timeInfo.EndTime
 	}
 
 	// 以 model 绑定表名(gorm 反射取 schema);结果容器由泛型推导
@@ -140,11 +131,11 @@ func PageQuery[T any](model T, opt Option, timeInfo *TimeInfo) (*PaginatedResult
 	}
 
 	// 2. 时间范围(created_at 闭区间)
-	if !opt.StartTime.IsZero() {
-		query = query.Where("created_at >= ?", opt.StartTime)
+	if !startTime.IsZero() {
+		query = query.Where("created_at >= ?", startTime)
 	}
-	if !opt.EndTime.IsZero() {
-		query = query.Where("created_at <= ?", opt.EndTime)
+	if !endTime.IsZero() {
+		query = query.Where("created_at <= ?", endTime)
 	}
 
 	// 3. 模糊搜索(OR 语义,限定白名单列)
