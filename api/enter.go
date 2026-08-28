@@ -1,4 +1,4 @@
-﻿// Package api 提供 HTTP 接入层:路由注册、鉴权、参数校验、权限预检与错误响应映射。
+// Package api 提供 HTTP 接入层:路由注册、鉴权、参数校验、权限预检与错误响应映射。
 // 本包不包含业务逻辑,业务由 server 包提供;路由按模块拆分在 router_*.go 中注册。
 package api
 
@@ -9,22 +9,25 @@ import (
 
 	"orbitcloud/common"
 	"orbitcloud/core"
+	"orbitcloud/server"
 )
 
 // claimsKey 鉴权 Claims 在 gin context 中的存取键。
 const claimsKey = "orbitcloud.claims"
 
-// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download/Pprof),
+// AppGroup 聚合各模块接口(Auth/User/Bucket/File/Share/Group/Download/RecycleBin/Pprof),
 // 各次级接口均为无状态空结构体,配合全局单例 App 使用。
 type AppGroup struct {
-	Auth     AuthAPI
-	User     UserAPI
-	Bucket   BucketAPI
-	File     FileAPI
-	Share    ShareAPI
-	Group    GroupAPI
-	Download DownloadAPI
-	Pprof    PprofAPI
+	Auth       AuthAPI
+	User       UserAPI
+	Bucket     BucketAPI
+	File       FileAPI
+	Share      ShareAPI
+	Group      GroupAPI
+	Download   DownloadAPI
+	RecycleBin RecycleBinAPI
+	System     SystemAPI
+	Pprof      PprofAPI
 }
 
 // App 是 api 层的全局单例,零值即可用。
@@ -40,6 +43,8 @@ var App AppGroup
 func Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	// 限流中间件(全局;按 IP/账号双维度,配置 rate_limit.enabled 时生效)
+	r.Use(RateLimitMiddleware)
 	// 运行模式与配置对齐
 	if core.GlobalConfig != nil {
 		gin.SetMode(core.GlobalConfig.Server.Mode)
@@ -65,6 +70,10 @@ func Router() *gin.Engine {
 	FileRouter(authed, streamAuthed)
 	ShareRouter(pub, authed)
 	DownloadRouter(authed)
+	RecycleBinRouter(authed)
+	// 系统运维(管理员):/logs/download 为流式下载,必须走 streamAuthed
+	// 原地执行(ExecPool 池协程流式写会导致 wrote more than Content-Length)
+	SystemRouter(streamAuthed)
 	// pprof 管理接口(管理员,按需采样):走 streamAuthed 组,不占执行池
 	PprofRouter(streamAuthed)
 	return r
@@ -90,6 +99,20 @@ func currentUser(c *gin.Context) uint {
 		return 0
 	}
 	return claims.UserID
+}
+
+// bindRequest 绑定路径(uri tag)与查询参数(form tag)到同一结构体;
+// 绑定失败 → 写出 400 并返回 false(调用方应提前 return)。
+func bindRequest(c *gin.Context, req any) bool {
+	if err := c.ShouldBindUri(req); err != nil {
+		respondError(c, server.ErrInvalidInput)
+		return false
+	}
+	if err := c.ShouldBindQuery(req); err != nil {
+		respondError(c, server.ErrInvalidInput)
+		return false
+	}
+	return true
 }
 
 // httpStatus 将哨兵错误映射为 HTTP 状态码。

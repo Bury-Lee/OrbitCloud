@@ -1,4 +1,4 @@
-﻿// batch.go —— 批量操作:删除 / 复制 / 移动 / 上传 / 下载。
+// batch.go —— 批量操作:删除 / 复制 / 移动 / 上传。
 //
 // 参数风格:行式切片 + 批量级默认值继承(条目指针字段 nil = 继承批量级默认值);
 // 逐条独立执行,失败项收集进 BatchResultItem.Error,不中断其余;
@@ -6,14 +6,9 @@
 package server
 
 import (
-	"archive/zip"
 	"context"
 	"io"
 	"strings"
-
-	"orbitcloud/core"
-	"orbitcloud/log"
-	"orbitcloud/model"
 )
 
 // 批量操作单次上限(防御;与 CopyTask batch 一致)。
@@ -62,6 +57,7 @@ type CopyItem struct {
 // CopyItemsArg 批量复制参数。
 type CopyItemsArg struct {
 	UserID      uint       // 操作者(api 层注入)
+	SrcBucketID uint       // 批量级默认源桶(条目未显式指定 src_bucket_id 时继承)
 	DstBucketID uint       // 批量级默认目标桶
 	DstDir      string     // 批量级默认目标目录
 	Items       []CopyItem // 复制指令列表(≥1 且 ≤ 批量上限)
@@ -72,8 +68,11 @@ type CopyItemsArg struct {
 func CopyItems(ctx context.Context, arg CopyItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {
-		// 缺省值解析:目标桶/目录 = 批量级默认
-		srcBucket := it.SrcBucketID
+		// 缺省值解析:源桶/目标桶/目录 = 批量级默认(条目显式指定优先)
+		srcBucket := arg.SrcBucketID
+		if it.SrcBucketID != 0 {
+			srcBucket = it.SrcBucketID
+		}
 		dstBucket := arg.DstBucketID
 		if it.DstBucketID != nil {
 			dstBucket = *it.DstBucketID
@@ -124,6 +123,7 @@ type MoveItem struct {
 // MoveItemsArg 批量移动/剪切参数。
 type MoveItemsArg struct {
 	UserID      uint
+	SrcBucketID uint       // 批量级默认源桶(条目未显式指定 src_bucket_id 时继承)
 	DstBucketID uint       // 批量级默认目标桶(0 = 同桶)
 	DstDir      string     // 批量级默认目标目录
 	Items       []MoveItem // 移动指令列表
@@ -134,7 +134,10 @@ type MoveItemsArg struct {
 func MoveItems(ctx context.Context, arg MoveItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {
-		srcBucket := it.SrcBucketID
+		srcBucket := arg.SrcBucketID
+		if it.SrcBucketID != 0 {
+			srcBucket = it.SrcBucketID
+		}
 		dstBucket := arg.DstBucketID
 		if it.DstBucketID != nil {
 			dstBucket = *it.DstBucketID
@@ -185,8 +188,8 @@ type DeleteItemsArg struct {
 	Items    []DeleteItem // 删除指令列表
 }
 
-// DeleteItems 批量删除(同桶):文件硬删(对象+记录+桶 used_space 原子减),
-// 文件夹逻辑删(Isable=false)后落 DeleteTask 后台物理清理;逐条独立,失败不中断其余。
+// DeleteItems 批量删除(同桶):文件/文件夹删除进回收站(软删置 deleted_at,
+// 保留记录/对象/用量;文件夹另置 Isable=false),逐条独立,失败不中断其余。
 func DeleteItems(ctx context.Context, arg DeleteItemsArg) []BatchResultItem {
 	results := make([]BatchResultItem, 0, len(arg.Items))
 	for _, it := range arg.Items {
@@ -276,191 +279,4 @@ func folderIDToPath(ctx context.Context, userID, bucketID, folderID uint) (strin
 		return "/", nil
 	}
 	return "/" + strings.Join(segs, "/"), nil
-}
-
-// ==================== 5. 批量下载(zip) ====================
-
-// DownloadItem 单条下载指令。
-type DownloadItem struct {
-	Kind string `json:"kind"` // ItemKindFile | ItemKindFolder
-	ID   uint   `json:"id"`   // files.id / folders.id
-}
-
-// DownloadItemsArg 批量下载参数。
-type DownloadItemsArg struct {
-	UserID   uint
-	BucketID uint           // 所属桶(单次下载限单桶)
-	Items    []DownloadItem // 下载指令列表
-}
-
-// CountDownloadItemsArg 批量下载规模统计入参。
-type CountDownloadItemsArg struct {
-	UserID   uint           // 操作者(可见性过滤依据)
-	BucketID uint           // 所属桶
-	Items    []DownloadItem // 下载指令列表
-}
-
-// CountDownloadItems 统计批量下载规模(目录数/文件数,带可见性过滤),
-// 供 api 层打包前告知用户规模与耗时预估;受限子树不计入。
-func CountDownloadItems(ctx context.Context, arg CountDownloadItemsArg) (folders, files int64) {
-	userID, bucketID := arg.UserID, arg.BucketID
-	for _, it := range arg.Items {
-		switch it.Kind {
-		case ItemKindFile:
-			// 存在性/可见性由 api 层 precheck 保证;此处仅计数
-			files++
-		case ItemKindFolder:
-			f, c := countSubtree(ctx, userID, bucketID, it.ID)
-			folders += f
-			files += c
-		}
-	}
-	return folders, files
-}
-
-// countSubtree 统计文件夹子树可见规模(目录数/文件数;受限子目录整棵跳过)。
-func countSubtree(ctx context.Context, userID, bucketID, folderID uint) (folders, files int64) {
-	// 根目录受限 → 0(api 层已预检,此处兜底)
-	if err := checkAncestorsAccessTree(ctx, userID, bucketID, folderID); err != nil {
-		return 0, 0
-	}
-	folders = 1 // 自身
-	var walk func(id uint)
-	walk = func(id uint) {
-		children, err := nextSubfolders(ctx, bucketID, id)
-		if err != nil {
-			return
-		}
-		for i := range children {
-			// 受限子目录连同子树整棵跳过
-			if err := checkAncestorsAccessTree(ctx, userID, bucketID, children[i].ID); err != nil {
-				continue
-			}
-			folders++
-			var n int64
-			core.DB.WithContext(ctx).Model(&model.File{}).
-				Where("bucket_id = ? AND folder_id = ?", bucketID, children[i].ID).Count(&n)
-			files += n
-			walk(children[i].ID)
-		}
-	}
-	walk(folderID)
-	return folders, files
-}
-
-// DownloadItems 批量下载:打包 zip 流写入调用方持有的 *zip.Writer(api 层流式输出)。
-// 文件单条进包,文件夹递归进包(保持相对路径、空目录保结构);
-// 受限子目录整棵跳过;逐条独立,失败不中断其余。
-func DownloadItems(ctx context.Context, arg DownloadItemsArg, zw *zip.Writer) []BatchResultItem {
-	results := make([]BatchResultItem, 0, len(arg.Items))
-	for _, it := range arg.Items {
-		switch it.Kind {
-		case ItemKindFile:
-			if err := zipFile(ctx, arg.UserID, arg.BucketID, it.ID, zw); err != nil {
-				results = append(results, BatchResultItem{Kind: ItemKindFile, ID: it.ID, Error: err.Error()})
-				continue
-			}
-			results = append(results, BatchResultItem{Kind: ItemKindFile, ID: it.ID})
-		case ItemKindFolder:
-			if err := zipFolderTree(ctx, arg.UserID, arg.BucketID, it.ID, zw); err != nil {
-				results = append(results, BatchResultItem{Kind: ItemKindFolder, ID: it.ID, Error: err.Error()})
-				continue
-			}
-			results = append(results, BatchResultItem{Kind: ItemKindFolder, ID: it.ID})
-		default:
-			results = append(results, BatchResultItem{Kind: it.Kind, ID: it.ID, Error: "invalid kind: " + it.Kind})
-		}
-	}
-	return results
-}
-
-// zipFile 单文件进包(带权限校验,与 DownloadFile 同通路)。
-func zipFile(ctx context.Context, userID, bucketID, fileID uint, zw *zip.Writer) error {
-	rc, meta, err := DownloadFile(ctx, DownloadFileArg{BucketID: bucketID, FileID: fileID})
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-
-	w, err := zw.Create(meta.Name)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(w, rc)
-	return err
-}
-
-// zipFolderTree 文件夹子树进包(深度优先,目录名作 zip 前缀保持相对结构);
-// 子目录逐层校验可见性,受限子树整棵跳过。
-func zipFolderTree(ctx context.Context, userID, bucketID, folderID uint, zw *zip.Writer) error {
-	// 校验根目录存在与可见性
-	root, err := loadFolder(ctx, bucketID, folderID)
-	if err != nil {
-		return err
-	}
-	if err := checkAncestorsAccessTree(ctx, userID, bucketID, folderID); err != nil {
-		return err
-	}
-
-	// 深度优先遍历:栈帧 = (folderID, zip 内前缀路径)
-	type frame struct {
-		folderID uint
-		prefix   string
-	}
-	stack := []frame{{folderID: folderID, prefix: root.Name}}
-	// 空目录也保留结构
-	if _, err := zw.Create(root.Name + "/"); err != nil {
-		return err
-	}
-	for len(stack) > 0 {
-		fr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		// 子目录压栈;逐层可见性校验,受限子树整棵跳过
-		children, err := nextSubfolders(ctx, bucketID, fr.folderID)
-		if err != nil {
-			return err
-		}
-		for i := range children {
-			if err := checkAncestorsAccessTree(ctx, userID, bucketID, children[i].ID); err != nil {
-				log.Warnf("batch download: skip restricted subfolder %d: %v", children[i].ID, err)
-				continue
-			}
-			childPrefix := fr.prefix + "/" + children[i].Name
-			if _, err := zw.Create(childPrefix + "/"); err != nil {
-				return err
-			}
-			stack = append(stack, frame{folderID: children[i].ID, prefix: childPrefix})
-		}
-
-		// 文件进包
-		var files []model.File
-		if err := core.DB.WithContext(ctx).
-			Where("bucket_id = ? AND folder_id = ?", bucketID, fr.folderID).Find(&files).Error; err != nil {
-			return err
-		}
-		for i := range files {
-			rc, meta, err := DownloadFile(ctx, DownloadFileArg{BucketID: bucketID, FileID: files[i].ID})
-			if err != nil {
-				// 子条目失败:记日志跳过,不中断整包
-				log.Warnf("batch download: skip file %d: %v", files[i].ID, err)
-				continue
-			}
-			w, werr := zw.Create(fr.prefix + "/" + meta.Name)
-			if werr != nil {
-				if cerr := rc.Close(); cerr != nil {
-					log.Warnf("batch download: close stream file %d: %v", files[i].ID, cerr)
-				}
-				return werr
-			}
-			_, cperr := io.Copy(w, rc)
-			if cerr := rc.Close(); cerr != nil {
-				log.Warnf("batch download: close stream file %d: %v", files[i].ID, cerr)
-			}
-			if cperr != nil {
-				return cperr
-			}
-		}
-	}
-	return nil
 }

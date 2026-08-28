@@ -24,7 +24,8 @@ type File struct {
 	Name       string `gorm:"type:varchar(255);not null"`                                      // 文件名(不含 "/"、".."及 Windows 禁止符号)
 	NameLower  string `gorm:"type:varchar(255);uniqueIndex:uk_file_lower,priority:3;not null"` // 小写规范化(唯一索引/查找用,BeforeSave 维护)
 	FileSize   int64  `gorm:"default:0"`                                                       // 字节
-	FileType   string `gorm:"type:varchar(50)"`                                                // MIME 类型(不再有 "Folder" 值)
+	// FileType MIME 类型。注意:OOXML 的 MIME 长达 80+ 字符(docx/pptx/xlsx),列宽必须 ≥255
+	FileType   string `gorm:"type:varchar(255)"`                                              // MIME 类型(不再有 "Folder" 值)
 	MD5        string `gorm:"type:varchar(32);index"`                                          // 采样 MD5(下载校验/审计)
 	UploadedBy uint   `gorm:"index;not null"` // 创建者 users.id
 	// 条目级可见性(用户组 ACL):可见组 ID 的 JSON 数组字符串(如 "[1,5]");

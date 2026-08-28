@@ -1,4 +1,4 @@
-﻿// auth_api.go 认证模块接口:注册 / 登录 / 刷新 / 登出。
+// auth_api.go 认证模块接口:注册 / 登录 / 刷新 / 登出。
 package api
 
 import (

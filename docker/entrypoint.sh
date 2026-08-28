@@ -20,7 +20,7 @@ def() {
 
 # ---- app ----
 def ORBITCLOUD_APP_NAME        "orbitcloud"
-def ORBITCLOUD_APP_VERSION     "1.0.0"
+def ORBITCLOUD_APP_VERSION     "1.4.6"
 def ORBITCLOUD_APP_ENVIRONMENT "prod"
 def ORBITCLOUD_APP_DEBUG       "false"
 def ORBITCLOUD_APP_TIMEZONE     "Asia/Shanghai"
@@ -101,6 +101,19 @@ def ORBITCLOUD_DB_REPLICA_DSN    ""
 # ---- bucket ----
 def ORBITCLOUD_BUCKET_ADMIN_CREATE_ONLY "false"
 
+# ---- recycle_bin ----
+def ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS "30"
+
+# ---- rate_limit(限流;skip_paths 为 JSON 数组字符串,如 '["/auth/login"]') ----
+def ORBITCLOUD_RATE_LIMIT_ENABLED            "false"
+def ORBITCLOUD_RATE_LIMIT_IP_RATE            "20"
+def ORBITCLOUD_RATE_LIMIT_IP_BURST           "40"
+def ORBITCLOUD_RATE_LIMIT_USER_RATE          "50"
+def ORBITCLOUD_RATE_LIMIT_USER_BURST         "100"
+def ORBITCLOUD_RATE_LIMIT_SKIP_PATHS         "[]"
+def ORBITCLOUD_RATE_LIMIT_RECORD_LIMIT       "1000"
+def ORBITCLOUD_RATE_LIMIT_BUCKET_TTL_SECONDS "600"
+
 # ---- smb_gateway(后端侧) ----
 def ORBITCLOUD_SMB_GATEWAY_LISTEN_ADDR "127.0.0.1:9101"
 def ORBITCLOUD_SMB_CHANNEL_BUFFER      "1024"
@@ -123,6 +136,9 @@ def ORBITCLOUD_SMB_GATEWAY_ADDR           "127.0.0.1:9101"
 def ORBITCLOUD_SMB_HEARTBEAT_SECS         "30"
 def ORBITCLOUD_SMB_SYNC_INTERVAL_SECS     "60"
 def ORBITCLOUD_SMB_RPC_TIMEOUT_SECS       "30"
+# 用户快照缓存(大 key 库,认证按需拉取):TTL 秒 / 容量上限
+def ORBITCLOUD_SMB_USER_CACHE_TTL_SECS     "60"
+def ORBITCLOUD_SMB_USER_CACHE_CAPACITY     "10000"
 def ORBITCLOUD_SMB_LOG_LEVEL              "info"
 def ORBITCLOUD_SMB_LOG_OUTPUT             "/data/logs"
 def ORBITCLOUD_SMB_LOG_DB_ENABLED         "true"

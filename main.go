@@ -20,6 +20,7 @@ import (
 	"orbitcloud/cron"
 	"orbitcloud/flag"
 	"orbitcloud/log"
+	"orbitcloud/server"
 	smbgateway "orbitcloud/smb_server/go"
 	"orbitcloud/utils"
 )
@@ -39,6 +40,7 @@ func main() {
 		}
 		fmt.Printf("main: %v", err)
 	}
+	core.BootTime = time.Now() // 启动时间(运行时间/状况查询用)
 
 	// 1. 加载配置并初始化全局基础设施(见 appinit 包):配置 → 日志 → 数据库
 	//    (自动建表+重连)→ [日志入库] → JWT → 对象存储 → 协程池,结果存入 core 全局变量。
@@ -71,6 +73,11 @@ func main() {
 	core.ExecPool = appinit.InitExecPool(cfg)             // 非流式 API 执行池
 	core.StreamExecPool = appinit.InitStreamExecPool(cfg) // 流式 API 执行池
 	core.StreamingPool = appinit.InitAdmissionPool(cfg)   // 流式准入池(AdmissionPool)
+
+	// 限流器(按 IP/账号双维度令牌桶;rate_limit.enabled=false 时不启用)
+	if err := server.InitRateLimiter(&cfg.RateLimit); err != nil {
+		log.Fatalf("main: init rate limiter: %v", err)
+	}
 	log.Infof("orbitcloud core initialized (version %s, env %s)", cfg.App.Version, cfg.App.Environment)
 
 	// 2. 执行命令行指令(flag.Run):需 DB 已就绪,故放在初始化之后;

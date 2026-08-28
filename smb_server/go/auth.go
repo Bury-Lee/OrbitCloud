@@ -35,11 +35,6 @@ type AuthService struct {
 	pushCh chan AclEntry
 	// pushFn 实际推送函数(由 BuildGateway 注入 Gateway.pushToAll)。
 	pushFn func(entry AclEntry)
-	// dirFingerprint 文件/文件夹表变更指纹(上次快照值)。
-	dirFingerprint struct {
-		fc, foc int64  // 文件/文件夹行数
-		fm, fom string // 文件/文件夹最大 updated_at(原样字符串;指纹只需比较是否变化)
-	}
 }
 
 // NewAuthService 构造认证服务。
@@ -108,13 +103,21 @@ func (a *AuthService) QuerySharesForUser(ctx context.Context, username string) (
 
 // sharesForUser 按用户行计算可见共享(内部;u 已加载)。
 func (a *AuthService) sharesForUser(ctx context.Context, u *model.User) ([]ShareInfo, error) {
-	var buckets []model.Bucket // 可见桶集合
-	err := a.db.WithContext(ctx).
-		Where("status = 1 AND (owner_id = ? OR permission_level >= ?)", u.ID, u.PermissionLevel). // 桶启用 + (属主 或 权限级别达标)
-		Order("id ASC").Find(&buckets).Error                                                      // 按 ID 升序取全部
-	if err != nil {
-		return nil, fmt.Errorf("auth: list buckets for %q: %w", u.Username, err) // 查询失败:带用户名报错
+	// 注意:两次查询必须用独立 slice——GORM Find 是覆盖式填充,
+	// 复用同一 slice 会让第二次查询覆盖第一次的结果。
+	var owned []model.Bucket // 属主桶(owner_id 索引)
+	if err := a.db.WithContext(ctx).
+		Where("status = 1 AND owner_id = ?", u.ID).
+		Order("id ASC").Find(&owned).Error; err != nil {
+		return nil, fmt.Errorf("auth: list owned buckets for %q: %w", u.Username, err)
 	}
+	var accessible []model.Bucket // 非属主但权限级别达标的桶(permission_level 索引)
+	if err := a.db.WithContext(ctx).
+		Where("status = 1 AND permission_level >= ? AND owner_id != ?", u.PermissionLevel, u.ID).
+		Order("id ASC").Find(&accessible).Error; err != nil {
+		return nil, fmt.Errorf("auth: list accessible buckets for %q: %w", u.Username, err)
+	}
+	buckets := append(owned, accessible...)
 	out := make([]ShareInfo, 0, len(buckets)) // 预分配结果切片
 	for i := range buckets {                  // 遍历可见桶
 		b := &buckets[i]             // 取桶行指针
@@ -140,60 +143,29 @@ func (a *AuthService) sharesForUser(ctx context.Context, u *model.User) ([]Share
 // 返回值:全量快照(启动/重连时 Rust 侧一次性拉取)。
 // 组装:全部有效用户 → UserCred 列表;每个有效用户可见共享合并去重。
 func (a *AuthService) Snapshot(ctx context.Context) (*SnapshotResult, error) {
-	// 1. 全部有效用户(Status=1)
-	var users []model.User                                                                               // 用户行集合
-	if err := a.db.WithContext(ctx).Where("status = 1").Order("id ASC").Find(&users).Error; err != nil { // 查全部启用用户
-		return nil, fmt.Errorf("auth: snapshot users: %w", err) // 查询失败报错
+	// 用户维度已改按需缓存(Rust 侧认证时经 CODE_AUTH_QUERY_USER 动态拉取,
+	// 见 smb_server/rust/src/user_cache.rs),快照不再查询/下发用户;
+	// 共享维度:全量桶清单(ACL 由认证时 CODE_AUTH_QUERY_ACL 按需授权,
+	// 不再遍历全用户聚合)。
+	var buckets []model.Bucket                                                                                 // 桶行集合
+	if err := a.db.WithContext(ctx).Where("status = 1").Order("id ASC").Find(&buckets).Error; err != nil {     // 查全部启用桶
+		return nil, fmt.Errorf("auth: snapshot buckets: %w", err) // 查询失败报错
 	}
-	creds := make([]UserCred, 0, len(users)) // 预分配凭据列表
-	for i := range users {                   // 逐行转换
-		creds = append(creds, *userCredFrom(&users[i])) // 行 → UserCred
-	}
-
-	// 2. 全部共享:按桶去重合并(一个桶出现一次,ACL 聚合所有可见用户)
-	type shareAgg struct { // 桶聚合结构
-		bucket *model.Bucket     // 桶行(完整元数据)
-		users  map[string]string // username → access
-	}
-	agg := map[uint]*shareAgg{} // 桶 ID → 聚合
-	for i := range users {      // 遍历全部有效用户
-		shares, err := a.sharesForUser(ctx, &users[i]) // 算该用户可见共享
-		if err != nil {
-			return nil, err // 失败上抛
-		}
-		for _, s := range shares { // 遍历该用户每个可见共享
-			sa, ok := agg[s.BucketID] // 桶已有聚合?
-			if !ok {                  // 首次遇到该桶
-				// 重新查桶(拿完整元数据:配额/已用)
-				var b model.Bucket                                                        // 桶行
-				if err := a.db.WithContext(ctx).First(&b, s.BucketID).Error; err != nil { // 按主键查桶
-					return nil, fmt.Errorf("auth: snapshot bucket %d: %w", s.BucketID, err) // 查桶失败报错
-				}
-				sa = &shareAgg{bucket: &b, users: map[string]string{}} // 新建聚合(含完整桶元数据)
-				agg[s.BucketID] = sa                                   // 登记聚合
-			}
-			sa.users[users[i].Username] = "readwrite" // 记录该用户可见该桶(ACL 聚合)
-		}
-	}
-	shares := make([]ShareInfo, 0, len(agg)) // 预分配共享列表
-	for _, sa := range agg {                 // 遍历聚合
-		b := sa.bucket                                      // 桶行
-		access := make([]ShareUserAccess, 0, len(sa.users)) // 预分配 ACL 列表
-		for uname, acc := range sa.users {                  // 遍历可见用户
-			access = append(access, ShareUserAccess{Username: uname, Access: acc}) // 组装 ACL 条目
-		}
-		shares = append(shares, ShareInfo{ // 聚合 → ShareInfo
+	shares := make([]ShareInfo, 0, len(buckets)) // 预分配共享列表
+	for i := range buckets {                     // 遍历桶
+		b := &buckets[i] // 桶行
+		shares = append(shares, ShareInfo{       // 桶 → 共享(ACL 留空,按需授权)
 			ShareName:  b.Name,      // 共享名
 			BucketID:   b.ID,        // 桶 ID
 			BucketName: b.Name,      // 桶名
 			Mode:       "readwrite", // 读写模式
-			Users:      access,      // 聚合后的 ACL
+			Users:      []ShareUserAccess{}, // 非 nil 空数组(避免 JSON null 破坏 Rust 反序列化)
 			Quota:      b.Quota,     // 配额
 			UsedSpace:  b.UsedSpace, // 已用
 			Status:     b.Status,    // 桶状态(1 正常/0 禁用)
 		})
 	}
-	return &SnapshotResult{Users: creds, Shares: shares}, nil // 快照 = 全部用户 + 全部共享
+	return &SnapshotResult{Users: []UserCred{}, Shares: shares}, nil // 快照 = 全部共享(用户按需)
 }
 
 // WatchAndPush 监听 DB 变更并推送(goroutine 常驻)。
@@ -237,48 +209,16 @@ func (a *AuthService) WatchAndPush(ctx context.Context) {
 				smbErrorf("smb_gateway: 快照差异计算失败:%v", err) // 拉取失败:记日志跳过本轮
 				continue
 			}
-			// 文件/文件夹变更检测:指纹(count + max updated_at)变化 →
-			// 推送 dir 通知(Rust 侧完成挂起的 CHANGE_NOTIFY,客户端重枚举)。
-			if a.dirFingerprintChanged(ctx) { // 文件/文件夹表有变更?
-				smbDebugf("smb_gateway: 目录指纹变化,通知目录")     // 记录目录变更通知
-				push(AclEntry{Op: "notify", Kind: "dir"}) // 推送目录变更通知
-			}
-			// 首次:全量 upsert
+			// 首次:全量 upsert(仅共享;用户维度按需缓存,不下发)
 			if last == nil { // 首次运行?
-				smbDebugf("smb_gateway: 监听首次运行,推送全量快照(%d 用户,%d 共享)", len(snap.Users), len(snap.Shares)) // 记录全量推送
-				for i := range snap.Users {                                                             // 全量推送用户
-					push(AclEntry{Op: "upsert", Kind: "user", User: &snap.Users[i]}) // 逐条 upsert(幂等)
-				}
-				for i := range snap.Shares { // 全量推送共享
-					push(AclEntry{Op: "upsert", Kind: "share", Share: &snap.Shares[i]}) // 逐条 upsert
+				smbDebugf("smb_gateway: 监听首次运行,推送共享快照(%d 共享;用户按需缓存)", len(snap.Shares)) // 记录全量推送
+				for i := range snap.Shares {                                                              // 全量推送共享
+					push(AclEntry{Op: "upsert", Kind: "share", Share: &snap.Shares[i]}) // 逐条 upsert(幂等)
 				}
 				last = snap // 记录快照作为下次 diff 基准
 				continue    // 跳到下一轮
 			}
-			// diff 用户(按 username)
-			oldUsers := map[string]*UserCred{} // 旧用户表:username → 凭据
-			for i := range last.Users {        // 遍历旧快照用户
-				oldUsers[last.Users[i].Username] = &last.Users[i] // 建索引
-			}
-			newUsers := map[string]*UserCred{} // 新用户表
-			for i := range snap.Users {        // 遍历新快照用户
-				newUsers[snap.Users[i].Username] = &snap.Users[i] // 建索引
-			}
-			userUp, userDel := 0, 0          // 用户变更计数(汇总日志)
-			for name, nu := range newUsers { // 检查新增/变更用户
-				ou, ok := oldUsers[name]                                           // 旧快照有该用户?
-				if !ok || ou.NtHashHex != nu.NtHashHex || ou.Status != nu.Status { // 新增 或 hash/状态变化?
-					push(AclEntry{Op: "upsert", Kind: "user", User: nu}) // 推送 upsert
-					userUp++                                             // 计数
-				}
-			}
-			for name := range oldUsers { // 检查删除用户
-				if _, ok := newUsers[name]; !ok { // 新快照已无该用户?
-					push(AclEntry{Op: "delete", Kind: "user", User: &UserCred{Username: name}}) // 推送 delete
-					userDel++                                                                   // 计数
-				}
-			}
-			// diff 共享(按 bucketID)
+			// diff 共享(按 bucketID;用户维度按需缓存,不再推送用户变更)
 			oldShares := map[uint]*ShareInfo{} // 旧共享表:桶 ID → 共享
 			for i := range last.Shares {       // 遍历旧快照共享
 				oldShares[last.Shares[i].BucketID] = &last.Shares[i] // 建索引
@@ -301,40 +241,12 @@ func (a *AuthService) WatchAndPush(ctx context.Context) {
 					shareDel++                                                                                                       // 计数
 				}
 			}
-			if userUp+userDel+shareUp+shareDel > 0 { // 本轮有变更?
-				smbDebugf("smb_gateway: 监听差异:用户 +%d -%d,共享 +%d -%d", userUp, userDel, shareUp, shareDel) // 记录本轮差异汇总
+			if shareUp+shareDel > 0 { // 本轮有变更?
+				smbDebugf("smb_gateway: 监听差异:共享 +%d -%d(用户按需缓存,不再全量推送)", shareUp, shareDel) // 记录本轮差异汇总
 			}
 			last = snap // 记录本轮快照为下轮基准
 		}
 	}
-}
-
-// dirFingerprintChanged 检测文件/文件夹表是否有变更(新增/删除/改名/大小变化)。
-// 指纹 = 两表行数 + 最大 updated_at;任一变化视为有变更(保守触发通知)。
-// 注:MAX(updated_at) 用 string 承接——SQLite 无原生时间类型,该表达式返回
-// 字符串,Scan 到 time.Time 会报 "unsupported Scan"(此前每 60s 刷一条 ERROR)。
-func (a *AuthService) dirFingerprintChanged(ctx context.Context) bool {
-	var fCount, foCount int64                                                               // 文件/文件夹行数
-	var fMax, foMax string                                                                  // 文件/文件夹最大 updated_at(字符串原样比较)
-	if err := a.db.WithContext(ctx).Model(&model.File{}).Count(&fCount).Error; err != nil { // 数文件行数
-		return false // 查询失败:不触发(保守不通知)
-	}
-	if err := a.db.WithContext(ctx).Model(&model.File{}).Select("COALESCE(MAX(updated_at),'1970-01-01')").Scan(&fMax).Error; err != nil { // 取文件最大更新时间(空表退化 1970)
-		return false // 查询失败:不触发
-	}
-	if err := a.db.WithContext(ctx).Model(&model.Folder{}).Count(&foCount).Error; err != nil { // 数文件夹行数
-		return false // 查询失败:不触发
-	}
-	if err := a.db.WithContext(ctx).Model(&model.Folder{}).Select("COALESCE(MAX(updated_at),'1970-01-01')").Scan(&foMax).Error; err != nil { // 取文件夹最大更新时间
-		return false // 查询失败:不触发
-	}
-	fp := struct { // 本次指纹
-		fc, foc int64  // 行数
-		fm, fom string // 最大时间(字符串原样)
-	}{fCount, foCount, fMax, foMax} // 填充本次值
-	changed := fp != a.dirFingerprint // 与上次指纹比较
-	a.dirFingerprint = fp             // 更新为本次指纹(下次比较基准)
-	return changed                    // 有变化才触发通知
 }
 
 // SetUserNTHash 设置用户 NT hash(密码设置/修改流程钩子)。

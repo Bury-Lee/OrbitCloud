@@ -27,14 +27,14 @@ func TestValidateS3BucketNameOK(t *testing.T) {
 func TestValidateS3BucketNameReject(t *testing.T) {
 	long64 := strings.Repeat("a", 64)
 	invalid := []string{
-		"", "ab", "a",          // 长度 < 3
-		long64,                  // 长度 > 63
-		"ABC", "Bucket",         // 大写
-		"a.b", "my.bucket",      // 点(IPv4 形式)
-		"a_b", "my_bucket",      // 下划线
-		"-abc", "abc-", "a--",   // 首/尾连字符
-		"a b", "中文桶",           // 空白/非 ASCII
-		"ab\nc",                 // 控制字符
+		"", "ab", "a", // 长度 < 3
+		long64,          // 长度 > 63
+		"ABC", "Bucket", // 大写
+		"a.b", "my.bucket", // 点(IPv4 形式)
+		"a_b", "my_bucket", // 下划线
+		"-abc", "abc-", "a--", // 首/尾连字符
+		"a b", "中文桶", // 空白/非 ASCII
+		"ab\nc", // 控制字符
 	}
 	for _, name := range invalid {
 		if err := ValidateS3BucketName(name); err == nil {
@@ -107,10 +107,10 @@ func TestComputeSampleMD5Large(t *testing.T) {
 		}
 		// 独立按采样契约拼三段计算期望,不照抄实现
 		h := md5.New()
-		h.Write(data[:sample])                 // head
+		h.Write(data[:sample]) // head
 		mid := size / 2
-		h.Write(data[mid : mid+sample])        // mid
-		h.Write(data[size-sample:])            // tail
+		h.Write(data[mid : mid+sample]) // mid
+		h.Write(data[size-sample:])     // tail
 		want := hex.EncodeToString(h.Sum(nil))
 		if got != want {
 			t.Errorf("size=%d md5 = %q, want 采样 %q", size, got, want)

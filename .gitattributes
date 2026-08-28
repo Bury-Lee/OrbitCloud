@@ -1,0 +1,7 @@
+# 容器内可执行脚本/配置必须 LF 行尾(CRLF 会导致 shebang 解释器找不到)
+docker/entrypoint.sh            text eol=lf
+docker/templates/*.tpl          text eol=lf
+docker/templates/*.example      text eol=lf
+docker/nginx-default.conf       text eol=lf
+Dockerfile                      text eol=lf
+*.sh                            text eol=lf

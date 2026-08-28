@@ -1,4 +1,4 @@
-﻿package utils
+package utils
 
 // range_test.go —— ParseRange 单元测试:合法解析 / 多区间忽略 / 非法拒绝三组用例。
 

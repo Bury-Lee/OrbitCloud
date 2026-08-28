@@ -92,6 +92,12 @@ http.interceptors.response.use(
     const config = error.config as RetriableConfig | undefined
     const message = error.response?.data?.message || error.message || '网络错误'
 
+    // 登录接口失败(401 用户不存在/密码错误、403 账号禁用):不触发刷新与会话过期逻辑,
+    // 统一提示"登录失败"(与后端防探测语义一致,不区分具体原因)
+    if (config?.url?.includes('/auth/login')) {
+      return Promise.reject(new Error('登录失败'))
+    }
+
     // 401 且未重试过:尝试刷新令牌后重放原请求
     if (status === 401 && config && !config._retried) {
       config._retried = true

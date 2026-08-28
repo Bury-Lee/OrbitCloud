@@ -25,12 +25,12 @@ func TestValidateItemNameOK(t *testing.T) {
 
 func TestValidateItemNameReject(t *testing.T) {
 	invalid := []string{
-		"",         // 空
-		"a/b",      // 路径分隔符
-		`a\b`,      // 反斜杠
-		"a\x01b",   // 控制字符
-		"a\x1fb",   // 控制字符(单位分隔符)
-		"a\x7fb",   // DEL
+		"",                                              // 空
+		"a/b",                                           // 路径分隔符
+		`a\b`,                                           // 反斜杠
+		"a\x01b",                                        // 控制字符
+		"a\x1fb",                                        // 控制字符(单位分隔符)
+		"a\x7fb",                                        // DEL
 		"a:b", "a*b", "a?b", `a"b`, "a<b", "a>b", "a|b", // Windows 保留符号
 		"a.", "a ", "..", "...", ". ", // 结尾点/空格
 		"CON", "con", "con.txt", "CON.TXT", // 保留设备名(含扩展名形式)

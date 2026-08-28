@@ -39,12 +39,14 @@ mod log; // 日志模块(与 Go 侧 orbitcloud/log 对齐;宏经 #[macro_use] �
 mod flag; // 配置读取/解析与命令行入口
 mod registry; // 桶实例注册表(连接意图 → 桶实例)
 mod remote_backend; // 到 Go 网关的帧协议客户端 + SMB 后端适配
-mod sync; // 用户/共享/ACL 同步
+mod sync; // 共享对账 + 增量推送(用户维度按需缓存)
 mod types; // 帧协议契约类型与常量
+mod user_cache; // 用户快照缓存(大 key 库,认证按需拉取)
 
 use std::sync::Arc; // Arc:跨任务共享所有权(连接/注册表等)
 use std::time::Duration; // 时长类型(退避等待/对账周期)
 
+use smb_server::ConfigHandle; // 协议层配置句柄(桥接槽位用)
 use smb_server::SmbServer; // ixr-smb-server 的 SMB 服务端构建器
 
 use crate::core::enter::Config; // 全局配置结构(解析自 SMB.yaml)
@@ -85,20 +87,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     infof!("网关:已连接 {} (客户端 {})", &["SMB"], cfg.gateway.addr, hostname()); // 记录连接成功
 
     // ---- 5. 构建 SMB 服务器(初始无共享,全部动态注册)----
+    // 桶实例注册表提前创建:认证按需解析器(user_resolver)需要引用它
+    // (users_index 身份映射由按需拉取维护)。
+    let registry = Arc::new(BucketRegistry::new()); // 桶实例注册表(Arc:sync 任务写、协议层读)
+    // 用户快照缓存(大 key 库):TTL 自动过期 + 容量上限兜底;认证未命中时
+    // 经 CODE_AUTH_QUERY_USER 按需拉取并回填(取代全量用户表对账)。
+    let user_cache = crate::user_cache::UserCache::new(
+        Duration::from_secs(cfg.gateway.user_cache_ttl_secs.max(1)), // TTL(秒,下限 1)
+        cfg.gateway.user_cache_capacity.max(1), // 容量上限(下限 1)
+    );
     let listen: std::net::SocketAddr = cfg
         .smb
         .listen
         .parse() // 把配置字符串解析为 SocketAddr
         .map_err(|e| format!("配置:smb.listen {:?}: {e}", cfg.smb.listen))?; // 解析失败:带原文报错终止
+    // 配置句柄延迟桥:builder 注入 resolver 时 handle 尚未创建(build 后才可用),
+    // 认证在运行期发生,届时从槽位取已填充的句柄。
+    let handle_slot: Arc<std::sync::Mutex<Option<ConfigHandle>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // 当前连接槽位:断线重连由监督任务替换新连接,resolver 每次认证从槽位取
+    // 最新连接(避免持死旧连接导致重连后认证全部失败)。
+    let conn_slot: Arc<std::sync::Mutex<Arc<GatewayClient>>> =
+        Arc::new(std::sync::Mutex::new(Arc::clone(&conn)));
     let server: SmbServer = SmbServer::builder() // 构建 SMB 服务端
         .listen(listen) // 监听地址(如 0.0.0.0:2445)
         .netbios_name(&cfg.smb.netbios_name) // NetBIOS 显示名
+        .user_resolver({
+            // 认证按需解析器(连接用户维度):
+            //   1) 凭据:缓存命中直接返回;未命中/过期 → QUERY_USER 拉取并回填;
+            //   2) 授权:凭据可用后 → QUERY_ACL 拉该用户可见共享并授权
+            //      (注册表 upsert + grant;权限收紧即时 revoke)。
+            let registry2 = Arc::clone(&registry);
+            let cache2 = user_cache.clone();
+            let conn2 = Arc::clone(&conn_slot);
+            let handle2 = Arc::clone(&handle_slot);
+            move |username: String| {
+                let registry3 = Arc::clone(&registry2);
+                let cache3 = cache2.clone();
+                // 取当前连接(重连后自动指向新连接);先克隆出锁作用域再 await
+                let conn3 = conn2.lock().unwrap().clone();
+                let handle3 = Arc::clone(&handle2);
+                Box::pin(async move {
+                    let Some(cached) = cache3
+                        .ensure(&conn3, &registry3.users_index(), &username)
+                        .await
+                    else {
+                        return None;
+                    };
+                    // 登记为"认证过的用户"(周期刷新维度:凭据/ACL 每周期收敛)
+                    cache3.mark_authenticated(&username);
+                    // 凭据可用后:先把凭据写入协议层用户表(ServerState.ensure_user
+                    // 在 resolver 返回后才写表,而 grant 要求表内已存在该用户),
+                    // 再按需刷新共享授权(失败不阻断认证,下次再试)。
+                    // 注意:句柄先克隆出锁作用域再 await(guard 非 Send)
+                    let handle_opt = handle3.lock().unwrap().clone();
+                    infof!(
+                        "缓存:认证解析 {username} 凭据命中(handle_slot={})",
+                        &["SMB"],
+                        handle_opt.is_some()
+                    );
+                    if let Some(h) = handle_opt {
+                        let hash_hex = hex::encode(cached.creds.nt_hash);
+                        if let Err(e) = h.add_user_nt_hash(&username, &hash_hex).await {
+                            warnf!("缓存:写入用户 {username} 凭据失败:{e:?}", &["SMB"]);
+                        }
+                        cache3
+                            .ensure_user_acl(&conn3, &registry3, &h, &username)
+                            .await;
+                    }
+                    Some(cached.creds)
+                })
+            }
+        })
         .build() // 完成构建
         .map_err(|e| format!("SMB 服务器构建失败:{e:?}"))?; // 构建失败终止
     let handle = server.config_handle(); // 配置句柄:后续动态注册用户/共享/ACL 都经它
+    *handle_slot.lock().unwrap() = Some(handle.clone()); // 填充桥接槽位(认证时取用)
 
-    // ---- 6. 启动同步任务(全量快照 + 增量推送 + 定期对账)----
-    let registry = Arc::new(BucketRegistry::new()); // 桶实例注册表(Arc:sync 任务写、协议层读)
+    // ---- 6. 启动同步任务(共享全量对账 + 增量推送;用户按需缓存)----
     let interval = if cfg.gateway.sync_interval_secs > 0 {
         Duration::from_secs(cfg.gateway.sync_interval_secs) // 用配置的对账周期
     } else {
@@ -113,15 +179,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_id2 = client_id.clone(); // 预克隆客户端标识(重连握手用)
     let chbuf = cfg.gateway.channel_buffer; // 预取管道容量(重连建管道用)
     let rpc_timeout2 = rpc_timeout; // 预取 RPC 超时(重连建客户端用)
+    let conn_slot2 = Arc::clone(&conn_slot); // 连接槽位(重连成功后同步,resolver 取用)
     {
         let registry2 = Arc::clone(&registry); // 克隆注册表引用给同步任务
         let handle2 = handle.clone(); // 克隆配置句柄给同步任务
+        let cache2 = user_cache.clone(); // 克隆用户缓存给同步任务
         sync_task = Some(tokio::spawn(sync_loop( // 首次拉起同步任务(后台常驻)
             Arc::clone(&current), // 共享当前连接
             registry2, // 桶注册表
             handle2, // 配置句柄
+            cache2, // 用户快照缓存(认证按需)
             push_rx, // 增量推送接收端(MSG_AUTH_PUSH)
-            interval, // 对账周期
+            interval, // 共享对账周期
         )));
         infof!("同步任务已启动(每 {} 秒对账一次)", &["SMB"], interval.as_secs()); // 记录同步任务启动
     }
@@ -138,18 +207,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match GatewayClient::connect(&addr, key2.clone(), client_id2.clone(), chbuf, rpc_timeout2).await { // 重连+握手
                 Ok((new_conn, new_push_rx)) => { // 重连成功
                     current = Arc::clone(&new_conn); // 换用新连接(后续轮询检查它)
+                    *conn_slot2.lock().unwrap() = Arc::clone(&new_conn); // 同步连接槽位(resolver 用)
                     if let Some(t) = sync_task.take() { // 取出旧同步任务句柄
                         t.abort(); // 终止旧任务(绑定的是已死连接)
                     }
                     let registry3 = Arc::clone(&registry); // 重新克隆注册表
                     let handle3 = handle.clone(); // 重新克隆配置句柄
+                    let cache3 = user_cache.clone(); // 重新克隆用户缓存
                     sync_task = Some(tokio::spawn(sync_loop( // 用新连接重建同步任务
                         Arc::clone(&new_conn), // 新连接
                         registry3, // 桶注册表
                         handle3, // 配置句柄
+                        cache3, // 用户快照缓存(认证按需)
                         new_push_rx, // 新推送接收端
-                        interval, // 对账周期
-                    ))); // 启动即全量快照:补回断线期间丢失的增量推送
+                        interval, // 共享对账周期
+                    ))); // 启动即共享对账:补回断线期间丢失的增量推送
                     infof!("网关:已重新连接", &["SMB"]); // 记录重连成功
                     delay = 1; // 退避归零
                 }

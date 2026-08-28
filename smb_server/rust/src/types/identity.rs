@@ -37,7 +37,10 @@ pub struct ShareInfo {
     pub bucket_id: u64, // 桶主键 ID(对象桶名 = BucketEncoder(id))
     pub bucket_name: String, // 桶显示名
     pub mode: String, // 共享级默认权限:"readwrite" | "readonly"
-    pub users: Vec<ShareUserAccess>, // ACL 用户清单(空 = 仅 mode 生效)
+    /// ACL 用户清单(空 = 仅 mode 生效)。
+    /// 快照不再聚合 ACL(按需授权),Go 侧可能下发 null/nil —— serde(default) 容错。
+    #[serde(default)]
+    pub users: Vec<ShareUserAccess>,
     pub quota: u64, // 桶容量配额(字节;0 = 不限)
     pub used_space: u64, // 桶已用空间(字节;剩余容量上报)
     pub status: i32, // 桶状态(1 正常 / 0 禁用 = 实例下线)

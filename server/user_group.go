@@ -80,7 +80,6 @@ func ListGroups(ctx context.Context, arg ListGroupsArg) (total int64, items []mo
 	if err != nil {
 		return 0, nil, err
 	}
-	db := core.DB.WithContext(ctx)
 	opt := common.NewOption(page, pageSize)
 	opt.DefaultOrder = "created_at DESC"
 	if !user.PermissionLevel.IsAdmin() {
@@ -91,17 +90,17 @@ func ListGroups(ctx context.Context, arg ListGroupsArg) (total int64, items []mo
 		if len(ids) == 0 {
 			return 0, []model.UserGroup{}, nil // 无组可看,直接空页
 		}
-		db = db.Where("id IN ?", ids)
+		opt.Filters = append(opt.Filters, func(db *gorm.DB) *gorm.DB {
+			return db.Where("id IN ?", ids)
+		})
 	}
 
-	// 分页查询 + 总数(同一过滤谓词)
-	items = []model.UserGroup{}
-	if _, err := common.Paginate(db, opt, &items); err != nil {
+	// 分页查询 + 总数(同一过滤谓词;统一走 common.PageQuery)
+	res, err := common.PageQuery(model.UserGroup{}, *opt, nil)
+	if err != nil {
 		return 0, nil, fmt.Errorf("list groups: %w", err)
 	}
-	if err := db.Model(&model.UserGroup{}).Count(&total).Error; err != nil {
-		return 0, nil, fmt.Errorf("list groups count: %w", err)
-	}
+	items, total = res.List, res.Total
 	return total, items, nil
 }
 
@@ -271,17 +270,18 @@ func ListGroupMembers(ctx context.Context, arg ListGroupMembersArg) (total int64
 		return 0, nil, err
 	}
 
-	// 分页查询成员行(按创建时间倒序)
-	members := []model.UserGroupMember{}
+	// 分页查询成员行(按创建时间倒序;统一走 common.PageQuery)
 	opt := common.NewOption(page, pageSize)
 	opt.DefaultOrder = "created_at DESC"
-	if _, err := common.Paginate(core.DB.WithContext(ctx).Where("group_id = ?", groupID), opt, &members); err != nil {
+	opt.Filters = []func(*gorm.DB) *gorm.DB{
+		func(db *gorm.DB) *gorm.DB { return db.Where("group_id = ?", groupID) },
+	}
+	res, err := common.PageQuery(model.UserGroupMember{}, *opt, nil)
+	if err != nil {
 		return 0, nil, fmt.Errorf("list group members: %w", err)
 	}
-	if err := core.DB.WithContext(ctx).Model(&model.UserGroupMember{}).
-		Where("group_id = ?", groupID).Count(&total).Error; err != nil {
-		return 0, nil, fmt.Errorf("list group members count: %w", err)
-	}
+	members := res.List
+	total = res.Total
 
 	// 批量补用户信息(IN 一次取全;软删用户自动跳过)
 	items = make([]MemberInfo, 0, len(members))

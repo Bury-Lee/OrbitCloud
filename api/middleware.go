@@ -1,4 +1,4 @@
-﻿// middleware.go 鉴权/管理员/请求日志/执行池中间件。
+// middleware.go 鉴权/管理员/请求日志/执行池中间件。
 package api
 
 import (
@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
@@ -37,6 +39,20 @@ func AuthMiddleware(c *gin.Context) {
 		return
 	}
 
+	// 限流:账号维度(AuthMiddleware 在 handler 链中执行,此时 claims 已就绪;
+	// 全局 RateLimitMiddleware 先于本中间件,只能做 IP 维度)
+	if rl := server.RateLimit; rl != nil && rl.Enabled() {
+		if !rl.AllowUser(claims.UserID) {
+			rl.Record(server.RateLimitRecord{
+				Time: time.Now(), IP: c.ClientIP(), Method: c.Request.Method,
+				Path: c.Request.URL.Path, UserID: claims.UserID, Username: claims.Username, Reason: "user",
+			})
+			common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
+			c.Abort()
+			return
+		}
+	}
+
 	// 注入 gin context
 	c.Set(claimsKey, claims)
 	c.Next()
@@ -59,6 +75,34 @@ func QueryTokenAuthMiddleware(c *gin.Context) {
 		return
 	}
 	c.Set(claimsKey, claims)
+	c.Next()
+}
+
+// RateLimitMiddleware 限流中间件(全局挂载):按 IP 与账号双维度令牌桶,
+// 超限 → 429 + 记录(IP/账号/路径,见 server/ratelimit.go)。
+// 配置 rate_limit.enabled 时生效;skip_paths 前缀放行。
+func RateLimitMiddleware(c *gin.Context) {
+	rl := server.RateLimit
+	if rl == nil || !rl.Enabled() {
+		c.Next()
+		return
+	}
+	// 放行路径前缀(如 /auth/login 防误伤)
+	path := c.Request.URL.Path
+	for _, p := range rl.SkipPaths() {
+		if p != "" && strings.HasPrefix(path, p) {
+			c.Next()
+			return
+		}
+	}
+	// IP 维度
+	ip := c.ClientIP()
+	if !rl.AllowIP(ip) {
+		rl.Record(server.RateLimitRecord{Time: time.Now(), IP: ip, Method: c.Request.Method, Path: path, Reason: "ip"})
+		common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
+		c.Abort()
+		return
+	}
 	c.Next()
 }
 
@@ -138,13 +182,16 @@ func RequestLogMiddleware(c *gin.Context) {
 //   - 池有界队列满时 SubmitCtx 阻塞 → 背压自然传导至 HTTP Server → 客户端。
 //   - 流式接口(下载/预览/流媒体/批量下载)不用此中间件,改用 StreamingPoolMiddleware。
 func ExecPoolMiddleware(c *gin.Context) {
-	done := make(chan struct{}, 1)
+	done := make(chan struct{})
 	core.ExecPool.SubmitCtx(c, agilepool.TaskFunc(func() error {
+		defer close(done)
 		c.Next()
-		close(done)
 		return nil
 	}))
-	<-done
+	select {
+	case <-done:
+	case <-c.Done():
+	}
 }
 
 // StreamingPoolMiddleware 流式请求准入中间件(下载/预览/流媒体/批量下载)。

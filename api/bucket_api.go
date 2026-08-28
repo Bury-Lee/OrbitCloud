@@ -1,4 +1,4 @@
-﻿// bucket_api.go 桶模块接口:创建 / 列表 / 详情 / 修改 / 删除。
+// bucket_api.go 桶模块接口:创建 / 列表 / 详情 / 修改 / 删除。
 // 桶管理权限与"仅允许创建同等级桶"规则在 api 层预检。
 package api
 
@@ -108,10 +108,11 @@ func (BucketAPI) ListBuckets(c *gin.Context) {
 
 // GetBucket 返回桶详情(GET /buckets/:id);任意登录用户可查看。
 func (BucketAPI) GetBucket(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req bucketPathReq
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 
 	bucket, err := server.GetBucket(c.Request.Context(), server.GetBucketArg{ID: bucketID})
 	if err != nil {
@@ -127,10 +128,18 @@ func (BucketAPI) GetBucket(c *gin.Context) {
 // (指针字段才更新);需满足桶管理权限(owner/管理员/管理等级满足);
 // 非管理员不得把等级改得比自身权限更高。
 func (BucketAPI) UpdateBucket(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		bucketPathReq
+		Description           string                 `json:"description"`
+		PermissionLevel       *model.PermissionLevel `json:"permission_level"`
+		ManagePermissionLevel *model.PermissionLevel `json:"manage_permission_level"`
+		Quota                 *int64                 `json:"quota"`
+		Status                *int                   `json:"status"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -146,13 +155,6 @@ func (BucketAPI) UpdateBucket(c *gin.Context) {
 	}
 
 	// 解析请求体(本地 DTO 带 json tag,避免 server 层结构体直接绑定)
-	var req struct {
-		Description           string                 `json:"description"`
-		PermissionLevel       *model.PermissionLevel `json:"permission_level"`
-		ManagePermissionLevel *model.PermissionLevel `json:"manage_permission_level"`
-		Quota                 *int64                 `json:"quota"`
-		Status                *int                   `json:"status"`
-	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -179,10 +181,11 @@ func (BucketAPI) UpdateBucket(c *gin.Context) {
 // DeleteBucket 删除桶(DELETE /buckets/:id,级联清理桶内文件,成功 204)。
 // 删除经任务表持久化:先禁用桶,后台分批清理对象存储,中断后由启动扫描续跑。
 func (BucketAPI) DeleteBucket(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req bucketPathReq
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 

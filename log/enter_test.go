@@ -203,10 +203,10 @@ func TestShortPath(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"orbitcloud/api/auth_api.go", "api/auth_api.go"},     // module 前缀剥离(配合 -trimpath)
-		{"orbitcloud\\api\\auth_api.go", "api/auth_api.go"},   // 反斜杠归一化
-		{"C:\\src\\orbitcloud\\main.go", "main.go"},           // 无法相对化(跨盘)→ base 兜底
-		{"/opt/orbitcloud/core/storage.go", "storage.go"},     // 无法相对化(异盘根)→ base 兜底
+		{"orbitcloud/api/auth_api.go", "api/auth_api.go"},   // module 前缀剥离(配合 -trimpath)
+		{"orbitcloud\\api\\auth_api.go", "api/auth_api.go"}, // 反斜杠归一化
+		{"C:\\src\\orbitcloud\\main.go", "main.go"},         // 无法相对化(跨盘)→ base 兜底
+		{"/opt/orbitcloud/core/storage.go", "storage.go"},   // 无法相对化(异盘根)→ base 兜底
 	}
 	for _, c := range cases {
 		if got := shortPath(c.in); got != c.want {

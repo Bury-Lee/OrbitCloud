@@ -12,15 +12,15 @@ import (
 // 验证:marshalFrameHeader → unmarshalFrameHeader 字段无损。
 func TestFrameHeaderRoundTrip(t *testing.T) {
 	hdr := FrameHeader{ // 构造样例帧头
-		Magic:   Magic, // 魔数
-		Version: Version, // 版本
+		Magic:   Magic,         // 魔数
+		Version: Version,       // 版本
 		Flags:   FlagNeedReply, // 需响应标记
-		MsgType: MSG_OPERATE, // 总操作类型
-		Seq:     42, // 序列号
-		BodyLen: 1234, // 长度
+		MsgType: MSG_OPERATE,   // 总操作类型
+		Seq:     42,            // 序列号
+		BodyLen: 1234,          // 长度
 	}
 	raw := marshalFrameHeader(hdr) // 编码为字节
-	if len(raw) != headerLen { // 长度断言
+	if len(raw) != headerLen {     // 长度断言
 		t.Fatalf("header length = %d, want %d", len(raw), headerLen) // 失败即终止
 	}
 	got, err := unmarshalFrameHeader(raw) // 解码回来
@@ -35,7 +35,7 @@ func TestFrameHeaderRoundTrip(t *testing.T) {
 // TestUnmarshalFrameHeaderRejectsBadMagic 坏魔数必须报错(协议硬契约)。
 func TestUnmarshalFrameHeaderRejectsBadMagic(t *testing.T) {
 	raw := marshalFrameHeader(FrameHeader{Magic: 0xDEADBEEF, Version: Version}) // 非法魔数帧头
-	if _, err := unmarshalFrameHeader(raw); err == nil { // 必须报错
+	if _, err := unmarshalFrameHeader(raw); err == nil {                        // 必须报错
 		t.Fatal("bad magic accepted") // 未报错 = 失败
 	}
 }
@@ -43,7 +43,7 @@ func TestUnmarshalFrameHeaderRejectsBadMagic(t *testing.T) {
 // TestMarshalFrameBodyLen 组帧时 BodyLen 自动回填。
 func TestMarshalFrameBodyLen(t *testing.T) {
 	frame := marshalFrame(FrameHeader{MsgType: MSG_OPERATE}, []byte("hello")) // 组帧(body 5 字节)
-	if len(frame) != headerLen+5 { // 总长 = 16 + 5?
+	if len(frame) != headerLen+5 {                                            // 总长 = 16 + 5?
 		t.Fatalf("frame length = %d, want %d", len(frame), headerLen+5) // 长度不符
 	}
 	hdr, err := unmarshalFrameHeader(frame[:headerLen]) // 解析帧头部分
@@ -58,8 +58,8 @@ func TestMarshalFrameBodyLen(t *testing.T) {
 // TestOperateBodyRoundTrip 控制面 body 布局:[4B jsonLen] + JSON + 流段。
 func TestOperateBodyRoundTrip(t *testing.T) {
 	req := &OperateRequest{Code: CodeFileWrite, Write: &WriteArgs{HandleID: 7, Offset: 99}} // 写请求
-	stream := []byte{1, 2, 3, 4} // 模拟流段
-	body, err := marshalOperateBody(req, stream) // 编码
+	stream := []byte{1, 2, 3, 4}                                                            // 模拟流段
+	body, err := marshalOperateBody(req, stream)                                            // 编码
 	if err != nil {
 		t.Fatal(err) // 编码失败
 	}
@@ -70,7 +70,7 @@ func TestOperateBodyRoundTrip(t *testing.T) {
 	if !bytes.Equal(streamOut, stream) { // 流段原样?
 		t.Fatalf("stream mismatch: %v", streamOut) // 不符
 	}
-	var got OperateRequest // 解析目标
+	var got OperateRequest                                  // 解析目标
 	if err := json.Unmarshal(jsonBytes, &got); err != nil { // JSON 段反序列化
 		t.Fatal(err) // 失败
 	}
@@ -82,7 +82,7 @@ func TestOperateBodyRoundTrip(t *testing.T) {
 // TestSplitOperateBodyOverflow jsonLen 越界必须报错(硬契约)。
 func TestSplitOperateBodyOverflow(t *testing.T) {
 	// 构造 jsonLen 大于 body 剩余长度的坏帧。
-	bad := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00} // jsonLen=0xFFFFFFFF 远超实际
+	bad := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00}         // jsonLen=0xFFFFFFFF 远超实际
 	if _, _, err := splitOperateBody(bad); err == nil { // 必须报错
 		t.Fatal("overflow accepted") // 未报错 = 失败
 	}
@@ -95,7 +95,7 @@ type mockHandler struct {
 }
 
 func (m *mockHandler) HandleAuthQueryUser(_ context.Context, args *AuthUserArgs) (*AuthUserResult, error) {
-	m.authUserCalls++ // 计数
+	m.authUserCalls++                                                                                    // 计数
 	return &AuthUserResult{Found: true, Cred: &UserCred{Username: args.Username, NtHashHex: "abc"}}, nil // 固定返回
 }
 func (m *mockHandler) HandleAuthQueryAcl(_ context.Context, _ *AuthAclArgs) (*AuthAclResult, error) {
@@ -105,7 +105,7 @@ func (m *mockHandler) HandleAuthSnapshot(_ context.Context, _ *SnapshotArgs) (*S
 	return &SnapshotResult{Users: []UserCred{}, Shares: []ShareInfo{}}, nil // 空快照
 }
 func (m *mockHandler) HandleFileOpen(_ context.Context, _ *OpenArgs) (*OpenResult, error) {
-	m.openCalls++ // 计数
+	m.openCalls++                                       // 计数
 	return &OpenResult{HandleID: 1, EndOfFile: 10}, nil // 固定结果
 }
 func (m *mockHandler) HandleFileRead(_ context.Context, _ *ReadArgs) (*ReadResult, []byte, error) {
@@ -129,9 +129,9 @@ func (m *mockHandler) HandleFileRename(_ context.Context, _ *RenameArgs) error {
 
 // TestRouteDispatch 正常路由:code 与指针匹配 → 调用对应 handler 方法。
 func TestRouteDispatch(t *testing.T) {
-	m := &mockHandler{} // 记录器
+	m := &mockHandler{}                                                                         // 记录器
 	req := &OperateRequest{Code: CodeAuthQueryUser, AuthUser: &AuthUserArgs{Username: "alice"}} // 合法请求
-	resp, _, err := req.Route(context.Background(), m, nil) // 路由
+	resp, _, err := req.Route(context.Background(), m, nil)                                     // 路由
 	if err != nil {
 		t.Fatal(err) // 路由错误
 	}
@@ -148,8 +148,8 @@ func TestRouteDispatch(t *testing.T) {
 
 // TestRouteCodeZeroRejected Code=0(未填写)必须拒绝。
 func TestRouteCodeZeroRejected(t *testing.T) {
-	m := &mockHandler{} // 记录器
-	req := &OperateRequest{} // code 默认 0
+	m := &mockHandler{}                                     // 记录器
+	req := &OperateRequest{}                                // code 默认 0
 	resp, _, err := req.Route(context.Background(), m, nil) // 路由
 	if err != nil {
 		t.Fatal(err) // 不应有路由级错误(业务错误进 Err)
@@ -161,10 +161,10 @@ func TestRouteCodeZeroRejected(t *testing.T) {
 
 // TestRouteMultipleArgsRejected 多指针同时非 nil 必须拒绝(防误填)。
 func TestRouteMultipleArgsRejected(t *testing.T) {
-	m := &mockHandler{} // 记录器
+	m := &mockHandler{}     // 记录器
 	req := &OperateRequest{ // 构造误填请求
-		Code:   CodeFileOpen, // 声明打开
-		Open:   &OpenArgs{}, // 打开参数
+		Code:   CodeFileOpen,  // 声明打开
+		Open:   &OpenArgs{},   // 打开参数
 		Unlink: &UnlinkArgs{}, // 误填:与 code 不匹配
 	}
 	resp, _, err := req.Route(context.Background(), m, nil) // 路由
@@ -178,8 +178,8 @@ func TestRouteMultipleArgsRejected(t *testing.T) {
 
 // TestRouteArgsMissing Code 有值但对应指针为 nil 必须拒绝。
 func TestRouteArgsMissing(t *testing.T) {
-	m := &mockHandler{} // 记录器
-	req := &OperateRequest{Code: CodeFileOpen} // open 指针未填
+	m := &mockHandler{}                                     // 记录器
+	req := &OperateRequest{Code: CodeFileOpen}              // open 指针未填
 	resp, _, err := req.Route(context.Background(), m, nil) // 路由
 	if err != nil {
 		t.Fatal(err) // 不应有路由级错误
@@ -191,8 +191,8 @@ func TestRouteArgsMissing(t *testing.T) {
 
 // TestRouteUnknownCode 未知操作码 → NotImpl。
 func TestRouteUnknownCode(t *testing.T) {
-	m := &mockHandler{} // 记录器
-	req := &OperateRequest{Code: 9999, Open: &OpenArgs{}} // 未知码
+	m := &mockHandler{}                                     // 记录器
+	req := &OperateRequest{Code: 9999, Open: &OpenArgs{}}   // 未知码
 	resp, _, err := req.Route(context.Background(), m, nil) // 路由
 	if err != nil {
 		t.Fatal(err) // 不应有路由级错误
@@ -204,9 +204,9 @@ func TestRouteUnknownCode(t *testing.T) {
 
 // TestRouteReadReturnsStream Read 操作必须带回流数据段。
 func TestRouteReadReturnsStream(t *testing.T) {
-	m := &mockHandler{} // 记录器
+	m := &mockHandler{}                                                                            // 记录器
 	req := &OperateRequest{Code: CodeFileRead, Read: &ReadArgs{HandleID: 1, Offset: 0, Length: 2}} // 读请求
-	resp, streamOut, err := req.Route(context.Background(), m, nil) // 路由
+	resp, streamOut, err := req.Route(context.Background(), m, nil)                                // 路由
 	if err != nil {
 		t.Fatal(err) // 不应有路由级错误
 	}

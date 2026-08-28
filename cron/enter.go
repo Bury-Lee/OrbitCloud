@@ -16,6 +16,7 @@ import (
 	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/model"
+	"orbitcloud/server"
 )
 
 // Start 启动全部定时任务(由 main 调用;常驻协程,进程退出即终止)。
@@ -46,6 +47,13 @@ func Start(cfg *config.Config, db *gorm.DB) {
 				if err := ResumeCopyTasks(context.Background()); err != nil {
 					log.Errorf("cron: resume copy tasks: %v", err)
 				}
+				// 回收站过期清理:保留期 >0 才启用(软删超过保留天数 → 物理清除)
+				if days := cfg.RecycleBin.RetentionDays; days > 0 {
+					if _, _, err := server.CleanExpiredRecycleBin(context.Background(),
+						server.CleanExpiredRecycleBinArg{Cutoff: time.Now().AddDate(0, 0, -days)}); err != nil {
+						log.Errorf("cron: clean expired recycle bin: %v", err)
+					}
+				}
 				// 用户用量对账:以 files 表为权威修正 users.used_space 漂移
 				// if _, err := ReconcileUserUsages(db); err != nil {
 				// 	log.Errorf("cron: reconcile user usages: %v", err)
@@ -56,7 +64,8 @@ func Start(cfg *config.Config, db *gorm.DB) {
 	}()
 }
 
-// CleanExpiredLogs 清理超过保留期的日志(operation_logs 与 logs 两表),分批直到清完。
+// CleanExpiredLogs 清理超过保留期的日志(operation_logs 与 logs 两表),
+// 分批 keyset 游标累计直到清完(每批只扫游标之后增量,避免从头全表扫描)。
 // retentionDays <= 0 → 默认 30;必须 Unscoped() 物理删除(软删仍占表空间,防膨胀目的落空)。
 func CleanExpiredLogs(db *gorm.DB, retentionDays, batchSize int) (int64, error) {
 	if retentionDays <= 0 {
@@ -68,18 +77,36 @@ func CleanExpiredLogs(db *gorm.DB, retentionDays, batchSize int) (int64, error) 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
 	var total int64
+	var lastOpID, lastLogID uint
+	var opIDs, logIDs []uint
+	var err error
 	for {
-		res := db.Unscoped().Where("created_at < ?", cutoff).Limit(batchSize).Delete(&model.OperationLog{})
-		if res.Error != nil {
-			return total, res.Error
+		// operation_logs 批
+		opIDs, lastOpID, err = nextIDBatch(db.Unscoped(), &model.OperationLog{}, "created_at < ?", []any{cutoff}, lastOpID, batchSize)
+		if err != nil {
+			return total, err
 		}
-		total += res.RowsAffected
-		resLog := db.Unscoped().Where("created_at < ?", cutoff).Limit(batchSize).Delete(&model.Log{})
-		if resLog.Error != nil {
-			return total, resLog.Error
+		if len(opIDs) > 0 {
+			res := db.Unscoped().Where("id IN ?", opIDs).Delete(&model.OperationLog{})
+			if res.Error != nil {
+				return total, res.Error
+			}
+			total += res.RowsAffected
 		}
-		total += resLog.RowsAffected
-		if res.RowsAffected == 0 && resLog.RowsAffected == 0 {
+		// logs 批
+		logIDs, lastLogID, err = nextIDBatch(db.Unscoped(), &model.Log{}, "created_at < ?", []any{cutoff}, lastLogID, batchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(logIDs) > 0 {
+			resLog := db.Unscoped().Where("id IN ?", logIDs).Delete(&model.Log{})
+			if resLog.Error != nil {
+				return total, resLog.Error
+			}
+			total += resLog.RowsAffected
+		}
+		// 两表都取不满一批 = 已清完
+		if len(opIDs) < batchSize && len(logIDs) < batchSize {
 			break
 		}
 		time.Sleep(5 * time.Second) // 每 5 秒清一批
@@ -88,51 +115,71 @@ func CleanExpiredLogs(db *gorm.DB, retentionDays, batchSize int) (int64, error) 
 	return total, nil
 }
 
-// CleanExpiredTokens 物理清理过期/已吊销的刷新令牌(refresh_tokens 白名单防膨胀)。
+// CleanExpiredTokens 物理清理过期/已吊销的刷新令牌(refresh_tokens 白名单防膨胀),
+// keyset 游标分批(同 CleanExpiredLogs)。
 // 软删记录仍占唯一索引(token 哈希)与磁盘空间,必须 Unscoped() 真正删除。
 func CleanExpiredTokens(db *gorm.DB, batchSize int) (int64, error) {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
 	var total int64
+	var lastID uint
+	var ids []uint
+	var err error
 	for {
-		res := db.Unscoped().Where("expires_at < ? OR revoked_at IS NOT NULL", time.Now()).
-			Limit(batchSize).Delete(&model.RefreshToken{})
+		ids, lastID, err = nextIDBatch(db.Unscoped(), &model.RefreshToken{}, "expires_at < ? OR revoked_at IS NOT NULL", []any{time.Now()}, lastID, batchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			break
+		}
+		res := db.Unscoped().Where("id IN ?", ids).Delete(&model.RefreshToken{})
 		if res.Error != nil {
 			return total, res.Error
 		}
-		if res.RowsAffected == 0 {
+		total += res.RowsAffected
+		if len(ids) < batchSize {
 			break
 		}
-		total += res.RowsAffected
 	}
 	log.Infof("cron: cleaned %d expired/revoked refresh tokens", total)
 	return total, nil
 }
 
-// CleanExpiredShares 清理已过期的分享链接(软删;过期即失效,保留无意义)。
+// CleanExpiredShares 清理已过期的分享链接(软删;过期即失效,保留无意义),
+// keyset 游标分批(同 CleanExpiredLogs)。
 func CleanExpiredShares(db *gorm.DB, batchSize int) (int64, error) {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
 	var total int64
+	var lastID uint
+	var ids []uint
+	var err error
 	for {
-		res := db.Where("expires_at < ?", time.Now()).
-			Limit(batchSize).Delete(&model.ShareLink{})
+		ids, lastID, err = nextIDBatch(db, &model.ShareLink{}, "expires_at < ?", []any{time.Now()}, lastID, batchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			break
+		}
+		res := db.Where("id IN ?", ids).Delete(&model.ShareLink{})
 		if res.Error != nil {
 			return total, res.Error
 		}
-		if res.RowsAffected == 0 {
+		total += res.RowsAffected
+		if len(ids) < batchSize {
 			break
 		}
-		total += res.RowsAffected
 	}
 	log.Infof("cron: cleaned %d expired shares", total)
 	return total, nil
 }
 
 // CleanExpiredDownloadTasks 物理清理超过保留期(默认 7 天)的下载任务。// 下载任务是断点续传的临时登记(断点权威在客户端本地),完成即 DELETE;
-// 未完成但超期未恢复的遗留行保留无意义,物理删除防表膨胀。
+// 未完成但超期未恢复的遗留行保留无意义,物理删除防表膨胀,keyset 游标分批。
 // 被清理后客户端恢复下载不硬断:前端重新登记任务并续传。
 func CleanExpiredDownloadTasks(db *gorm.DB, retentionDays, batchSize int) (int64, error) {
 	if retentionDays <= 0 {
@@ -144,19 +191,47 @@ func CleanExpiredDownloadTasks(db *gorm.DB, retentionDays, batchSize int) (int64
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
 	var total int64
+	var lastID uint
+	var ids []uint
+	var err error
 	for {
-		res := db.Unscoped().Where("created_at < ?", cutoff).
-			Limit(batchSize).Delete(&model.DownloadTask{})
+		ids, lastID, err = nextIDBatch(db.Unscoped(), &model.DownloadTask{}, "created_at < ?", []any{cutoff}, lastID, batchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			break
+		}
+		res := db.Unscoped().Where("id IN ?", ids).Delete(&model.DownloadTask{})
 		if res.Error != nil {
 			return total, res.Error
 		}
-		if res.RowsAffected == 0 {
+		total += res.RowsAffected
+		if len(ids) < batchSize {
 			break
 		}
-		total += res.RowsAffected
 	}
 	log.Infof("cron: cleaned %d expired download tasks (retention %d days)", total, retentionDays)
 	return total, nil
+}
+
+// nextIDBatch 按主键升序 keyset 游标取一批 id(游标累计:从 lastID 之后开始,
+// 每批只扫游标之后的增量范围,避免从头全表扫描;返回本批 id 与末条 id 作为
+// 下一批游标)。ids 为空 = 已取尽。db 由调用方决定是否 Unscoped
+// (Share 软删清理不需要越过软删过滤)。
+func nextIDBatch(db *gorm.DB, table any, cond string, args []any, lastID uint, batchSize int) (ids []uint, next uint, err error) {
+	q := db.Model(table).Where(cond, args...)
+	if lastID > 0 {
+		q = q.Where("id > ?", lastID)
+	}
+	ids = []uint{}
+	if err := q.Order("id ASC").Limit(batchSize).Pluck("id", &ids).Error; err != nil {
+		return nil, lastID, err
+	}
+	if len(ids) > 0 {
+		lastID = ids[len(ids)-1]
+	}
+	return ids, lastID, nil
 }
 
 // 预备的函数

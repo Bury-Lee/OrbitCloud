@@ -153,7 +153,7 @@ func FolderSearch(ctx context.Context, arg FolderSearchArg) (folders []model.Fol
 	}
 
 	if err := core.DB.WithContext(ctx).Model(&model.Folder{}).
-		Where("bucket_id = ? AND parent_id = ? AND name_lower LIKE ? AND isable = true",
+		Where("bucket_id = ? AND parent_id = ? AND name_lower LIKE ? AND isable <> 0",
 			bucketID, targetFolderID, prefix).
 		Scopes(visibilityFilter(visSQL, visArgs)).
 		Order("created_at DESC").

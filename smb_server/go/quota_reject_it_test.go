@@ -1,7 +1,9 @@
-﻿// 超额状态下 SMB 写回审查集成测试(本地复现,验证 Close 路径审查拒绝):
+// 超额状态下 SMB 写回审查集成测试(本地复现,验证 Close 路径审查拒绝):
 // 前置:qt 配额 50MB、used 55MB(已超额)、文件 f.txt 1MB
 // 场景1:overwrite 打开 → 写 3MB(增长 delta=+2MB,<4MiB 缓存阈值)→ Close
-//        期望:Close 返回 ErrQuotaExceeded;记录/用量/对象均不变(旧数据保留)。
+//
+//	期望:Close 返回 ErrQuotaExceeded;记录/用量/对象均不变(旧数据保留)。
+//
 // 场景2:新建文件写 3MB → Close 拒绝 → 记录被清理(防 0 字节幽灵文件)。
 package smbgateway
 
@@ -17,7 +19,11 @@ import (
 
 func TestOverwriteOpenQuotaRejected(t *testing.T) {
 	db := newITDB(t)
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	q := int64(50 << 20)
 	u := &model.User{Username: "ow-rej", Password: "x", PermissionLevel: model.SuperAdmin, Status: 1, Quota: &q, UsedSpace: 55 << 20}

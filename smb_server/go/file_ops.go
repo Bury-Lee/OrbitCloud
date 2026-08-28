@@ -15,11 +15,11 @@
 package smbgateway
 
 import (
-	"context"   // 上下文(查询取消传播)
-	"fmt"       // 格式化(对象 key/错误)       // 服务日志(打开/拒绝记录)
-	"strings"   // 字符串小写(缓存键规范化)
-	"sync"      // sync.Map(共享上下文缓存)
-	"time"      // 句柄活动时间
+	"context" // 上下文(查询取消传播)
+	"fmt"     // 格式化(对象 key/错误)       // 服务日志(打开/拒绝记录)
+	"strings" // 字符串小写(缓存键规范化)
+	"sync"    // sync.Map(共享上下文缓存)
+	"time"    // 句柄活动时间
 
 	"orbitcloud/core"   // 对象存储抽象与全局 DB
 	"orbitcloud/model"  // 数据模型(File/Folder/Bucket/User)
@@ -63,7 +63,7 @@ func (f *FileOpsService) UnregisterShare(shareName string) {
 // 路径首段即共享名(共享根下第一级目录);未命中返回空 ShareInfo。
 func (f *FileOpsService) LookupShareByPath(path string) ShareInfo {
 	segs := splitSmbPath(path) // 拆路径段
-	if len(segs) == 0 { // 空路径(共享根)?
+	if len(segs) == 0 {        // 空路径(共享根)?
 		return ShareInfo{} // 无首段可解析
 	}
 	if v, ok := f.shareCache.Load(strings.ToLower(segs[0])); ok { // 按首段查缓存(小写)
@@ -75,10 +75,10 @@ func (f *FileOpsService) LookupShareByPath(path string) ShareInfo {
 // LookupShareByID 按桶 ID 解析共享上下文(句柄关闭等场景)。
 // 实现:遍历缓存找 BucketID 匹配项(缓存规模小,线性可接受)。
 func (f *FileOpsService) LookupShareByID(bucketID uint) ShareInfo {
-	var found ShareInfo // 命中的共享(默认空)
+	var found ShareInfo                      // 命中的共享(默认空)
 	f.shareCache.Range(func(_, v any) bool { // 遍历缓存条目
 		if s := v.(ShareInfo); s.BucketID == bucketID { // 桶 ID 匹配?
-			found = s // 记录命中
+			found = s    // 记录命中
 			return false // 停止遍历
 		}
 		return true // 继续遍历
@@ -90,7 +90,7 @@ func (f *FileOpsService) LookupShareByID(bucketID uint) ShareInfo {
 // 实现:查桶记录 → 组装共享上下文(操作者 = 桶属主)。
 func (f *FileOpsService) shareByID(ctx context.Context, bucketID uint) ShareInfo {
 	b, err := server.GetBucket(ctx, server.GetBucketArg{ID: bucketID}) // 按主键查桶
-	if err != nil || b.Status != 1 { // 查不到或桶禁用?
+	if err != nil || b.Status != 1 {                                   // 查不到或桶禁用?
 		return ShareInfo{} // 返回空上下文
 	}
 	return f.shareFromBucket(ctx, b) // 桶 → 共享上下文
@@ -99,19 +99,19 @@ func (f *FileOpsService) shareByID(ctx context.Context, bucketID uint) ShareInfo
 // shareFromBucket 由桶记录组装共享上下文(操作者 = 桶属主)。
 // 说明:ACL 列表仅含属主(可见性由 auth 侧兜底;此处主要提供桶上下文)。
 func (f *FileOpsService) shareFromBucket(ctx context.Context, b *model.Bucket) ShareInfo {
-	users := []ShareUserAccess{} // ACL 列表(默认空)
+	users := []ShareUserAccess{}                                                     // ACL 列表(默认空)
 	if u, err := server.GetUser(ctx, server.GetUserArg{ID: b.OwnerID}); err == nil { // 查桶属主
 		users = append(users, ShareUserAccess{Username: u.Username, Access: "readwrite"}) // 属主 = 读写
 	}
 	return ShareInfo{ // 组装共享上下文
-		ShareName:  b.Name, // 共享名 = 桶名
-		BucketID:   b.ID, // 桶主键
-		BucketName: b.Name, // 桶显示名
+		ShareName:  b.Name,      // 共享名 = 桶名
+		BucketID:   b.ID,        // 桶主键
+		BucketName: b.Name,      // 桶显示名
 		Mode:       "readwrite", // 共享读写模式
-		Users:      users, // ACL(仅属主)
-		Quota:      b.Quota, // 配额
+		Users:      users,       // ACL(仅属主)
+		Quota:      b.Quota,     // 配额
 		UsedSpace:  b.UsedSpace, // 已用空间
-		Status:     1, // 桶正常
+		Status:     1,           // 桶正常
 	}
 }
 
@@ -122,11 +122,11 @@ func (f *FileOpsService) resolveShareByPath(ctx context.Context, path string) Sh
 		return s // 直接返回
 	}
 	segs := splitSmbPath(path) // 拆路径段
-	if len(segs) == 0 { // 空路径?
+	if len(segs) == 0 {        // 空路径?
 		return ShareInfo{} // 无法解析
 	}
 	b, err := server.GetBucketByName(ctx, server.GetBucketByNameArg{Name: segs[0]}) // 按桶名查库
-	if err != nil || b.Status != 1 { // 查不到或禁用?
+	if err != nil || b.Status != 1 {                                                // 查不到或禁用?
 		return ShareInfo{} // 返回空
 	}
 	return f.shareFromBucket(ctx, b) // 桶 → 共享上下文
@@ -242,7 +242,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		share = f.shareByID(ctx, args.BucketID) // 按桶主键查库
 	}
 	if share.BucketID == 0 { // 三层都解析不到?
-		smbWarnf("smb_gateway: 打开失败:路径 %q 缺少共享上下文", args.Path) // 记录缺桶上下文
+		smbWarnf("smb_gateway: 打开失败:路径 %q 缺少共享上下文", args.Path)                  // 记录缺桶上下文
 		return nil, fmt.Errorf("open: missing share context for %q", args.Path) // 缺桶上下文:拒绝
 	}
 	// ---- 1.5 桶可用性 + 桶权限(同 HTTP 桶级校验:状态 + 权限等级/属主) ----
@@ -260,23 +260,23 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	// folderID=0,无记录行;无论 directory 标志如何一律按目录打开。
 	if path == "" { // 打开共享根?
 		h := &remoteHandle{ // 构造虚拟根句柄
-			share:      share, // 桶上下文
-			smbPath:    "", // 根路径
-			isDir:      true, // 视为目录
+			share:      share,          // 桶上下文
+			smbPath:    "",             // 根路径
+			isDir:      true,           // 视为目录
 			bucketID:   share.BucketID, // 桶
-			folderID:   0, // 虚拟根(无记录行)
-			userID:     userID, // 操作者
-			session:    info, // 身份(可见性过滤用)
-			connID:     connID, // 连接归属
-			truncateAt:  -1,            // 无截断(默认)
-			lastActive: time.Now(), // 活动时间
+			folderID:   0,              // 虚拟根(无记录行)
+			userID:     userID,         // 操作者
+			session:    info,           // 身份(可见性过滤用)
+			connID:     connID,         // 连接归属
+			truncateAt: -1,             // 无截断(默认)
+			lastActive: time.Now(),     // 活动时间
 		}
 		return &OpenResult{HandleID: f.handles.Alloc(h), IsDir: true, Exists: true}, nil // 登记并返回句柄
 	}
 	// ---- 3. 只读共享拒绝写 intent ----
 	if args.Write && share.Mode == "readonly" { // 请求写且共享只读?
 		smbWarnf("smb_gateway: 打开被拒:只读共享 %q 写意图 路径=%q", share.ShareName, args.Path) // 记录只读拒绝
-		return nil, server.ErrForbidden // 拒绝访问
+		return nil, server.ErrForbidden                                             // 拒绝访问
 	}
 
 	if args.Directory { // 目录打开分支
@@ -288,7 +288,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 			if err != nil {
 				return nil, server.ErrNotFound // 父链解析失败 = 不存在
 			}
-			dirID, derr := f.lookupFolder(ctx, share.BucketID, parentID, lastSegment(path), "isable = true") // 目标目录存在?
+			dirID, derr := f.lookupFolder(ctx, share.BucketID, parentID, lastSegment(path), "isable <> 0") // 目标目录存在?
 			if derr != nil {
 				return nil, server.ErrNotFound // 不存在:绝不隐式创建
 			}
@@ -320,9 +320,9 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		}
 		// create / open_or_create / overwrite:mkdir -p(已存在幂等)。
 		dir, err := server.CreateDir(ctx, server.CreateDirArg{ // 调 server 层建目录(幂等)
-			UserID:   userID, // 操作者(真实身份,修复 UserID=0 问题)
+			UserID:   userID,         // 操作者(真实身份,修复 UserID=0 问题)
 			BucketID: share.BucketID, // 桶
-			DirPath:  "/" + path, // 目录路径
+			DirPath:  "/" + path,     // 目录路径
 		})
 		if err != nil {
 			return nil, err // 建目录失败上抛
@@ -332,16 +332,16 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 			return nil, err
 		}
 		h := &remoteHandle{ // 构造目录句柄
-			share:      share, // 桶上下文
-			smbPath:    path, // 目录路径
-			isDir:      true, // 目录句柄
+			share:      share,          // 桶上下文
+			smbPath:    path,           // 目录路径
+			isDir:      true,           // 目录句柄
 			bucketID:   share.BucketID, // 桶
-			folderID:   dir.ID, // 目录记录主键
-			userID:     userID, // 操作者
-			session:    info, // 身份
-			connID:     connID, // 连接归属
-			truncateAt:  -1,            // 无截断(默认)
-			lastActive: time.Now(), // 活动时间
+			folderID:   dir.ID,         // 目录记录主键
+			userID:     userID,         // 操作者
+			session:    info,           // 身份
+			connID:     connID,         // 连接归属
+			truncateAt: -1,             // 无截断(默认)
+			lastActive: time.Now(),     // 活动时间
 		}
 		return &OpenResult{HandleID: f.handles.Alloc(h), IsDir: true, Exists: true}, nil // 登记返回
 	}
@@ -356,14 +356,14 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 	// 目标已存在目录:
 	//   - 显式 non_directory → FILE_IS_A_DIRECTORY(Windows Move-Item 探测用);
 	//   - 否则按目录打开(兼容资源管理器打开文件夹)。
-	if _, derr := f.lookupFolder(ctx, share.BucketID, folderID, name, "isable = true"); derr == nil { // 目标已是目录?
+	if _, derr := f.lookupFolder(ctx, share.BucketID, folderID, name, "isable <> 0"); derr == nil { // 目标已是目录?
 		if args.NonDirectory { // 显式按文件打开?
 			return nil, errIsDirectory // 报"是目录"
 		}
 		dir, cerr := server.CreateDir(ctx, server.CreateDirArg{ // 幂等建目录(拿记录 ID)
-			UserID:   userID, // 操作者
+			UserID:   userID,         // 操作者
 			BucketID: share.BucketID, // 桶
-			DirPath:  "/" + path, // 路径
+			DirPath:  "/" + path,     // 路径
 		})
 		if cerr != nil {
 			return nil, cerr // 失败上抛
@@ -373,16 +373,16 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 			return nil, err
 		}
 		dh := &remoteHandle{ // 按目录打开
-			share:      share, // 桶上下文
-			smbPath:    path, // 路径
-			isDir:      true, // 目录句柄
+			share:      share,          // 桶上下文
+			smbPath:    path,           // 路径
+			isDir:      true,           // 目录句柄
 			bucketID:   share.BucketID, // 桶
-			folderID:   dir.ID, // 目录记录
-			userID:     userID, // 操作者
-			session:    info, // 身份
-			connID:     connID, // 连接归属
-			truncateAt:  -1,            // 无截断(默认)
-			lastActive: time.Now(), // 活动时间
+			folderID:   dir.ID,         // 目录记录
+			userID:     userID,         // 操作者
+			session:    info,           // 身份
+			connID:     connID,         // 连接归属
+			truncateAt: -1,             // 无截断(默认)
+			lastActive: time.Now(),     // 活动时间
 		}
 		return &OpenResult{HandleID: f.handles.Alloc(dh), IsDir: true, Exists: true}, nil // 登记返回
 	}
@@ -407,8 +407,17 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		}
 	}
 
+	// 写路径(创建/覆盖/截断)拒绝写入"正在删除"的目标目录(与 HTTP 侧
+	// CheckAncestorsWritable 同语义:FolderDeleting 拒写,防删除任务竞态;
+	// 只读打开不受影响)
+	if args.Write || args.Intent != "open" {
+		if err := server.CheckAncestorsWritable(ctx, share.BucketID, folderID); err != nil {
+			return nil, err
+		}
+	}
+
 	// ---- 5. 按 Intent 处理创建处置 ----
-	created := false    // 本次是否新建了文件记录(变更日志用)
+	created := false     // 本次是否新建了文件记录(变更日志用)
 	truncAt := int64(-1) // 截断点(默认无截断;覆盖打开已存在文件 → 0:旧数据整体作废)
 	switch args.Intent { // 创建处置语义分发
 	case "open": // 只打开
@@ -442,7 +451,7 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 				return nil, err // 失败上抛
 			}
 			created = true // 标记新建(变更日志)
-			size = 0 // 新文件大小 0
+			size = 0       // 新文件大小 0
 		} else { // 已存在 → 清空(对称记账:保留记录与对象,冲刷时按新旧差值记账)
 			// 不再清零记录/删对象:冲刷快照 truncateAt=0 使旧数据整体作废(零填充),
 			// syncFileMeta 按 delta = 新大小 - 旧大小 对称入账(归还旧占用、计入新占用),
@@ -460,27 +469,27 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		smbInfof("smb_gateway: 文件变更 新建 user=%d(%s) 文件=%d", userID, info.Username, fileID) // 每次文件变更仅记录一次(Info 级:操作者+被操作文件)
 	}
 	h := &remoteHandle{ // 构造文件句柄
-		share:         share, // 桶上下文
-		smbPath:       path, // 路径
-		bucketID:      share.BucketID, // 桶
-		folderID:      folderID, // 父目录
-		fileID:        fileID, // 文件记录
+		share:         share,                     // 桶上下文
+		smbPath:       path,                      // 路径
+		bucketID:      share.BucketID,            // 桶
+		folderID:      folderID,                  // 父目录
+		fileID:        fileID,                    // 文件记录
 		objectKey:     fmt.Sprintf("%d", fileID), // 对象 key = 记录 ID 字符串
-		size:          size, // 已知大小
-		truncateAt:    truncAt, // 截断点(覆盖打开已存在文件 = 0)
-		deleteOnClose: args.DeleteOnClose, // 关闭即删标记
-		userID:        userID, // 操作者
-		session:       info, // 身份(可见性过滤用)
-		connID:        connID, // 连接归属
-		lastActive:    time.Now(), // 活动时间
+		size:          size,                      // 已知大小
+		truncateAt:    truncAt,                   // 截断点(覆盖打开已存在文件 = 0)
+		deleteOnClose: args.DeleteOnClose,        // 关闭即删标记
+		userID:        userID,                    // 操作者
+		session:       info,                      // 身份(可见性过滤用)
+		connID:        connID,                    // 连接归属
+		lastActive:    time.Now(),                // 活动时间
 	}
 	if args.Write { // 请求写权限?
 		h.writeCache = NewWriteBackCache() // 附带写回缓存(随机写合并)
 	}
 	smbDebugf("smb_gateway: 打开成功 共享=%q 路径=%q 意图=%s → 句柄=%d 文件=%d 目录=%v 大小=%d 已存在=%v", share.ShareName, path, args.Intent, h.handleID, fileID, h.isDir, size, exists) // 记录打开成功(共享/路径/意图/句柄)
-	return &OpenResult{ // 返回打开结果
+	return &OpenResult{                                                                                                                                              // 返回打开结果
 		HandleID:  f.handles.Alloc(h), // 登记句柄并取 ID
-		EndOfFile: uint64(size), // 文件大小(stat 预取)
-		Exists:    exists, // 是否已存在
+		EndOfFile: uint64(size),       // 文件大小(stat 预取)
+		Exists:    exists,             // 是否已存在
 	}, nil
 }

@@ -189,6 +189,9 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 	}
 	_ = srcRoot // 仅用于校验存在
 
+	// 源侧可见性复核:复制任务在后台执行,api 层仅预检顶层源文件夹,
+	// 子条目须在此逐条复核(防 ACL 变更/绕过导致受限内容被复制)。
+	// 用户/组成员数据加载一次,链路复用。
 	// 深度优先逐文件夹复制(每轮只查一层,避免一次全取压力过大)
 	stack := []copyFrame{{srcFolderID: task.SourceFolderID, dstParentID: dstBaseID, isTop: true}}
 	for len(stack) > 0 {
@@ -203,8 +206,57 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 			return nil // 锁已被抢占,放弃本轮
 		}
 
+		// 每批刷新操作者最新权限(动态验证,载入内存):任务可能持续很久,
+		// 执行期间操作者被禁用/降权/删号 → 立即中止,不再复制任何内容
+		operator, err := GetUser(ctx, GetUserArg{ID: task.UploadedBy})
+		if err != nil {
+			// 账号已删(软删/不存在)→ 中止;其他错误保留任务续跑重试
+			if errors.Is(err, ErrNotFound) {
+				log.Warnf("process copy task %d: operator %d gone; abort task", taskID, task.UploadedBy)
+				if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+					log.Errorf("process copy task %d: delete task (operator gone): %v", taskID, derr)
+				}
+				return nil
+			}
+			return fmt.Errorf("process copy task %d: refresh operator: %w", taskID, err)
+		}
+		if operator.Status != 1 {
+			log.Warnf("process copy task %d: operator %d disabled; abort task", taskID, task.UploadedBy)
+			if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+				log.Errorf("process copy task %d: delete task (operator disabled): %v", taskID, derr)
+			}
+			return nil
+		}
+		// 权限降级(等级数值变大 = 权限变低):中止,防降权后继续搬运数据
+		if task.OperatorLevel > 0 && int(operator.PermissionLevel) > task.OperatorLevel {
+			log.Warnf("process copy task %d: operator %d demoted (level %d -> %d); abort task",
+				taskID, task.UploadedBy, task.OperatorLevel, operator.PermissionLevel)
+			if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+				log.Errorf("process copy task %d: delete task (operator demoted): %v", taskID, derr)
+			}
+			return nil
+		}
+		var operatorGroups []uint
+
 		fr := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+
+		// 顶层源文件夹可见性复核(api 层已预检,此处兜底:任务执行期间
+		// 发起者失去访问权 → 终止任务,避免继续复制受限内容)
+		if fr.isTop {
+			if err := checkAncestorsAccessTree(ctx, task.UploadedBy, task.BucketID, fr.srcFolderID); err != nil {
+				log.Warnf("process copy task %d: operator lost access to source folder %d: %v; abort task", taskID, fr.srcFolderID, err)
+				if derr := core.DB.Unscoped().Delete(&model.CopyTask{}, taskID).Error; derr != nil {
+					log.Errorf("process copy task %d: delete task (access revoked): %v", taskID, derr)
+				}
+				return nil
+			}
+		}
+
+		// 目标侧可写性(正在删除的目标目录/父链拒绝写入)
+		if err := CheckAncestorsWritable(ctx, task.DstBucketID, fr.dstParentID); err != nil {
+			return fmt.Errorf("process copy task %d: dst dir not writable: %w", taskID, err)
+		}
 
 		// 目标侧目录:顶层直接复用 CopyFolder 预建的任务目标(DstFolderID);
 		// 子层:已存在(上轮已建)则复用继续复制,否则创建(不重命名)。
@@ -234,7 +286,7 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 					ParentID:   fr.dstParentID,
 					Name:       srcF.Name,
 					UploadedBy: task.UploadedBy,
-					Isable:     true,
+					Isable:     model.FolderUsable,
 					// 可见组继承源目录(防复制后泄露给全桶)
 					VisibleToGroups: srcF.VisibleToGroups,
 				}
@@ -263,16 +315,22 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 			}
 			for i := range srcFiles {
 				sf := &srcFiles[i]
+				// 受限文件跳过(源侧文件级 ACL 复核;已复制的历史副本不受影响,
+				// 目标侧副本继承源可见组,语义不变)
+				if err := checkItemAccessTree(ctx, operator, &operatorGroups, sf.VisibleToGroups, sf.UploadedBy); err != nil {
+					log.Warnf("process copy task %d: skip restricted file %d: %v", taskID, sf.ID, err)
+					continue
+				}
 				// 复制(不重命名,目标已存在 → ErrConflict):
 				// 上轮已完整复制的文件直接跳过,续跑幂等,不再产生 "xxx (1)" 副本;
 				// 复制内部建记录/对象复制/used_space 原子入账/失败补偿与 CopyFile 一致。
 				nf, cerr := CopyFileNoRename(ctx, CopyFileArg{
-					UserID:       task.UploadedBy,
-					SrcBucketID:  task.BucketID,
-					SrcFileID:    sf.ID,
-					DstBucketID:  task.DstBucketID,
-					DstFilename:  sf.Name,
-					DstFolderID:  newFolder.ID, // 目录 ID 直传(免路径重解析)
+					UserID:      task.UploadedBy,
+					SrcBucketID: task.BucketID,
+					SrcFileID:   sf.ID,
+					DstBucketID: task.DstBucketID,
+					DstFilename: sf.Name,
+					DstFolderID: newFolder.ID, // 目录 ID 直传(免路径重解析)
 				})
 				if cerr != nil {
 					if errors.Is(cerr, ErrConflict) {
@@ -297,12 +355,16 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 			}
 		}
 
-		// 子文件夹压栈(先压后弹 = 深度优先)
+		// 子文件夹压栈(先压后弹 = 深度优先);受限子文件夹连同子树整棵跳过
 		children, err := nextSubfolders(ctx, task.BucketID, fr.srcFolderID)
 		if err != nil {
 			return err
 		}
 		for i := range children {
+			if err := checkAncestorsAccessTree(ctx, task.UploadedBy, task.BucketID, children[i].ID); err != nil {
+				log.Warnf("process copy task %d: skip restricted subfolder %d: %v", taskID, children[i].ID, err)
+				continue
+			}
 			stack = append(stack, copyFrame{srcFolderID: children[i].ID, dstParentID: newFolder.ID})
 		}
 	}

@@ -23,7 +23,11 @@ func TestBigWriteChunksIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { if sqlDB, err := db.DB(); err == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 	core.DB = db
 	core.Storage = newMemStorage()
 

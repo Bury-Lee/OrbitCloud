@@ -1,0 +1,99 @@
+# ============================================================
+# OrbitCloud - RustFS 对象存储 + PostgreSQL 部署(测试用)
+#
+# 用法:
+#   首次构建 rustfs 镜像并启动:  docker compose -f docker-compose.rustfs.yml up -d --build
+#   之后启动:                    docker compose -f docker-compose.rustfs.yml up -d
+#   停止:                        docker compose -f docker-compose.rustfs.yml down
+#
+# 服务:
+#   db       : PostgreSQL 16(元数据)
+#   rustfs   : S3 协议对象存储(实体数据)
+#   orbitcloud:单镜像(nginx 前端 + Go 后端 + SMB 网关)
+# ============================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: oc-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orbitcloud
+      POSTGRES_PASSWORD: orbitcloud
+      POSTGRES_DB: orbitcloud
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbitcloud -d orbitcloud"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rustfs:
+    build: ./docker/rustfs
+    container_name: oc-rustfs
+    restart: unless-stopped
+    volumes:
+      - rustfs-data:/opt/rustfs/data
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+    ports:
+      - "9000:9000"
+
+  orbitcloud:
+    image: orbitcloud:latest
+    container_name: orbitcloud
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    ports:
+      - "18080:80"       # 前端 Web
+      - "8080:8080"      # 后端 HTTP API
+      - "1445:445"       # SMB
+    volumes:
+      - orbitcloud-data:/data
+    environment:
+      ORBITCLOUD_APP_ENVIRONMENT: prod
+      ORBITCLOUD_SERVER_MODE: release
+      ORBITCLOUD_JWT_SECRET: "please-change-me-32-bytes-random-string!!"
+      ORBITCLOUD_SMB_SHARED_KEY: "please-change-me-32-bytes-random-key!!!!"
+
+      # ---- 对象存储: RustFS(S3 协议)----
+      ORBITCLOUD_STORAGE_PROVIDER: rustfs
+      ORBITCLOUD_STORAGE_DRIVER: s3
+      ORBITCLOUD_STORAGE_ENDPOINT: "http://rustfs:9000"
+      ORBITCLOUD_STORAGE_ACCESS_KEY: rustfsadmin
+      ORBITCLOUD_STORAGE_SECRET_KEY: rustfsadmin
+      ORBITCLOUD_STORAGE_USE_SSL: "false"
+      ORBITCLOUD_STORAGE_CHUNK_SIZE: "5"
+      ORBITCLOUD_STORAGE_MIN_REPLICAS: "1"
+      ORBITCLOUD_NODE_ENDPOINT: "http://rustfs:9000"
+
+      # ---- 数据库: PostgreSQL ----
+      ORBITCLOUD_DB_SOURCE: postgres
+      ORBITCLOUD_DB_DSN: "postgres://orbitcloud:orbitcloud@db:5432/orbitcloud?sslmode=disable"
+
+      # ---- 回收站:保留 30 天,超期 cron 物理清除 ----
+      ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS: "30"
+
+      # ---- 日志:落盘到 /data/logs(系统运维页可浏览/下载;留空=仅 stdout) ----
+      ORBITCLOUD_LOG_OUTPUT_PATH: "/data/logs"
+
+      # ---- 限流:按 IP 与账号双维度令牌桶(测试阈值,生产按需调大) ----
+      ORBITCLOUD_RATE_LIMIT_ENABLED: "true"
+      ORBITCLOUD_RATE_LIMIT_IP_RATE: "10"
+      ORBITCLOUD_RATE_LIMIT_IP_BURST: "20"
+      ORBITCLOUD_RATE_LIMIT_USER_RATE: "10"
+      ORBITCLOUD_RATE_LIMIT_USER_BURST: "20"
+      ORBITCLOUD_RATE_LIMIT_SKIP_PATHS: '["/api/v1/auth/login","/api/v1/auth/refresh"]'
+      ORBITCLOUD_RATE_LIMIT_RECORD_LIMIT: "1000"
+      ORBITCLOUD_RATE_LIMIT_BUCKET_TTL_SECONDS: "600"
+
+volumes:
+  pg-data:
+  rustfs-data:
+  orbitcloud-data:

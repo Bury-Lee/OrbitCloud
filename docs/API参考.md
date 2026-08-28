@@ -27,13 +27,14 @@
 
 请求:`{"username": "admin", "password": "<your-password>"}`
 
+> 刷新令牌不再于响应体返回:登录/刷新成功后经 `Set-Cookie: orbitcloud_refresh_token`(HttpOnly + SameSite=Strict,Path=/api/v1/auth)下发,JS 不可读。
+
 ```json
 {
   "code": 0,
   "data": {
     "access_token": "eyJ...",
     "expires_in": 43200,
-    "refresh_token": "eyJ...",
     "user": {
       "id": 1, "username": "admin", "name": "admin",
       "email": "", "permission_level": 0, "status": 1,
@@ -46,11 +47,11 @@
 
 ### POST `/auth/refresh`(公开)
 
-请求:`{"refresh_token": "..."}` → 返回新令牌对(轮换:旧刷新令牌即刻失效)+ user。
+请求体可为空(刷新令牌经 HttpOnly Cookie 自动携带)→ 返回新访问令牌(轮换:旧刷新令牌即刻失效)+ user;兼容旧客户端在请求体传 `{"refresh_token": "..."}`。
 
 ### POST `/auth/logout`(登录)
 
-请求:`{"refresh_token": "..."}` → `204`,幂等(令牌已吊销同样成功)。
+请求体可为空(刷新令牌经 HttpOnly Cookie 自动携带)→ `204` 并清除 Cookie,幂等(令牌已吊销同样成功);兼容旧客户端在请求体传 `{"refresh_token": "..."}`。
 
 ### POST `/auth/register`(管理员)
 
@@ -106,11 +107,15 @@
 
 ### 元数据与列表
 
-| 方法/路径 | 说明 |
+| 方法与路径 | 说明 |
 |---|---|
 | GET `/buckets/:id/files?path=&page=&page_size=` | 目录列表(分页),`path` 缺省桶根 |
 | GET `/buckets/:id/files/:fid` | 文件元数据 |
 | GET `/buckets/:id/dirs/:fid` | 文件夹元数据(含 `isable`,删除中为 false) |
+| GET `/recycle-bin/files?page=&page_size=&cursor=&key=&order=&user_id=` | 我的回收站文件(已删除且归属自己的软删行,`deleted_at` 倒序;`user_id` 缺省 = 自己,查他人需管理员;返回统一分页结构 `{list, total, page, page_size, total_pages, has_more, next_cursor}`) |
+| GET `/recycle-bin/folders?page=&page_size=&cursor=&key=&order=&user_id=` | 我的回收站文件夹(语义同上,查 folders 表) |
+| DELETE `/recycle-bin/files/:id` | 永久删除回收站文件(提前清除,不等保留期:删对象+删记录+归还用量+级联删分享);仅归属者或管理员,非回收站条目 404 |
+| POST `/recycle-bin/files/:id/restore` | 恢复回收站文件(取消软删回原位置;父目录已删回桶根,目标位置重名自动重命名),返回恢复后的文件记录 |
 
 ### 下载与预览(流式)
 
@@ -126,7 +131,7 @@
 |---|---|
 | POST `/buckets/:id/dirs` | 新建文件夹:`{"name", "path"?}`(mkdir -p 建父链) |
 | POST `/buckets/:id/dirs/:fid/move` | 移动/重命名文件夹 |
-| DELETE `/buckets/:id/dirs/:fid` | 删除文件夹:置 `isable=false` → 落 DeleteTask → 后台深度优先硬删(崩溃可续跑) |
+| DELETE `/buckets/:id/dirs/:fid` | 删除文件夹:置 `isable=false` + 软删进回收站(记录/对象/用量保留,超保留期由 cron 物理清除) |
 | POST `/buckets/:id/dirs/:fid/copy` | 复制文件夹(落 CopyTask 后台处理) |
 
 ### 文件操作
@@ -135,7 +140,7 @@
 |---|---|
 | POST `/buckets/:id/files/:fid/copy` | 复制:`{"target_folder_id"?}` |
 | POST `/buckets/:id/files/:fid/move` | 移动/重命名:`{"name"?, "target_folder_id"?}` |
-| DELETE `/buckets/:id/files/:fid` | 删除文件(立即删对象 + 记录) |
+| DELETE `/buckets/:id/files/:fid` | 删除文件:软删进回收站(记录/对象/用量保留,超保留期由 cron 物理清除) |
 
 ### 批量操作(≤ 100 条,逐条独立)
 
@@ -144,7 +149,6 @@
 | POST `/buckets/:id/items/batch-delete` | `{"items": [{type: "file"\|"folder", id}]}` |
 | POST `/buckets/:id/items/batch-copy` | 同上 + `target_folder_id` |
 | POST `/buckets/:id/items/batch-move` | 同上 |
-| GET `/buckets/:id/items/batch-download` | 批量下载(zip),失败项逐条返回 |
 
 ### 可见性(条目级 ACL)
 
@@ -163,8 +167,15 @@
 | DELETE `/shares/:id` | 创建者 | 删除 |
 | GET `/share/:token` | 公开 | 解析分享元数据;有提取码带 `?password=`;**下载/预览才计数** |
 
-## 7. 鉴权与中间件要点
+## 7. 系统运维(仅管理员)
 
+| 方法/路径 | 鉴权 | 说明 |
+|---|---|---|
+| GET `/system/status` | 管理员 | 运行状况:`boot_time`/`uptime_seconds`/`go_version`/`num_goroutine`/`num_cpu`/`heap_alloc_bytes`/`db_alive`/`storage_alive`/`version`/`environment` |
+| GET `/logs` | 管理员 | 日志文件列表(日期目录 + 文件:大小/修改时间/相对路径) |
+| GET `/logs/download?path=相对路径` | 管理员 | 下载日志文件(限日志根内 `.log`,防目录穿越) |
+
+## 8. 鉴权与中间件要点
 - 登录后 access_token 放入 `Authorization: Bearer <token>`;刷新令牌轮换:收到 401 先
   `POST /auth/refresh` 换新令牌对并重放原请求(前端已实现并发共享刷新);
 - 管理员判定:`PermissionLevel.IsAdmin()`(0/1);管理员改他人须权限严格高于目标;

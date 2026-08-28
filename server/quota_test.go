@@ -5,6 +5,7 @@
 //   - 复制链路:操作者记账 + 已超额拒绝;
 //   - 删除链路:按文件归属者归还用户用量;
 //   - 管理员改配额(UpdateUser.Quota)。
+//
 // 基于内存 SQLite + 内存存储 mock(与 p0_acl_test.go 同环境)。
 package server
 
@@ -57,7 +58,7 @@ func TestCheckBucketQuota(t *testing.T) {
 	})
 
 	t.Run("negative_or_zero_delta_passes_without_query", func(t *testing.T) {
-		b := mkQuotaBucket(t, "q-full", 10, 10) // 已满
+		b := mkQuotaBucket(t, "q-full", 10, 10)                                 // 已满
 		if err := CheckBucketQuota(context.Background(), b.ID, 0); err != nil { // 0 增量
 			t.Fatalf("delta=0 should pass, got %v", err)
 		}
@@ -219,8 +220,8 @@ func TestUserQuotaOnCopy(t *testing.T) {
 	admin := mkUserP0(t, "uq-copy-admin", model.Admin)
 	owner := mkUserQuota(t, "uq-owner", nil, 0) // 源文件归属者(不限)
 	quota := int64(100)
-	overOperator := mkUserQuota(t, "uq-over-operator", &quota, 110)   // 已超额
-	normalOperator := mkUserQuota(t, "uq-operator", &quota, 90)       // 未超额
+	overOperator := mkUserQuota(t, "uq-over-operator", &quota, 110) // 已超额
+	normalOperator := mkUserQuota(t, "uq-operator", &quota, 90)     // 未超额
 	b1 := mkBucketP0(t, "uq-src", model.NormalUser, admin.ID)
 	b2 := mkBucketP0(t, "uq-dst", model.NormalUser, admin.ID)
 
@@ -262,7 +263,8 @@ func TestUserQuotaOnCopy(t *testing.T) {
 	}
 }
 
-// TestUserQuotaReturnedOnDelete 删除链路:按文件归属者归还用户用量。
+// TestUserQuotaReturnedOnDelete 删除链路:文件删除进回收站(GORM 软删)——记录/
+// 对象/用量全部保留,不归还空间(软删不归还,回收站清除时才归还),读取 404。
 func TestUserQuotaReturnedOnDelete(t *testing.T) {
 	newP0TestDB(t)
 	ctx := context.Background()
@@ -279,8 +281,29 @@ func TestUserQuotaReturnedOnDelete(t *testing.T) {
 	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f.ID}); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
-	if got := userUsed(t, u.ID); got != 70 {
-		t.Fatalf("user used = %d, want 70(删除按归属者归还)", got)
+	// 回收站软删不归还用量(软删不归还,清除才归还)
+	if got := userUsed(t, u.ID); got != 100 {
+		t.Fatalf("user used = %d, want 100(软删不归还)", got)
+	}
+	var bb model.Bucket
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 100 {
+		t.Fatalf("bucket used = %d, want 100(软删不归还)", bb.UsedSpace)
+	}
+	// 记录软删保留(deleted_at 非空),对象保留(回收站可恢复)
+	var rec model.File
+	if err := core.DB.Unscoped().First(&rec, f.ID).Error; err != nil {
+		t.Fatalf("recycle row must be retained: %v", err)
+	}
+	if !rec.DeletedAt.Valid {
+		t.Fatal("file row should be soft-deleted (deleted_at set)")
+	}
+	key := utils.BucketEncoder(b.ID) + "/" + strconv.FormatUint(uint64(f.ID), 10)
+	if _, ok := core.Storage.(*memStorage).objects[key]; !ok {
+		t.Fatal("object should be retained in recycle bin")
+	}
+	// 回收站内条目读取 404(软删过滤)
+	if _, err := GetFile(ctx, GetFileArg{BucketID: b.ID, FileID: f.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("recycled file read: want ErrNotFound, got %v", err)
 	}
 }
 
@@ -327,6 +350,44 @@ func TestUpdateUserQuota(t *testing.T) {
 	}
 	if _, err := UpdateUserQuota(ctx, UpdateUserQuotaArg{OperatorID: admin.ID, TargetID: u.ID, Quota: &neg}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("UpdateUserQuota negative: want ErrInvalidInput, got %v", err)
+	}
+}
+
+// TestRecycleBinReUploadSameName 回收站软删行不占用唯一名索引:文件删除进回收站后,
+// 同目录重新上传同名文件成功(唯一索引已改为部分索引 WHERE deleted_at IS NULL);
+// 活动行之间同名仍受唯一约束保护。
+func TestRecycleBinReUploadSameName(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "rb-admin", model.Admin)
+	b := mkBucketP0(t, "rb-bucket", model.NormalUser, admin.ID)
+	setUsed(t, b.ID, 0)
+
+	f := mkFileP0(t, b.ID, 0, "same.txt", 10)
+	putMemObject(t, b.ID, f.ID, "0123456789")
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f.ID}); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	// 同名重新上传(软删行仍在,部分唯一索引放行;应用层 uniqueName 不重命名)
+	nf, err := UploadFile(ctx, UploadFileArg{
+		UserID: admin.ID, BucketID: b.ID, Filename: "same.txt", Reader: bytes.NewReader(make([]byte, 5)),
+	})
+	if err != nil {
+		t.Fatalf("re-upload same name after recycle: %v", err)
+	}
+	if nf.Name != "same.txt" {
+		t.Fatalf("new file name = %q, want same.txt(回收站行不占名)", nf.Name)
+	}
+	// 回收站旧记录 + 活动新记录各一行(同 (bucket,folder,name_lower) 共存)
+	var n int64
+	if err := core.DB.Unscoped().Model(&model.File{}).
+		Where("bucket_id = ? AND folder_id = ? AND name_lower = 'same.txt'", b.ID, 0).Count(&n).Error; err != nil || n != 2 {
+		t.Fatalf("rows = %d, want 2(回收站 1 + 活动 1)", n)
+	}
+	// 活动行之间同名仍唯一(直接建行绕过应用层,由部分索引兜底拒绝)
+	dup := &model.File{BucketID: b.ID, FolderID: 0, Name: "same.txt", FileSize: 1, UploadedBy: admin.ID}
+	if err := core.DB.Create(dup).Error; err == nil {
+		t.Fatal("duplicate active same-name row should violate partial unique index")
 	}
 }
 
@@ -442,4 +503,3 @@ func TestCopyTaskQuotaAbandoned(t *testing.T) {
 		t.Fatalf("dst file rows = %d, want 0", cnt)
 	}
 }
-

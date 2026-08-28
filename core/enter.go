@@ -4,6 +4,8 @@
 package core
 
 import (
+	"time"
+
 	"orbitcloud/config"
 
 	agilepool "github.com/Yiming1997/agilePool/v2"
@@ -11,6 +13,9 @@ import (
 )
 
 var (
+	// BootTime 进程启动时间(main 开头记录,运行时间查询用)。
+	BootTime time.Time
+
 	// GlobalConfig 全局配置,启动期加载后只读。
 	GlobalConfig *config.Config
 

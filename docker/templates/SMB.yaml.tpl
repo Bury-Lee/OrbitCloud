@@ -12,6 +12,8 @@ gateway:
   sync_interval_secs: ${ORBITCLOUD_SMB_SYNC_INTERVAL_SECS}
   channel_buffer: ${ORBITCLOUD_SMB_CHANNEL_BUFFER}
   rpc_timeout_secs: ${ORBITCLOUD_SMB_RPC_TIMEOUT_SECS}
+  user_cache_ttl_secs: ${ORBITCLOUD_SMB_USER_CACHE_TTL_SECS}
+  user_cache_capacity: ${ORBITCLOUD_SMB_USER_CACHE_CAPACITY}
 
 log:
   level: "${ORBITCLOUD_SMB_LOG_LEVEL}"

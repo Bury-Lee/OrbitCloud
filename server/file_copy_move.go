@@ -22,12 +22,12 @@ import (
 
 // CopyFileArg 文件复制入参。
 type CopyFileArg struct {
-	UserID       uint   // 操作者 users.id(目标记录 UploadedBy)
-	SrcBucketID  uint   // 源桶
-	SrcFileID    uint   // 源文件 files.id
-	DstBucketID  uint   // 目标桶
-	DstDirPath   string // 目标目录(空串 = 桶根;mkdir -p)
-	DstFilename  string // 目标文件名(空 = 沿用源名)
+	UserID      uint   // 操作者 users.id(目标记录 UploadedBy)
+	SrcBucketID uint   // 源桶
+	SrcFileID   uint   // 源文件 files.id
+	DstBucketID uint   // 目标桶
+	DstDirPath  string // 目标目录(空串 = 桶根;mkdir -p)
+	DstFilename string // 目标文件名(空 = 沿用源名)
 	// DstFolderID 目标目录 ID 直传(0 = 按 DstDirPath 解析);
 	// 复制任务等已持有目录 ID 的场景免路径重解析。
 	DstFolderID uint
@@ -97,12 +97,17 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 			return nil, err
 		}
 	}
+	//TODO:之后将整理,合并一下检查流程以减少数据查询次数
 	// 目标目录可用性与条目级可见性校验
 	if err := checkAncestorsUsable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 	// 目标目录条目级可见性(受限目标目录下不可写入)
 	if err := checkAncestorsAccessTree(ctx, userID, dstBucketID, dstFolderID); err != nil {
+		return nil, err
+	}
+	// 目标目录可写性(正在删除的目录拒绝写入)
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 	if autoRename {
@@ -260,8 +265,13 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 	if err := checkAncestorsUsable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
+	//TODO:以下两个有不少相同的部分,建议合并以减少查询次数
 	// 目标父目录条目级可见性(受限目标目录下不可写入)
 	if err := checkAncestorsAccessTree(ctx, userID, dstBucketID, dstFolderID); err != nil {
+		return nil, err
+	}
+	// 目标父目录可写性(正在删除的目录拒绝写入)
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 
@@ -285,7 +295,7 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 		ParentID:        dstFolderID,
 		Name:            dstName,
 		UploadedBy:      userID,
-		Isable:          true,
+		Isable:          model.FolderUsable,
 		VisibleToGroups: srcFolder.VisibleToGroups,
 	}
 	if err := core.DB.WithContext(ctx).Create(topFolder).Error; err != nil {
@@ -304,6 +314,7 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 		DstDirPath:     dstDir,
 		DstName:        dstName,
 		UploadedBy:     userID,
+		OperatorLevel:  operatorLevelOf(ctx, userID),
 		Status:         0,
 	}
 	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
@@ -385,6 +396,10 @@ func MoveFile(ctx context.Context, arg MoveFileArg) (*model.File, error) {
 	if err := checkAncestorsAccessTree(ctx, userID, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
+	// 目标目录可写性(正在删除的目录拒绝写入)
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
+		return nil, err
+	}
 	// 目标已存在(文件/文件夹)→ 冲突:不覆盖用户已有文件
 	exists, err := nameExists(ctx, dstBucketID, dstFolderID, newName)
 	if err != nil {
@@ -396,14 +411,15 @@ func MoveFile(ctx context.Context, arg MoveFileArg) (*model.File, error) {
 
 	// 落复制任务(SourceFileID > 0 = 单文件跨桶移动:复制 + 删源)
 	task := &model.CopyTask{
-		BucketID:     srcBucketID,
-		SourceFileID: srcFileID,
-		DstBucketID:  dstBucketID,
-		DstFolderID:  dstFolderID,
-		DstDirPath:   dstDir,
-		DstName:      newName,
-		UploadedBy:   userID,
-		Status:       0,
+		BucketID:      srcBucketID,
+		SourceFileID:  srcFileID,
+		DstBucketID:   dstBucketID,
+		DstFolderID:   dstFolderID,
+		DstDirPath:    dstDir,
+		DstName:       newName,
+		UploadedBy:    userID,
+		OperatorLevel: operatorLevelOf(ctx, userID),
+		Status:        0,
 	}
 	if err := core.DB.WithContext(ctx).Create(task).Error; err != nil {
 		return nil, fmt.Errorf("move file: create copy task: %w", err)
@@ -443,6 +459,10 @@ func moveFileSameBucket(ctx context.Context, userID, bucketID uint, file *model.
 	}
 	// 目标目录条目级可见性(受限目标目录下不可写入)
 	if err := checkAncestorsAccessTree(ctx, userID, bucketID, dstFolderID); err != nil {
+		return nil, err
+	}
+	// 目标目录可写性(正在删除的目录拒绝写入)
+	if err := CheckAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 
@@ -542,6 +562,10 @@ func moveFolderSameBucket(ctx context.Context, userID, bucketID uint, folder *mo
 	}
 	// 目标目录条目级可见性(受限目标目录下不可写入)
 	if err := checkAncestorsAccessTree(ctx, userID, bucketID, dstFolderID); err != nil {
+		return nil, err
+	}
+	// 目标目录可写性(正在删除的目录拒绝写入)
+	if err := CheckAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 

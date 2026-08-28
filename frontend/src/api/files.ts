@@ -3,6 +3,7 @@
 import axios from 'axios'
 import http from './http'
 import { TOKEN_KEY } from './http'
+import { simplifyFileType } from '@/utils/fileType'
 import type {
   BatchResult,
   BatchUploadResult,
@@ -30,13 +31,15 @@ raw.interceptors.request.use((config) => {
 })
 
 /**
- * GET /buckets/:id/files?path=&page=&page_size=
+ * GET /buckets/:id/files?path=&page=&page_size=&key=&order=
  * 列出桶内某目录下的文件与子文件夹(offset 分页,页面浏览;文件与文件夹分数组返回)。
  * @param path 目录路径,缺省桶根 "/";目录不存在时返回 404(浏览语义只读,不自动建目录)
+ * @param key 名称前缀搜索(可选)
+ * @param order 排序方向 asc/desc(缺省 desc;字段固定为创建时间,防字段注入)
  */
 export function listFiles(
   bucketId: number,
-  params: { path?: string; page?: number; page_size?: number } = {},
+  params: { path?: string; page?: number; page_size?: number; key?: string; order?: string } = {},
 ): Promise<ListResult> {
   return http.get(`/buckets/${bucketId}/files`, { params })
 }
@@ -106,6 +109,7 @@ export function uploadFile(
 ): Promise<FileItem> {
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('file_type', simplifyFileType(file.name)) // 简化 MIME,后端不存长串
   return http.post(`/buckets/${bucketId}/files`, fd, {
     params: { path: dirPath },
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -276,18 +280,4 @@ export function batchMove(
   opts: { dst_bucket_id?: number; dst_dir?: string } = {},
 ): Promise<BatchResult> {
   return http.post(`/buckets/${bucketId}/items/batch-move`, { ...opts, items })
-}
-
-/** GET /buckets/:id/items/batch-download 批量下载(zip 流;ids=file:1,folder:2)。
- *  下载/预览同款:走 raw 实例注入 Bearer 头(浏览器直链/新标签页无法携带 Authorization → 401)。 */
-export async function batchDownload(
-  bucketId: number,
-  items: { kind: 'file' | 'folder'; id: number }[],
-): Promise<Blob> {
-  const ids = items.map((it) => `${it.kind}:${it.id}`).join(',')
-  const resp = await raw.get(`/buckets/${bucketId}/items/batch-download`, {
-    params: { ids },
-    responseType: 'blob',
-  })
-  return resp.data as Blob
 }

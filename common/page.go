@@ -1,6 +1,7 @@
 package common
 
 import (
+	"net/url"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -9,20 +10,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+
+	"orbitcloud/core"
 )
 
 // PageInfo 通用分页请求参数
 type PageInfo struct {
 	// 游标定位
-	Cursor int64 `json:"cursor"` // 起始游标(从这条记录开始)
+	Cursor int64 `json:"cursor" form:"cursor"` // 起始游标(从这条记录开始)
 	// 页码偏移
-	Page     int    `json:"page"`      // 从 cursor 开始的第几页(从 1 开始)
-	PageSize int    `json:"page_size"` // 每页条数
-	Key      string // 模糊匹配关键词
-	Order    string // 排序方式
+	Page     int    `json:"page" form:"page"`         // 从 cursor 开始的第几页(从 1 开始)
+	PageSize int    `json:"page_size" form:"page_size"` // 每页条数
+	Key      string `json:"key" form:"key"`           // 模糊匹配关键词(业务侧指定 KeyList 列)
+	Order    string `json:"order" form:"order"`       // 排序(业务侧白名单枚举,如 name_asc/time_desc;空 = 默认)
 }
 
-// TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段)
+// TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段),独立字段
 type TimeInfo struct {
 	StartTime time.Time
 	EndTime   time.Time
@@ -30,7 +33,6 @@ type TimeInfo struct {
 
 type Option struct {
 	PageInfo
-	TimeInfo
 	DefaultOrder string                    // 默认排序方式
 	Orderby      string                    // 排序字段
 	Filters      []func(*gorm.DB) *gorm.DB // 额外查询条件
@@ -40,6 +42,7 @@ type Option struct {
 // PaginatedResult 通用分页响应
 type PaginatedResult[T any] struct {
 	List       []T   `json:"list"`        // 当前页数据列表
+	Total      int64 `json:"total"`       // 总条数(与 List 同一过滤口径)
 	Page       int   `json:"page"`        // 当前页码
 	PageSize   int   `json:"page_size"`   // 每页条数
 	TotalPages int   `json:"total_pages"` // 总页数
@@ -68,64 +71,85 @@ func NewOption(page, pageSize int) *Option {
 	}
 }
 
-// NewOptionFromQuery 从 Gin 查询参数构建 Option
-// 支持的查询参数:
+// ParseOption 从通用查询参数构造 Option(纯函数,不依赖 gin;gin 调用方传
+// c.Request.URL.Query() 即可)。支持的参数:
 //   - cursor:     起始游标
-//   - page:       当前页码（默认 1）
-//   - page_size:  每页条数（默认 10）
+//   - page:       当前页码(默认 1)
+//   - page_size:  每页条数(默认 10)
 //   - key:        模糊搜索关键词
-//   - order:      排序方向（ASC / DESC）
-//   - start_time: 开始时间（RFC3339 格式）
-//   - end_time:   结束时间（RFC3339 格式）
-func NewOptionFromQuery(c *gin.Context) *Option {
-	opt := NewOption(queryInt(c, "page", 1), queryInt(c, "page_size", 10))
-	opt.Cursor = int64(queryInt(c, "cursor", 0))
-	opt.Key = c.Query("key")
-	opt.Order = c.Query("order")
-	if t := c.Query("start_time"); t != "" {
-		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-			opt.StartTime = parsed
-		}
-	}
-	if t := c.Query("end_time"); t != "" {
-		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
-			opt.EndTime = parsed
-		}
-	}
+//   - order:      排序方向(ASC / DESC)
+//
+// 时间范围不在此解析:Option 不承载时间字段,需要时间过滤时由调用方自行
+// 解析参数并构造 TimeInfo 传给 common.PageQuery 的 timeInfo 参数。
+//
+// 推荐用法:调用方构造好 Option 后传入 common.PageQuery,不要在业务代码里
+// 逐个从请求拆字段。
+func ParseOption(values url.Values) *Option {
+	opt := NewOption(intVal(values.Get("page"), 1), intVal(values.Get("page_size"), 10))
+	opt.Cursor = int64(intVal(values.Get("cursor"), 0))
+	opt.Key = values.Get("key")
+	opt.Order = values.Get("order")
 	return opt
 }
 
-// Paginate 统一分页查询入口
-// 支持两种分页模式:
-//   - 游标优先模式（Cursor > 0）:
-//     WHERE id > Cursor [AND 其他条件] [OFFSET (Page-1)*PageSize] LIMIT PageSize
-//     — 利用索引跳过大量数据，避免深 Offset 性能问题
-//   - 传统 Offset 模式（Cursor == 0）:
-//     [OFFSET (Page-1)*PageSize] LIMIT PageSize
+// PageQuery 通用分页查询(全项目唯一分页入口):model 同时确定"表"与"行类型",
+// opt 携带分页/排序/过滤参数(NewOption / ParseOption 构造),timeInfo 携带
+// 时间范围(created_at 闭区间;nil = 不限)。内部走全局 core.DB,不依赖 gin;
+// 返回统一 PaginatedResult(含 Total,调用方无需再单独 Count)。
 //
-// 内置处理:
-//   - 时间范围（created_at 字段）
-//   - 模糊搜索（OR 语义，KeyList 指定字段）
-//   - 额外条件（Filters，Scope 模式）
-//   - 排序（用户指定 / 默认）
-//   - 自动提取最后一条记录的 ID 作为 NextCursor
-func Paginate[T any](db *gorm.DB, opt *Option, result *[]T) (*PaginatedResult[T], error) {
-	query := db.Model(result)
+// 支持两种分页模式:
+//   - 游标优先(Cursor > 0):WHERE id > Cursor [AND 其他条件] [OFFSET (Page-1)*PageSize] LIMIT PageSize
+//     利用索引跳过已翻页区间,避免深 Offset 性能问题;
+//   - 传统 Offset(Cursor == 0):[OFFSET (Page-1)*PageSize] LIMIT PageSize。
+//
+// 内置:时间范围过滤(created_at)、关键词模糊搜索(KeyList 限定列,OR 语义)、
+// 额外条件(Filters,Scope 模式)、安全排序(字段名白名单 + 方向归一)、
+// 自动提取末条记录 ID 作为 NextCursor。
+//
+// 用法:
+//
+//	opt := common.ParseOption(c.Request.URL.Query()) // 或 common.NewOption(page, pageSize)
+//	opt.DefaultOrder = "created_at DESC"
+//	opt.Filters = append(opt.Filters, func(db *gorm.DB) *gorm.DB {
+//		return db.Where("creator_id = ?", userID)
+//	})
+//	res, err := common.PageQuery(model.ShareLink{}, *opt, nil)
+func PageQuery[T any](model T, opt Option, timeInfo *TimeInfo) (*PaginatedResult[T], error) {
+	// 分页参数归一(调用方直接构造 Option 时的防御:page<1 → 1,pageSize 0/负 → 10,超 100 → 100)
+	if opt.Page < 1 {
+		opt.Page = 1
+	}
+	if opt.PageSize <= 0 {
+		opt.PageSize = 10
+	}
+	if opt.PageSize > 100 {
+		opt.PageSize = 100
+	}
+
+	// 时间范围(created_at 闭区间;timeInfo 为 nil = 不限)
+	startTime, endTime := time.Time{}, time.Time{}
+	if timeInfo != nil {
+		startTime, endTime = timeInfo.StartTime, timeInfo.EndTime
+	}
+
+	// 以 model 绑定表名(gorm 反射取 schema);结果容器由泛型推导
+	query := core.DB.Model(model)
+	result := new([]T)
 
 	// 1. 游标条件 — 利用索引范围扫描
 	if opt.Cursor > 0 {
 		query = query.Where("id > ?", opt.Cursor)
 	}
 
-	// 2. 时间范围
-	if !opt.StartTime.IsZero() {
-		query = query.Where("created_at >= ?", opt.StartTime)
+	// 2. 时间范围(created_at 闭区间)
+	if !startTime.IsZero() {
+		query = query.Where("created_at >= ?", startTime)
 	}
-	if !opt.EndTime.IsZero() {
-		query = query.Where("created_at <= ?", opt.EndTime)
+	if !endTime.IsZero() {
+		query = query.Where("created_at <= ?", endTime)
 	}
 
-	// 3. 模糊搜索（OR 语义）
+	// 3. 模糊搜索(OR 语义,限定白名单列)
 	if opt.Key != "" && len(opt.KeyList) > 0 {
 		var conds []string
 		var vals []any
@@ -136,37 +160,36 @@ func Paginate[T any](db *gorm.DB, opt *Option, result *[]T) (*PaginatedResult[T]
 		query = query.Where("("+strings.Join(conds, " OR ")+")", vals...)
 	}
 
-	// 4. 额外条件（Scope 模式，无副作用）
+	// 4. 额外条件(Scope 模式,无副作用)
 	query = query.Scopes(opt.Filters...)
 
-	// 5. 统计总数
+	// 5. 统计总数(必须早于 Limit/Offset,只带过滤条件)
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
 	}
 
-	// 6. 排序
-	if order := buildOrder(opt); order != "" {
+	// 6. 排序(字段名白名单 + 方向归一,非法回退,防注入)
+	if order := buildOrder(&opt); order != "" {
 		query = query.Order(order)
 	}
 
 	// 7. 分页偏移 & 限制
 	if opt.Page > 1 {
-		offset := (opt.Page - 1) * opt.PageSize
-		query = query.Offset(offset)
+		query = query.Offset((opt.Page - 1) * opt.PageSize)
 	}
 	query = query.Limit(opt.PageSize)
 
-	// 8. 执行查询
+	// 8. 取本页数据
 	if err := query.Find(result).Error; err != nil {
 		return nil, err
 	}
 
-	// 9. 构造响应
-	totalPages := (int(total) + opt.PageSize - 1) / opt.PageSize // 整数除法，无浮点精度问题
-
+	// 9. 组装响应(TotalPages 向上取整;HasMore = 当前页非末页;NextCursor = 末条 ID)
+	totalPages := (int(total) + opt.PageSize - 1) / opt.PageSize
 	return &PaginatedResult[T]{
 		List:       *result,
+		Total:      total,
 		Page:       opt.Page,
 		PageSize:   opt.PageSize,
 		TotalPages: totalPages,
@@ -227,9 +250,8 @@ func extractLastID[T any](items []T) int64 {
 	return 0
 }
 
-// queryInt 从 Gin 查询参数读取整数，不存在或非法时返回默认值
-func queryInt(c *gin.Context, key string, defaultVal int) int {
-	s := c.Query(key)
+// intVal 从查询参数读取整数,不存在或非法时返回默认值(纯函数,不依赖 gin)。
+func intVal(s string, defaultVal int) int {
 	if s == "" {
 		return defaultVal
 	}
@@ -244,7 +266,7 @@ func queryInt(c *gin.Context, key string, defaultVal int) int {
 // 用途:深分页遍历(如前端递归下载逐层翻页)的 keyset 游标——以**末条记录主键**
 // 作为 nextPageToken,配合 ORDER BY <prefix>id DESC 使用,避免 offset 深翻页性能
 // 问题(游标即不透明令牌,客户端原样回传)。
-// 与 common.Paginate(id 升序, `id > cursor`)互补;本组为降序变体(`id < cursor`)。
+// 与 common.PageQuery(id 升序, `id > cursor`)互补;本组为降序变体(`id < cursor`)。
 // 注:keyset 快照式遍历——遍历中新插入的记录(id 更大)不进入剩余页,属预期语义。
 
 // EncodeKeysetID 编码 keyset 游标(末条记录 ID 的十进制串)。

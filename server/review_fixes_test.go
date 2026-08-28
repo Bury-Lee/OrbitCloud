@@ -1,4 +1,4 @@
-﻿// review_fixes_test.go —— 批量上传 folder_id 直传失败进 failed 的单测(不静默回退桶根)。
+// review_fixes_test.go —— 批量上传 folder_id 直传失败进 failed 的单测(不静默回退桶根)。
 // 复用 p0_acl_test.go 的内存 SQLite + 内存对象存储 mock。
 package server
 

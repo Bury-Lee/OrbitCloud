@@ -1,9 +1,10 @@
-﻿// p0_acl_test.go —— ACL 相关服务层单测:
+// p0_acl_test.go —— ACL 相关服务层单测:
 //   - 分享通道受限状态:受限条目(自身/祖先 VisibleToGroups 非空)可创建分享,
 //     创建后即公开,访问侧不再校验受限状态(创建即授权);
 //   - 文件夹复制任务继承源可见组:子目录/文件创建时拷贝 VisibleToGroups,
 //     防复制后泄露给全桶;
 //   - 目录段名校验:CreateDir 与路径解析拒绝 Windows 保留名/非法字符。
+//
 // 用内存 SQLite + 内存对象存储 mock(不走外部依赖)。
 package server
 
@@ -110,7 +111,7 @@ func mkBucketP0(t *testing.T, name string, perm model.PermissionLevel, owner uin
 
 func mkFolderP0(t *testing.T, bucketID, parentID, uploadedBy uint, name string) *model.Folder {
 	t.Helper()
-	f := &model.Folder{BucketID: bucketID, ParentID: parentID, Name: name, UploadedBy: uploadedBy, Isable: true}
+	f := &model.Folder{BucketID: bucketID, ParentID: parentID, Name: name, UploadedBy: uploadedBy, Isable: model.FolderUsable}
 	if err := core.DB.Create(f).Error; err != nil {
 		t.Fatalf("create folder %s: %v", name, err)
 	}

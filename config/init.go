@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm/logger"
 	"gorm.io/plugin/dbresolver"
 
+	"orbitcloud/migrate"
 	"orbitcloud/model"
 )
 
@@ -82,9 +83,16 @@ func (d Database) InitDB(lg logger.Interface) (*gorm.DB, error) {
 		&model.UserGroup{}, &model.UserGroupMember{},
 		&model.RefreshToken{}, &model.ShareLink{}, &model.OperationLog{},
 		&model.Log{}, &model.DeleteTask{}, &model.CopyTask{},
-		&model.DownloadTask{}, // 下载任务(断点续传)
+		&model.DownloadTask{}, // 历史遗留(已废弃)
 	); err != nil {
 		return nil, fmt.Errorf("config: automigrate: %w", err)
+	}
+
+	// 4.1 结构升级(回收站部分索引等历史数据/结构迁移):升级器按版本幂等应用,
+	// 见 migrate 包(区别于 AutoMigrate 的表/列同步,步骤带版本号记录在
+	// schema_versions 表,中途失败不记版本、下次启动重试)
+	if _, err := migrate.Upgrade(db); err != nil {
+		return nil, err
 	}
 
 	// 5. 读写分离:多写库或配置了读库 → 注册 dbresolver(写 sources / 读 replicas)
@@ -187,6 +195,12 @@ func (c Config) InitConfig() (*Config, error) {
 	}
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+
+	// 2.1 环境变量覆盖(部署友好:docker compose 注入,无需改配置文件)。
+	// 留空 = 不覆盖。日志输出目录:空 = stdout,非空 = 落盘文件日志。
+	if v := os.Getenv("ORBITCLOUD_LOG_OUTPUT_PATH"); v != "" {
+		c.Log.OutputPath = v
 	}
 
 	// 3. 校验(不兜底,发现即报错,按提示修改后重启)

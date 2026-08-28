@@ -1,4 +1,4 @@
-﻿// visibility.go —— 条目级可见性(用户组 ACL)。
+// visibility.go —— 条目级可见性(用户组 ACL)。
 //
 // File/Folder.VisibleToGroups 存"可见组 ID"的 JSON 数组(如 "[1,5]"):
 // 空串 = 不限制(按桶级权限可见);非空 = 仅管理员(IsAdmin)/
@@ -47,7 +47,7 @@ func checkAncestorsAccessTree(ctx context.Context, userID, bucketID, folderID ui
 		if err != nil {
 			return err
 		}
-		if !f.Isable {
+		if f.Isable == model.FolderUnusable {
 			return ErrNotFound // 目录已删 → 不可达(原 checkAncestorsUsable 语义)
 		}
 		if user == nil { // 用户/组成员仅加载一次(链上各层复用)
@@ -82,6 +82,31 @@ func checkItemAccessTree(ctx context.Context, user *model.User, groups *[]uint, 
 		*groups = gs
 	}
 	return ItemVisibleRule(user.ID, visibleToGroups, uploadedBy, user, *groups)
+}
+
+// CheckAncestorsWritable 沿祖先链校验目录可写(写路径专用):
+// 任一祖先已删(FolderUnusable)→ ErrNotFound;任一祖先正在删除(FolderDeleting)
+// → ErrForbidden(删除任务处理中,拒绝一切新写入)。
+// 与 checkAncestorsAccessTree 的差异:后者是读路径(Deleting 放行)。
+// folderID=0(桶根)直接通过。SMB 网关写路径(Open 创建/覆盖/截断)同用。
+func CheckAncestorsWritable(ctx context.Context, bucketID, folderID uint) error {
+	cur := folderID
+	seen := map[uint]bool{} // 环保护(数据异常时防死循环)
+	for cur != 0 && !seen[cur] {
+		seen[cur] = true
+		f, err := loadFolder(ctx, bucketID, cur)
+		if err != nil {
+			return err
+		}
+		if f.Isable == model.FolderUnusable {
+			return ErrNotFound // 目录已删 → 不可达
+		}
+		if f.Isable == model.FolderDeleting {
+			return ErrForbidden // 正在删除 → 拒绝写入
+		}
+		cur = f.ParentID
+	}
+	return nil
 }
 
 // ParseVisibleGroups 解析 VisibleToGroups 的 JSON 数组为组 ID 列表(去重、剔 0;
@@ -290,6 +315,9 @@ func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (strin
 	// 拼接组匹配子句(IN 列表;损坏/非数组 JSON 行在解析层被守卫拦截,不外抛):
 	//   - sqlite: json_valid + json_type = 'array' 守卫后 json_each
 	//   - postgres: 正则守卫(仅数字数组)后 cast 再展开
+	//     ★ 正则禁止含 ? 量词:被 GORM Raw 的 ?→$N 占位符替换误伤
+	//       (纯文本替换不识别引号,正则内 ? 会被换成 $N,SQL 损坏报
+	//       syntax error near OFFSET);空数组 [] 保守隐藏(与无组成员等价)
 	var groupClause string
 	if len(userGroupIDs) > 0 {
 		switch dialect {
@@ -298,7 +326,7 @@ func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (strin
 			groupClause = fmt.Sprintf(" OR (json_valid(visible_to_groups) AND json_type(visible_to_groups) = 'array' AND EXISTS (SELECT 1 FROM json_each(visible_to_groups) WHERE CAST(json_each.value AS INTEGER) IN (%s)))", placeholders)
 		default: // postgres / postgresql
 			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(userGroupIDs)), ",")
-			groupClause = fmt.Sprintf(" OR (visible_to_groups ~ '^\\s*\\[(\\s*[0-9]+\\s*(,\\s*[0-9]+\\s*)*)?\\]\\s*$' AND EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s)))", placeholders)
+			groupClause = fmt.Sprintf(" OR (visible_to_groups ~ '^\\s*\\[[0-9]+\\s*(,\\s*[0-9]+\\s*)*\\]\\s*$' AND EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s)))", placeholders)
 		}
 	}
 	// 参数顺序:组 ID 列表...

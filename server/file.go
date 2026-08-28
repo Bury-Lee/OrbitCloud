@@ -1,4 +1,4 @@
-﻿// file.go —— 桶内条目基础层:对象键 / 桶与权限校验 / 条目加载 / 命名冲突 /
+// file.go —— 桶内条目基础层:对象键 / 桶与权限校验 / 条目加载 / 命名冲突 /
 // 祖先链校验等公共助手(上传/下载/列表/删除/复制/移动等业务见各子文件)。
 //
 // 模型(files/folders 双表):文件夹 = 目录树节点(ParentID=0 为桶根,Isable=false
@@ -118,12 +118,13 @@ func nameExists(ctx context.Context, bucketID, folderID uint, name string) (bool
 	return n1 > 0 || n2 > 0, nil
 }
 
-// findFolderByParent 按 (bucket, parent, name) 查启用子文件夹(Isable=true);
-// 未找到 → ErrNotFound。供复制任务续跑"目标子目录已存在则复用"判定。
+// findFolderByParent 按 (bucket, parent, name) 查启用子文件夹(Isable != FolderUnusable,
+// FolderDeleting 视为已存在可复用);未找到 → ErrNotFound。
+// 供复制任务续跑"目标子目录已存在则复用"判定。
 func findFolderByParent(ctx context.Context, bucketID, parentID uint, name string) (uint, error) {
 	var f model.Folder
 	err := core.DB.WithContext(ctx).
-		Where("bucket_id = ? AND parent_id = ? AND name_lower = ? AND isable = true",
+		Where("bucket_id = ? AND parent_id = ? AND name_lower = ? AND isable <> 0",
 			bucketID, parentID, strings.ToLower(name)).First(&f).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, ErrNotFound
@@ -162,8 +163,9 @@ func uniqueName(ctx context.Context, bucketID, folderID uint, name string) (stri
 	return "", ErrConflict
 }
 
-// checkAncestorsUsable 校验目标 folder 及其祖先链全部可用(Isable=true):
+// checkAncestorsUsable 校验目标 folder 及其祖先链全部可用(Isable != FolderUnusable):
 // 沿 parent 链逐级向上查至桶根,任一不可用 → ErrNotFound。
+// 正在删除(FolderDeleting)视为可用(可读)。
 // 纯对象状态校验,用户维度权限见 api.permAncestorsAccess。
 func checkAncestorsUsable(ctx context.Context, bucketID, folderID uint) error {
 	cur := folderID
@@ -172,7 +174,7 @@ func checkAncestorsUsable(ctx context.Context, bucketID, folderID uint) error {
 		if err != nil {
 			return err
 		}
-		if !f.Isable {
+		if f.Isable == model.FolderUnusable {
 			return ErrNotFound // 目录已删 → 不可达(404 防探测)
 		}
 		cur = f.ParentID
@@ -191,6 +193,19 @@ func CheckAncestorsUsable(ctx context.Context, arg CheckAncestorsUsableArg) erro
 	return checkAncestorsUsable(ctx, arg.BucketID, arg.FolderID)
 }
 
+// operatorLevelOf 查操作者权限等级快照(复制/删除任务落表用);
+// 用户不存在/查询失败 → 0(存量任务兼容语义)。
+func operatorLevelOf(ctx context.Context, userID uint) int {
+	if userID == 0 {
+		return 0
+	}
+	u, err := GetUser(ctx, GetUserArg{ID: userID})
+	if err != nil {
+		return 0
+	}
+	return int(u.PermissionLevel)
+}
+
 // nextSubfolders 取某文件夹的直接子文件夹(仅一层,供后台删除/复制任务深度优先遍历)。
 func nextSubfolders(ctx context.Context, bucketID, folderID uint) ([]model.Folder, error) {
 	var children []model.Folder
@@ -206,4 +221,3 @@ func nextSubfolders(ctx context.Context, bucketID, folderID uint) ([]model.Folde
 }
 
 // 用户维度访问判定已迁移至 api/perm.go(permUserActive + canAccess)。
-

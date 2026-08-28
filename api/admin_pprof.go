@@ -106,7 +106,13 @@ func (PprofAPI) Cpu(c *gin.Context) {
 		respondError(c, server.ErrForbidden)
 		return
 	}
-	seconds := queryInt(c, "seconds", 30)
+	var req struct {
+		Seconds int `form:"seconds"`
+	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	seconds := req.Seconds
 	if seconds < 1 {
 		seconds = 1
 	}
@@ -182,7 +188,13 @@ func (PprofAPI) Download(c *gin.Context) {
 		respondError(c, server.ErrForbidden)
 		return
 	}
-	name := filepath.Base(c.Query("file"))
+	var req struct {
+		File string `form:"file"`
+	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	name := filepath.Base(req.File)
 	if name == "." || name == "" || !pprofFilePattern.MatchString(name) {
 		respondError(c, server.ErrInvalidInput)
 		return

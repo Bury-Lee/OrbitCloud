@@ -1,11 +1,10 @@
-﻿// file_api.go 文件模块接口:上传 / 列表 / 元数据 / 下载 / 预览(增删改等见 file_ops_api.go)。
+// file_api.go 文件模块接口:上传 / 列表 / 元数据 / 下载 / 预览(增删改等见 file_ops_api.go)。
 // 路由按类型拆分:文件走 /files/:fid,文件夹走 /dirs/:fid,消除同号寻址二义。
 package api
 
 import (
 	"io"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -20,25 +19,32 @@ import (
 // FileAPI 文件模块接口(无状态;全部路由需 AuthMiddleware)。
 type FileAPI struct{}
 
-// parseIDParam 解析 gin 路径参数 :name 为 uint;非法时写出 400 并返回 0(调用方应提前 return)。
-func parseIDParam(c *gin.Context, name string) uint {
-	v := c.Param(name)
-	id, err := strconv.ParseUint(v, 10, 64)
-	if err != nil || id == 0 {
-		respondError(c, server.ErrInvalidInput)
-		c.Abort()
-		return 0
-	}
-	return uint(id)
+// 路径/查询参数绑定结构(uri tag 绑路径,form tag 绑查询;form:"-" 排除路径字段)
+type filePathReq struct { // /buckets/:id/files/:fid
+	BucketID uint `uri:"id" form:"-"`
+	FileID   uint `uri:"fid" form:"-"`
+}
+
+type dirPathReq struct { // /buckets/:id/dirs/:fid
+	BucketID uint `uri:"id" form:"-"`
+	DirID    uint `uri:"fid" form:"-"`
+}
+
+type bucketPathReq struct { // /buckets/:id
+	BucketID uint `uri:"id" form:"-"`
 }
 
 // UploadFile 上传单文件(POST /buckets/:id/files?path=dir/sub,multipart 字段 file)。
 // path 为目标目录(缺省桶根 "/"),父目录链自动创建;返回 model.File。
 func (FileAPI) UploadFile(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		bucketPathReq
+		Path string `form:"path"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -49,7 +55,7 @@ func (FileAPI) UploadFile(c *gin.Context) {
 	}
 
 	// 目标目录(query path,缺省桶根 "/")
-	dirPath := c.Query("path")
+	dirPath := req.Path
 
 	// 流式解析 multipart,不整读内存(与 server.UploadFile 的 io.Reader 契约配合)
 	fh, err := c.FormFile("file")
@@ -64,7 +70,10 @@ func (FileAPI) UploadFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	f, err := server.UploadFile(ctx, server.UploadFileArg{UserID: userID, BucketID: bucketID, DirPath: dirPath, Filename: fh.Filename, Reader: file})
+	f, err := server.UploadFile(ctx, server.UploadFileArg{
+		UserID: userID, BucketID: bucketID, DirPath: dirPath,
+		Filename: fh.Filename, FileType: c.PostForm("file_type"), Reader: file,
+	})
 	if err != nil {
 		respondError(c, err)
 		return
@@ -77,10 +86,15 @@ func (FileAPI) UploadFile(c *gin.Context) {
 // 目标目录可用 query path 或 folder_id 直传(缺省桶根 "/");逐文件独立处理,
 // 部分失败不影响其它文件,返回 {success, failed}。
 func (FileAPI) UploadFiles(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		bucketPathReq
+		Path     string `form:"path"`
+		FolderID uint   `form:"folder_id"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	userID := currentUser(c)
 	ctx := c.Request.Context()
 
@@ -88,13 +102,6 @@ func (FileAPI) UploadFiles(c *gin.Context) {
 	if _, err := precheckBucketWrite(ctx, userID, bucketID); err != nil {
 		respondError(c, err)
 		return
-	}
-
-	// 目标目录(query path 或 folder_id 直传,缺省桶根 "/")
-	dirPath := c.Query("path")
-	folderID := uint(0)
-	if fid := queryInt(c, "folder_id", 0); fid > 0 {
-		folderID = uint(fid)
 	}
 
 	// 超内存上限的部分由框架落临时文件
@@ -121,8 +128,8 @@ func (FileAPI) UploadFiles(c *gin.Context) {
 	results := server.UploadFiles(ctx, server.UploadFilesArg{
 		UserID:   userID,
 		BucketID: bucketID,
-		DirPath:  dirPath,
-		FolderID: folderID,
+		DirPath:  req.Path,
+		FolderID: req.FolderID,
 		Items:    items,
 	})
 
@@ -149,14 +156,26 @@ func (FileAPI) UploadFiles(c *gin.Context) {
 	common.Success(c, gin.H{"success": success, "failed": failed})
 }
 
-// ListFiles 分页列出目录内容(GET /buckets/:id/files?path=&page=&page_size=),
-// 返回 {files, folders, total} 两个类型化切片。
+// ListFiles 分页列出目录内容(GET /buckets/:id/files?path=&page=&page_size=&key=&sort=&order=),
+// 返回 {files, folders, total} 两个类型化切片;支持名称前缀搜索(key)与
+// 白名单排序(sort=name|time|size,order=asc|desc)。
 // cursor=1 时为游标模式:双列表分别 keyset 分页(不返回 total),供前端逐层下载。
 func (FileAPI) ListFiles(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		bucketPathReq
+		Path          string `form:"path"`
+		Page          int    `form:"page"`
+		PageSize      int    `form:"page_size"`
+		Cursor        string `form:"cursor"`
+		FilesCursor   string `form:"files_cursor"`
+		FoldersCursor string `form:"folders_cursor"`
+		Key           string `form:"key"`
+		Order         string `form:"order"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -166,12 +185,13 @@ func (FileAPI) ListFiles(c *gin.Context) {
 		return
 	}
 
-	dirPath := c.Query("path")
-
 	// 游标模式(前端递归下载):双列表分别 keyset 分页
-	if c.Query("cursor") == "1" {
-		pageSize := queryInt(c, "page_size", 50)
-		files, folders, nextFileCursor, nextFolderCursor, err := server.ListFilesCursor(ctx, server.ListFilesCursorArg{UserID: userID, BucketID: bucketID, DirPath: dirPath, FileCursor: c.Query("files_cursor"), FolderCursor: c.Query("folders_cursor"), PageSize: pageSize})
+	if req.Cursor == "1" {
+		pageSize := req.PageSize
+		if pageSize <= 0 {
+			pageSize = 50
+		}
+		files, folders, nextFileCursor, nextFolderCursor, err := server.ListFilesCursor(ctx, server.ListFilesCursorArg{UserID: userID, BucketID: bucketID, DirPath: req.Path, FileCursor: req.FilesCursor, FolderCursor: req.FoldersCursor, PageSize: pageSize})
 		if err != nil {
 			respondError(c, err)
 			return
@@ -185,11 +205,20 @@ func (FileAPI) ListFiles(c *gin.Context) {
 		return
 	}
 
-	// offset 模式(页面浏览):分页参数(默认 1 / 50)
-	page := queryInt(c, "page", 1)
-	pageSize := queryInt(c, "page_size", 50)
+	// offset 模式(页面浏览):分页参数归一(默认 1 / 50)
+	page, pageSize := req.Page, req.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
 
-	files, folders, total, err := server.ListFiles(ctx, server.ListFilesArg{UserID: userID, BucketID: bucketID, DirPath: dirPath, Page: page, PageSize: pageSize})
+	files, folders, total, err := server.ListFiles(ctx, server.ListFilesArg{
+		UserID: userID, BucketID: bucketID, DirPath: req.Path,
+		Page: page, PageSize: pageSize,
+		Key: req.Key, Order: req.Order,
+	})
 	if err != nil {
 		respondError(c, err)
 		return
@@ -200,16 +229,12 @@ func (FileAPI) ListFiles(c *gin.Context) {
 
 // GetFileMeta 返回文件元数据(GET /buckets/:id/files/:fid,仅文件)。
 func (FileAPI) GetFileMeta(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
+	var req filePathReq
+	if !bindRequest(c, &req) {
 		return
 	}
 
-	meta, err := precheckFileRead(c.Request.Context(), currentUser(c), bucketID, fileID)
+	meta, err := precheckFileRead(c.Request.Context(), currentUser(c), req.BucketID, req.FileID)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -220,16 +245,12 @@ func (FileAPI) GetFileMeta(c *gin.Context) {
 
 // GetFolderMeta 返回文件夹元数据(GET /buckets/:id/dirs/:fid,仅文件夹)。
 func (FileAPI) GetFolderMeta(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-	dirID := parseIDParam(c, "fid")
-	if dirID == 0 {
+	var req dirPathReq
+	if !bindRequest(c, &req) {
 		return
 	}
 
-	meta, err := precheckFolderRead(c.Request.Context(), currentUser(c), bucketID, dirID)
+	meta, err := precheckFolderRead(c.Request.Context(), currentUser(c), req.BucketID, req.DirID)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -241,19 +262,15 @@ func (FileAPI) GetFolderMeta(c *gin.Context) {
 // DownloadFile 下载文件(GET /buckets/:id/files/:fid/download)。
 // 支持 HTTP Range 头(单区间):无 Range → 200 全量;合法区间 → 206;非法/越界 → 416。
 func (FileAPI) DownloadFile(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
+	var req filePathReq
+	if !bindRequest(c, &req) {
 		return
 	}
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
 	// 权限预检返回的文件元数据含 FileSize,直接供 Range 解析
-	file, err := precheckFileRead(ctx, userID, bucketID, fileID)
+	file, err := precheckFileRead(ctx, userID, req.BucketID, req.FileID)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -269,9 +286,9 @@ func (FileAPI) DownloadFile(c *gin.Context) {
 	var rc io.ReadCloser
 	var meta *model.File
 	if br == nil {
-		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: bucketID, FileID: fileID, UserID: userID, ClientIP: c.ClientIP()})
+		rc, meta, err = server.DownloadFile(ctx, server.DownloadFileArg{BucketID: req.BucketID, FileID: req.FileID, UserID: userID, ClientIP: c.ClientIP()})
 	} else {
-		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: bucketID, FileID: fileID, Start: br.Start, End: br.End, UserID: userID, ClientIP: c.ClientIP()})
+		rc, meta, err = server.DownloadFileRange(ctx, server.DownloadFileRangeArg{BucketID: req.BucketID, FileID: req.FileID, Start: br.Start, End: br.End, UserID: userID, ClientIP: c.ClientIP()})
 	}
 	if err != nil {
 		respondError(c, err)
@@ -286,32 +303,24 @@ func (FileAPI) DownloadFile(c *gin.Context) {
 // 内容类型经白名单判定:可执行文本降级 text/plain 只读,其余二进制降级附件;
 // 附安全头;支持 Range。
 func (FileAPI) PreviewFile(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
+	var req filePathReq
+	if !bindRequest(c, &req) {
 		return
 	}
 
-	writePreviewStream(c, bucketID, fileID)
+	writePreviewStream(c, req.BucketID, req.FileID)
 }
 
 // StreamFile 音视频流式播放(GET /buckets/:id/files/:fid/stream)。
 // 与 PreviewFile 同通路、同响应头语义;鉴权走 ?token= 查询参数
 // (HTML 媒体元素发起的 Range 请求无法携带 Authorization 头)。
 func (FileAPI) StreamFile(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
+	var req filePathReq
+	if !bindRequest(c, &req) {
 		return
 	}
 
-	writePreviewStream(c, bucketID, fileID)
+	writePreviewStream(c, req.BucketID, req.FileID)
 }
 
 // writePreviewStream 预览/流媒体共用通路:权限预检 + Range 预处理 + 类型判定 + 安全头 + 流写出。

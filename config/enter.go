@@ -154,16 +154,40 @@ type Bucket struct {
 	AdminCreateOnly bool `yaml:"admin_create_only" json:"admin_create_only"` // 是否仅管理员可创建桶(默认 false)
 }
 
+// RecycleBin 回收站配置(OrbitCloud.yaml 的 recycle_bin 段)。
+type RecycleBin struct {
+	// RetentionDays 回收站保留天数;>0 = 软删(进回收站)超过该天数由 cron
+	// 物理清除(删对象+删记录+归还用量);<=0 = 永久保留,不自动清理。
+	// 默认 30。
+	RetentionDays int `yaml:"retention_days" json:"retention_days"`
+}
+
+// RateLimit 限流配置(OrbitCloud.yaml 的 rate_limit 段)。
+type RateLimit struct {
+	Enabled   bool     `yaml:"enabled"`    // 是否启用限流(默认 false)
+	IPRate    float64  `yaml:"ip_rate"`    // 每 IP 每秒令牌数;<=0 = 不限制 IP
+	IPBurst   int      `yaml:"ip_burst"`   // 每 IP 突发容量;<=0 = 取 ip_rate 的 2 倍
+	UserRate  float64  `yaml:"user_rate"`  // 每账号每秒令牌数;<=0 = 不限制账号
+	UserBurst int      `yaml:"user_burst"` // 每账号突发容量;<=0 = 取 user_rate 的 2 倍
+	SkipPaths []string `yaml:"skip_paths"` // 放行路径前缀(如 /auth/login 防误伤),默认空
+	// RecordLimit 被限流请求的内存记录上限(供管理员查询;环形覆盖),默认 1000
+	RecordLimit int `yaml:"record_limit"`
+	// BucketTTLSeconds 桶空闲回收时间(秒;默认 600),防大 key 量内存膨胀
+	BucketTTLSeconds int `yaml:"bucket_ttl_seconds"`
+}
+
 // Config 总配置结构
 type Config struct {
-	App         App         `yaml:"app" json:"app"`
-	Server      Server      `yaml:"server" json:"server"`
-	Database    Database    `yaml:"database" json:"database"`
-	AccessJWT   AccessJWT   `yaml:"jwt" json:"jwt"`
-	RefreshJWT  RefreshJWT  `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
-	Log         Log         `yaml:"log" json:"log"`
-	Storage     Storage     `yaml:"storage" json:"storage"` // 存储引擎 = 对象存储
-	Bucket      Bucket      `yaml:"bucket" json:"bucket"`   // 桶相关配置
+	App        App        `yaml:"app" json:"app"`
+	Server     Server     `yaml:"server" json:"server"`
+	Database   Database   `yaml:"database" json:"database"`
+	AccessJWT  AccessJWT  `yaml:"jwt" json:"jwt"`
+	RefreshJWT RefreshJWT `yaml:"refresh_jwt" json:"refresh_jwt"` // 刷新令牌
+	Log        Log        `yaml:"log" json:"log"`
+	Storage    Storage    `yaml:"storage" json:"storage"`         // 存储引擎 = 对象存储
+	Bucket     Bucket     `yaml:"bucket" json:"bucket"`           // 桶相关配置
+	RecycleBin RecycleBin `yaml:"recycle_bin" json:"recycle_bin"` // 回收站配置
+	RateLimit  RateLimit  `yaml:"rate_limit" json:"rate_limit"`   // 限流配置
 
 	Health      Health      `yaml:"health" json:"health"`
 	Pool        Pool        `yaml:"pool" json:"pool"`

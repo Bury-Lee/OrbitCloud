@@ -8,9 +8,11 @@
 //
 // 统一约定:
 //   - 所有表内嵌 gorm.Model(ID/CreatedAt/UpdatedAt/DeletedAt);
-//   - 删除策略:桶/文件/文件夹/任务表采用硬删除;文件夹删除先置 Isable=false
-//     (逻辑不可达)再后台硬删;用户/刷新令牌/分享保留软删;刷新令牌与日志表由
-//     cron 定时硬删;
+//   - 删除策略:文件/文件夹删除进回收站(gorm.Model.DeletedAt 软删,保留记录/
+//     对象/用量不归还空间,读取/列表/搜索自动过滤;回收站清除才硬删并归还);
+//     文件夹删除落 DeleteTask 后置 FolderDeleting(可见可读拒写),后台先删内部
+//     再删文件夹自身(Isable 三态见 model/folder.go);桶删除经 DeleteTask
+//     后台物理清理;用户/刷新令牌/分享保留软删;刷新令牌与日志表由 cron 定时硬删;
 //   - 状态字段 int:1 正常 / 0 禁用;
 //   - 唯一索引兜底并发创建,业务层负责把约束错误转成友好提示;
 //   - 时间统一 UTC 存储。
@@ -92,15 +94,15 @@ func (User) TableName() string { return "users" }
 // Bucket 存储桶(一个桶对应对象存储中的一个 bucket / 前缀)。
 type Bucket struct {
 	gorm.Model
-	Name                   string          `gorm:"type:varchar(100);uniqueIndex;not null"` // 桶名(全局唯一)
-	Description            string          `gorm:"type:varchar(255)"`                      // 描述
-	PermissionLevel        PermissionLevel `gorm:"default:1;index"`                        // 访问所需最低权限(0 最高)
-	ManagePermissionLevel  PermissionLevel `gorm:"default:0"`                              // 管理所需最低权限(0 = 跟随访问等级)
-	OwnerID                uint            `gorm:"index;not null"`                         // 创建者 users.id
-	Owner                  User            `gorm:"foreignKey:OwnerID"`                     // 关联对象(懒加载)
-	Quota                  int64           `gorm:"default:0"`                              // 容量配额(字节;0=不限)
-	UsedSpace              int64           `gorm:"default:0"`                              // 已用空间(冗余统计,可后台校正)
-	Status                 int             `gorm:"default:1;index"`                        // 1 正常 / 0 禁用(含删除中:置 0 后不可上传/读取,删除任务完成即删记录)
+	Name                  string          `gorm:"type:varchar(100);uniqueIndex;not null"` // 桶名(全局唯一)
+	Description           string          `gorm:"type:varchar(255)"`                      // 描述
+	PermissionLevel       PermissionLevel `gorm:"default:1;index"`                        // 访问所需最低权限(0 最高)
+	ManagePermissionLevel PermissionLevel `gorm:"default:0"`                              // 管理所需最低权限(0 = 跟随访问等级)
+	OwnerID               uint            `gorm:"index;not null"`                         // 创建者 users.id
+	Owner                 User            `gorm:"foreignKey:OwnerID"`                     // 关联对象(懒加载)
+	Quota                 int64           `gorm:"default:0"`                              // 容量配额(字节;0=不限)
+	UsedSpace             int64           `gorm:"default:0"`                              // 已用空间(冗余统计,可后台校正)
+	Status                int             `gorm:"default:1;index"`                        // 1 正常 / 0 禁用(含删除中:置 0 后不可上传/读取,删除任务完成即删记录)
 }
 
 // TableName buckets。
