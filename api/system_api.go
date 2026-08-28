@@ -38,7 +38,13 @@ func (SystemAPI) ListLogs(c *gin.Context) {
 // DownloadLog 下载日志文件(GET /logs/download?path=相对路径,管理员):
 // 路径限日志根内且仅 .log 文件(防目录穿越),流式返回。
 func (SystemAPI) DownloadLog(c *gin.Context) {
-	path := c.Query("path")
+	var req struct {
+		Path string `form:"path"` // 相对日志根的路径
+	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	path := req.Path
 	if path == "" {
 		respondError(c, server.ErrInvalidInput)
 		return

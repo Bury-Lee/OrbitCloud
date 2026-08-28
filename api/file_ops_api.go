@@ -15,14 +15,11 @@ import (
 
 // DeleteFile 删除文件(DELETE /buckets/:id/files/:fid,成功 204)。
 func (FileAPI) DeleteFile(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req filePathReq
+	if !bindRequest(c, &req) {
 		return
 	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
-		return
-	}
+	bucketID, fileID := req.BucketID, req.FileID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -44,20 +41,16 @@ func (FileAPI) DeleteFile(c *gin.Context) {
 // 请求体:{"dst_bucket_id","dst_dir"?,"filename"?}(缺省:桶根目录、源文件名);
 // 返回新文件记录。
 func (FileAPI) CopyFile(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
-	srcFileID := parseIDParam(c, "fid")
-	if srcFileID == 0 {
-		return
-	}
-
 	var req struct {
+		filePathReq
 		DstBucketID uint   `json:"dst_bucket_id"`
 		DstDir      string `json:"dst_dir"`
 		Filename    string `json:"filename"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID, srcFileID := req.BucketID, req.FileID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -92,20 +85,16 @@ func (FileAPI) CopyFile(c *gin.Context) {
 // 请求体:{"dst_bucket_id","dst_dir"?,"dst_name"?}(缺省:桶根目录、源目录名);
 // 返回目标侧预建的顶层目录,子树由后台 CopyTask 完成。
 func (FileAPI) CopyFolder(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
-	srcFolderID := parseIDParam(c, "fid")
-	if srcFolderID == 0 {
-		return
-	}
-
 	var req struct {
+		dirPathReq
 		DstBucketID uint   `json:"dst_bucket_id"`
 		DstDir      string `json:"dst_dir"`
 		DstName     string `json:"dst_name"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID, srcFolderID := req.BucketID, req.DirID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -139,21 +128,18 @@ func (FileAPI) CopyFolder(c *gin.Context) {
 // MoveFile 移动/重命名文件(POST /buckets/:id/files/:fid/move)。
 // 请求体:{"dst_bucket_id"?,"dst_dir"?,"filename"?}(缺省:同桶、桶根、原名)。
 func (FileAPI) MoveFile(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
-	srcFileID := parseIDParam(c, "fid")
-	if srcFileID == 0 {
-		return
-	}
-
-	// 指针字段用于判断是否显式给目标桶
 	var req struct {
+		filePathReq
 		DstBucketID *uint  `json:"dst_bucket_id"`
 		DstDir      string `json:"dst_dir"`
 		Filename    string `json:"filename"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID, srcFileID := req.BucketID, req.FileID
+
+	// 指针字段用于判断是否显式给目标桶
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -192,21 +178,18 @@ func (FileAPI) MoveFile(c *gin.Context) {
 // 同桶为单事务 O(1) 移动,子树零改动;跨桶不支持。
 // 请求体:{"dst_bucket_id"?,"dst_dir"?,"filename"?}(缺省:同桶、桶根、原名)。
 func (FileAPI) MoveFolder(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
-	srcDirID := parseIDParam(c, "fid")
-	if srcDirID == 0 {
-		return
-	}
-
-	// 指针字段用于判断是否显式给目标桶
 	var req struct {
+		dirPathReq
 		DstBucketID *uint  `json:"dst_bucket_id"`
 		DstDir      string `json:"dst_dir"`
 		Filename    string `json:"filename"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID, srcDirID := req.BucketID, req.DirID
+
+	// 指针字段用于判断是否显式给目标桶
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -244,14 +227,14 @@ func (FileAPI) MoveFolder(c *gin.Context) {
 // CreateDir 创建目录(POST /buckets/:id/dirs,mkdir -p)。
 // 请求体:{"path": "dir/sub"};父链自动创建,已存在同名文件夹幂等成功。
 func (FileAPI) CreateDir(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
-
 	var req struct {
+		bucketPathReq
 		Path string `json:"path"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	bucketID := req.BucketID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -278,14 +261,11 @@ func (FileAPI) CreateDir(c *gin.Context) {
 // 删除进回收站(Isable=false + 软删,见 server.DeleteDir),目录立即从列表消失;
 // 返回 taskID 恒 0,不提交物理清理任务(回收站保留数据)。
 func (FileAPI) DeleteDir(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req dirPathReq
+	if !bindRequest(c, &req) {
 		return
 	}
-	dirID := parseIDParam(c, "fid")
-	if dirID == 0 {
-		return
-	}
+	bucketID, dirID := req.BucketID, req.DirID
 
 	// 条目存在性 + 桶权限 + 条目/祖先 ACL
 	userID := currentUser(c)
@@ -314,14 +294,14 @@ func (FileAPI) DeleteDir(c *gin.Context) {
 // SetFileVisibility 设置文件可见组(PUT /buckets/:id/files/:fid/visibility)。
 // 请求体:{"groups":[组ID...]}(空数组 = 恢复不限制);需创建者或管理员。
 func (FileAPI) SetFileVisibility(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		filePathReq
+		Groups []uint `json:"groups"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
-	fileID := parseIDParam(c, "fid")
-	if fileID == 0 {
-		return
-	}
+	bucketID, fileID := req.BucketID, req.FileID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -336,9 +316,6 @@ func (FileAPI) SetFileVisibility(c *gin.Context) {
 		return
 	}
 
-	var req struct {
-		Groups []uint `json:"groups"`
-	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -354,14 +331,14 @@ func (FileAPI) SetFileVisibility(c *gin.Context) {
 // 请求体:{"groups":[组ID...]}(空数组 = 恢复不限制);需创建者或管理员;
 // 仅影响本目录行,不递归子树。
 func (FileAPI) SetFolderVisibility(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		dirPathReq
+		Groups []uint `json:"groups"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
-	dirID := parseIDParam(c, "fid")
-	if dirID == 0 {
-		return
-	}
+	bucketID, dirID := req.BucketID, req.DirID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -376,9 +353,6 @@ func (FileAPI) SetFolderVisibility(c *gin.Context) {
 		return
 	}
 
-	var req struct {
-		Groups []uint `json:"groups"`
-	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return

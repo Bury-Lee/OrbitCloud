@@ -9,6 +9,7 @@ import (
 
 	"orbitcloud/common"
 	"orbitcloud/core"
+	"orbitcloud/server"
 )
 
 // claimsKey 鉴权 Claims 在 gin context 中的存取键。
@@ -94,6 +95,20 @@ func currentUser(c *gin.Context) uint {
 		return 0
 	}
 	return claims.UserID
+}
+
+// bindRequest 绑定路径(uri tag)与查询参数(form tag)到同一结构体;
+// 绑定失败 → 写出 400 并返回 false(调用方应提前 return)。
+func bindRequest(c *gin.Context, req any) bool {
+	if err := c.ShouldBindUri(req); err != nil {
+		respondError(c, server.ErrInvalidInput)
+		return false
+	}
+	if err := c.ShouldBindQuery(req); err != nil {
+		respondError(c, server.ErrInvalidInput)
+		return false
+	}
+	return true
 }
 
 // httpStatus 将哨兵错误映射为 HTTP 状态码。

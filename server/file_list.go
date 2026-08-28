@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"orbitcloud/common"
@@ -64,11 +65,21 @@ type ListFilesArg struct {
 	DirPath  string // 目标目录路径(空串/"/" = 桶根)
 	Page     int    // 页码(≥1)
 	PageSize int    // 页大小(缺省 50,上限 500)
+	Key      string // 名称前缀搜索(空 = 不过滤)
+	Sort     string // 排序字段: name | time | size(空 = 默认 created_at 倒序)
+	Order    string // 排序方向: asc | desc(空 = desc)
+}
+
+// listSortCols 排序字段白名单 → (files 列, folders 列);size 时文件夹无大小,填 0。
+var listSortCols = map[string][2]string{
+	"name": {"name_lower", "name_lower"},
+	"time": {"updated_at", "updated_at"},
+	"size": {"file_size", "0"},
 }
 
 // ListFiles 分页列出目录下的条目:文件/文件夹分两个切片返回,
-// created_at 倒序混排(UNION ALL),跨两类共取一页(offset 分页,供页面浏览;
-// 前端递归下载用 ListFilesCursor)。
+// 默认 created_at 倒序混排(UNION ALL),支持名称前缀搜索与白名单排序,
+// 跨两类共取一页(offset 分页,供页面浏览;前端递归下载用 ListFilesCursor)。
 func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folders []model.Folder, total int64, err error) {
 	userID, bucketID, dirPath, page, pageSize := arg.UserID, arg.BucketID, arg.DirPath, arg.Page, arg.PageSize
 	// 公共前置(桶/目录/Isable/可见性)
@@ -88,19 +99,69 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 		pageSize = 500 // 防御上限
 	}
 
-	// 双表合并分页(UNION ALL,created_at DESC);可见性谓词分别注入两分支
+	// 名称前缀搜索(空 = 不追加条件)
+	keyCond := ""
+	keyArgs := []any{}
+	if arg.Key != "" {
+		keyCond = " AND name_lower LIKE ?"
+		keyArgs = []any{strings.ToLower(arg.Key) + "%"}
+	}
+
+	// 可见性谓词(两分支共用)
 	visCond := ""
 	if visSQL != "" {
 		visCond = " AND " + visSQL
 	}
+
+	// 排序:白名单字段 + 方向归一;默认 created_at DESC(与原行为一致)
+	orderClause := " ORDER BY created_at DESC"
+	if cols, ok := listSortCols[arg.Sort]; ok {
+		dir := strings.ToUpper(strings.TrimSpace(arg.Order))
+		if dir != "ASC" && dir != "DESC" {
+			dir = "DESC"
+		}
+		orderClause = " ORDER BY sort_key " + dir + ", id DESC"
+		// 双表合并分页(UNION ALL):投影 sort_key 供外层排序(Scan 忽略未映射列)
+		unionSQL := `SELECT id, created_at, kind FROM (
+			SELECT id, created_at, 'file' AS kind, ` + cols[0] + ` AS sort_key FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL` + keyCond + visCond + `
+			UNION ALL
+			SELECT id, created_at, 'folder' AS kind, ` + cols[1] + ` AS sort_key FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL` + keyCond + visCond + `
+		) t` + orderClause + ` LIMIT ? OFFSET ?`
+		queryArgs := []any{bucketID, folderID}
+		queryArgs = append(queryArgs, keyArgs...)
+		queryArgs = append(queryArgs, visArgs...)
+		queryArgs = append(queryArgs, bucketID, folderID)
+		queryArgs = append(queryArgs, keyArgs...)
+		queryArgs = append(queryArgs, visArgs...)
+		queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+		rows := []unionRow{}
+		if err := core.DB.WithContext(ctx).Raw(unionSQL, queryArgs...).Scan(&rows).Error; err != nil {
+			return nil, nil, 0, fmt.Errorf("list files: union query: %w", err)
+		}
+		// 按 kind 批量加载(IN 一次取全,按投影顺序重排;并发删除的行自然跳过)
+		files, folders, err = loadListRows(ctx, bucketID, rows)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		// total = 两表计数之和(叠加搜索与可见性过滤)
+		total, err = countListRows(ctx, bucketID, folderID, keyCond, keyArgs, visSQL, visArgs)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return files, folders, total, nil
+	}
+
+	// 默认排序(created_at DESC):保留原 SQL 路径
 	unionSQL := `SELECT id, created_at, kind FROM (
-		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL` + visCond + `
+		SELECT id, created_at, 'file' AS kind FROM files   WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL` + keyCond + visCond + `
 		UNION ALL
-		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL` + visCond + `
+		SELECT id, created_at, 'folder' AS kind FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL` + keyCond + visCond + `
 	) t ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	queryArgs := []any{bucketID, folderID}
+	queryArgs = append(queryArgs, keyArgs...)
 	queryArgs = append(queryArgs, visArgs...)
 	queryArgs = append(queryArgs, bucketID, folderID)
+	queryArgs = append(queryArgs, keyArgs...)
 	queryArgs = append(queryArgs, visArgs...)
 	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
 	rows := []unionRow{}
@@ -108,25 +169,22 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 		return nil, nil, 0, fmt.Errorf("list files: union query: %w", err)
 	}
 
-	// total = 两表计数之和(叠加可见性过滤)
-	var n1, n2 int64
-	countArgs := []any{bucketID, folderID}
-	countArgs = append(countArgs, visArgs...)
-	if err := core.DB.WithContext(ctx).
-		Raw("SELECT COUNT(*) FROM files WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL"+visCond, countArgs...).
-		Scan(&n1).Error; err != nil {
-		return nil, nil, 0, fmt.Errorf("list files count (files): %w", err)
-	}
-	if err := core.DB.WithContext(ctx).
-		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL"+visCond, countArgs...).
-		Scan(&n2).Error; err != nil {
-		return nil, nil, 0, fmt.Errorf("list files count (folders): %w", err)
-	}
-	total = n1 + n2
-
 	// 按 kind 批量加载(IN 一次取全,按投影顺序重排;并发删除的行自然跳过)
-	files = make([]model.File, 0, len(rows))
-	folders = make([]model.Folder, 0, len(rows))
+	files, folders, err = loadListRows(ctx, bucketID, rows)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	total, err = countListRows(ctx, bucketID, folderID, keyCond, keyArgs, visSQL, visArgs)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return files, folders, total, nil
+}
+
+// loadListRows 按投影顺序批量加载文件/文件夹行(公共步骤)。
+func loadListRows(ctx context.Context, bucketID uint, rows []unionRow) ([]model.File, []model.Folder, error) {
+	files := make([]model.File, 0, len(rows))
+	folders := make([]model.Folder, 0, len(rows))
 	var fileIDs, folderIDs []uint
 	for _, row := range rows {
 		if row.Kind == ItemKindFile {
@@ -139,7 +197,7 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 	if len(fileIDs) > 0 {
 		var fs []model.File
 		if err := core.DB.WithContext(ctx).Where("id IN ? AND bucket_id = ?", fileIDs, bucketID).Find(&fs).Error; err != nil {
-			return nil, nil, 0, fmt.Errorf("list files: load files: %w", err)
+			return nil, nil, fmt.Errorf("list files: load files: %w", err)
 		}
 		for i := range fs {
 			filesByID[fs[i].ID] = fs[i]
@@ -149,7 +207,7 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 	if len(folderIDs) > 0 {
 		var fds []model.Folder
 		if err := core.DB.WithContext(ctx).Where("id IN ? AND bucket_id = ?", folderIDs, bucketID).Find(&fds).Error; err != nil {
-			return nil, nil, 0, fmt.Errorf("list files: load folders: %w", err)
+			return nil, nil, fmt.Errorf("list files: load folders: %w", err)
 		}
 		for i := range fds {
 			foldersByID[fds[i].ID] = fds[i]
@@ -164,7 +222,30 @@ func ListFiles(ctx context.Context, arg ListFilesArg) (files []model.File, folde
 			folders = append(folders, f)
 		}
 	}
-	return files, folders, total, nil
+	return files, folders, nil
+}
+
+// countListRows 双表计数之和(叠加搜索与可见性过滤;公共步骤)。
+func countListRows(ctx context.Context, bucketID, folderID uint, keyCond string, keyArgs []any, visSQL string, visArgs []any) (int64, error) {
+	visCond := ""
+	if visSQL != "" {
+		visCond = " AND " + visSQL
+	}
+	countArgs := []any{bucketID, folderID}
+	countArgs = append(countArgs, keyArgs...)
+	countArgs = append(countArgs, visArgs...)
+	var n1, n2 int64
+	if err := core.DB.WithContext(ctx).
+		Raw("SELECT COUNT(*) FROM files WHERE bucket_id = ? AND folder_id = ? AND deleted_at IS NULL"+keyCond+visCond, countArgs...).
+		Scan(&n1).Error; err != nil {
+		return 0, fmt.Errorf("list files count (files): %w", err)
+	}
+	if err := core.DB.WithContext(ctx).
+		Raw("SELECT COUNT(*) FROM folders WHERE bucket_id = ? AND parent_id = ? AND isable = true AND deleted_at IS NULL"+keyCond+visCond, countArgs...).
+		Scan(&n2).Error; err != nil {
+		return 0, fmt.Errorf("list files count (folders): %w", err)
+	}
+	return n1 + n2, nil
 }
 
 // cursorIDRow keyset 分页投影行(仅取主键;行级可见性由可见性谓词过滤)。

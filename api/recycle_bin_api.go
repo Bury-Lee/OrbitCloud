@@ -66,10 +66,13 @@ func (RecycleBinAPI) ListRecycleFile(c *gin.Context) {
 // 提前清除(不等保留期)——删对象 + 硬删记录 + 归还桶/用户用量 + 级联删分享。
 // 校验都在本层:条目须在回收站(404),仅归属者或管理员可删(403)。
 func (RecycleBinAPI) DeleteRecycleFile(c *gin.Context) {
-	fileID := parseIDParam(c, "id")
-	if fileID == 0 {
+	var req struct {
+		FileID uint `uri:"id" form:"-"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	fileID := req.FileID
 
 	// 可行性预检:文件存在且在回收站
 	file, err := server.GetRecycledFile(c.Request.Context(), server.GetRecycledFileArg{FileID: fileID})
@@ -100,10 +103,13 @@ func (RecycleBinAPI) DeleteRecycleFile(c *gin.Context) {
 // 取消软删回到原位置(父目录已删则回桶根,目标位置重名自动重命名),返回恢复后的文件记录。
 // 校验都在本层:条目须在回收站(404),仅归属者或管理员可恢复(403)。
 func (RecycleBinAPI) RestoreRecycleFile(c *gin.Context) {
-	fileID := parseIDParam(c, "id")
-	if fileID == 0 {
+	var req struct {
+		FileID uint `uri:"id" form:"-"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	fileID := req.FileID
 
 	// 可行性预检:文件存在且在回收站
 	file, err := server.GetRecycledFile(c.Request.Context(), server.GetRecycledFileArg{FileID: fileID})

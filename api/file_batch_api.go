@@ -1,4 +1,4 @@
-﻿// file_batch_api.go 文件模块批量操作接口:批量删除 / 复制 / 移动 / 下载。
+// file_batch_api.go 文件模块批量操作接口:批量删除 / 复制 / 移动 / 下载。
 // 调用 server 批量函数前在 api 层对所有条目做可见性预检,失败条目进 failed 列表。
 package api
 
@@ -20,13 +20,14 @@ import (
 // BatchDelete 批量删除(POST /buckets/:id/items/batch-delete)。
 // 请求体:{"items":[{"kind","id"}...]};返回 {success, failed}(部分失败也 200)。
 func (FileAPI) BatchDelete(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
-		return
-	}
 	var req struct {
+		bucketPathReq
 		Items []server.DeleteItem `json:"items"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	bucketID := req.BucketID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -74,15 +75,16 @@ func (FileAPI) BatchDelete(c *gin.Context) {
 // 请求体:{"dst_bucket_id","dst_dir"?,"items":[{"kind","id","dst_name"?}...]};
 // 文件项返回新对象,文件夹项返回预建顶层。
 func (FileAPI) BatchCopy(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
 	var req struct {
+		bucketPathReq
 		DstBucketID uint              `json:"dst_bucket_id"`
 		DstDir      string            `json:"dst_dir"`
 		Items       []server.CopyItem `json:"items"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID := req.BucketID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -121,15 +123,16 @@ func (FileAPI) BatchCopy(c *gin.Context) {
 // BatchMove 批量移动(POST /buckets/:id/items/batch-move)。
 // 请求体:{"dst_bucket_id"?,"dst_dir"?,"items":[{"kind","id"}...]};缺省同桶。
 func (FileAPI) BatchMove(c *gin.Context) {
-	srcBucketID := parseIDParam(c, "id")
-	if srcBucketID == 0 {
-		return
-	}
 	var req struct {
+		bucketPathReq
 		DstBucketID uint              `json:"dst_bucket_id"`
 		DstDir      string            `json:"dst_dir"`
 		Items       []server.MoveItem `json:"items"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	srcBucketID := req.BucketID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -168,16 +171,20 @@ func (FileAPI) BatchMove(c *gin.Context) {
 // BatchDownload 批量下载为 zip(GET /buckets/:id/items/batch-download?ids=file:122,folder:33)。
 // zip 流式输出,失败项以 zip 内缺失体现;响应头带条目数供前端预估耗时。
 func (FileAPI) BatchDownload(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req struct {
+		bucketPathReq
+		IDs string `form:"ids"` // "file:122,folder:33"
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	userID := currentUser(c)
 	ctx := c.Request.Context()
 
 	// 解析 ids=kind:id,kind:id
 	items := []server.DownloadItem{}
-	for _, part := range strings.Split(c.Query("ids"), ",") {
+	for _, part := range strings.Split(req.IDs, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue

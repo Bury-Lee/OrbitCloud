@@ -78,10 +78,15 @@ func (ShareAPI) CreateShare(c *gin.Context) {
 
 // ListShares 分页返回本人创建的分享(GET /shares?page=&page_size=)。
 func (ShareAPI) ListShares(c *gin.Context) {
-	page := queryInt(c, "page", 1)
-	pageSize := queryInt(c, "page_size", 50)
+	var req struct {
+		Page     int `form:"page"`
+		PageSize int `form:"page_size"`
+	}
+	if !bindRequest(c, &req) {
+		return
+	}
 
-	total, items, err := server.ListShares(c.Request.Context(), server.ListSharesArg{UserID: currentUser(c), Page: page, PageSize: pageSize})
+	total, items, err := server.ListShares(c.Request.Context(), server.ListSharesArg{UserID: currentUser(c), Page: req.Page, PageSize: req.PageSize})
 	if err != nil {
 		respondError(c, err)
 		return
@@ -93,10 +98,17 @@ func (ShareAPI) ListShares(c *gin.Context) {
 // UpdateShare 更新分享(PUT /shares/:id,仅创建者)。
 // 请求体:{"permission"?,"expires_at"?,"max_downloads"?,"password"?}(指针字段才更新)。
 func (ShareAPI) UpdateShare(c *gin.Context) {
-	shareID := parseIDParam(c, "id")
-	if shareID == 0 {
+	var req struct {
+		ShareID      uint       `uri:"id" form:"-"`
+		Permission   *string    `json:"permission"`
+		ExpiresAt    *time.Time `json:"expires_at"`
+		MaxDownloads *int       `json:"max_downloads"`
+		Password     *string    `json:"password"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	shareID := req.ShareID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -111,12 +123,6 @@ func (ShareAPI) UpdateShare(c *gin.Context) {
 		return
 	}
 
-	var req struct {
-		Permission   *string    `json:"permission"`
-		ExpiresAt    *time.Time `json:"expires_at"`
-		MaxDownloads *int       `json:"max_downloads"`
-		Password     *string    `json:"password"`
-	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -141,10 +147,13 @@ func (ShareAPI) UpdateShare(c *gin.Context) {
 
 // DeleteShare 删除分享(DELETE /shares/:id,成功 204);仅创建者可删。
 func (ShareAPI) DeleteShare(c *gin.Context) {
-	shareID := parseIDParam(c, "id")
-	if shareID == 0 {
+	var req struct {
+		ShareID uint `uri:"id" form:"-"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	shareID := req.ShareID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -171,14 +180,22 @@ func (ShareAPI) DeleteShare(c *gin.Context) {
 // download=1(或 preview=1)时直出文件流(带提取码/次数校验,支持 Range,计次数);
 // 否则返回分享元数据(文件分享返回 model.File,文件夹分享返回 model.Folder + 目录列表,不计数)。
 func (ShareAPI) ResolveShare(c *gin.Context) {
-	token := c.Param("token")
-	if token == "" {
-		respondError(c, server.ErrInvalidInput)
+	var req struct {
+		Token    string `uri:"token" form:"-"`
+		Password string `form:"password"` // 无则空串
+		Path     string `form:"path"`     // 文件夹分享:分享根内相对路径
+		Download string `form:"download"` // =1 直出文件流
+		Preview  string `form:"preview"`  // =1 直出文件流
+		Page     int    `form:"page"`     // 文件夹分享目录列表页码(默认 1)
+		PageSize int    `form:"page_size"` // 页大小(默认 50)
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
-	password := c.Query("password") // 无则空串
-	path := c.Query("path")         // 文件夹分享:分享根内相对路径
-	download := c.Query("download") == "1" || c.Query("preview") == "1"
+	token := req.Token
+	password := req.Password
+	path := req.Path
+	download := req.Download == "1" || req.Preview == "1"
 
 	// 直出文件流(文件夹分享经 path 定位下载目录内文件)
 	if download {
@@ -227,9 +244,7 @@ func (ShareAPI) ResolveShare(c *gin.Context) {
 	}
 	if folder != nil {
 		// 文件夹分享:附目录列表
-		page := queryInt(c, "page", 1)
-		pageSize := queryInt(c, "page_size", 50)
-		files, folders, total, err := server.ListSharedDir(c.Request.Context(), server.ListSharedDirArg{Token: token, Password: password, RelPath: path, Page: page, PageSize: pageSize})
+		files, folders, total, err := server.ListSharedDir(c.Request.Context(), server.ListSharedDirArg{Token: token, Password: password, RelPath: path, Page: req.Page, PageSize: req.PageSize})
 		if err != nil {
 			respondError(c, err)
 			return

@@ -1,9 +1,8 @@
-﻿// group_api.go 用户组模块接口:组 CRUD / 成员管理 / 我的组。
+// group_api.go 用户组模块接口:组 CRUD / 成员管理 / 我的组。
 // 组管理接口为管理员专属;组详情与成员列表对组内成员开放。
 package api
 
 import (
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,6 +12,24 @@ import (
 
 // GroupAPI 用户组模块接口(无状态)。
 type GroupAPI struct{}
+
+// groupIDReq /groups/:id 路径参数。
+type groupIDReq struct {
+	GroupID uint `uri:"id" form:"-"`
+}
+
+// groupMembersReq /groups/:id/members/:uid 路径参数。
+type groupMembersReq struct {
+	groupIDReq
+	UserID uint `uri:"uid" form:"-"`
+}
+
+// groupPageReq 组列表分页参数(路径 + 分页)。
+type groupPageReq struct {
+	groupIDReq
+	Page     int `form:"page"`
+	PageSize int `form:"page_size"`
+}
 
 // CreateGroup 创建用户组(POST /groups,管理员)。
 // 请求体:{"name","description"?};组为纯可见组白名单,无权限等级字段。
@@ -35,9 +52,14 @@ func (GroupAPI) CreateGroup(c *gin.Context) {
 
 // ListGroups 分页列出用户组(GET /groups?page=&page_size=,管理员)。
 func (GroupAPI) ListGroups(c *gin.Context) {
-	page := queryInt(c, "page", 1)
-	pageSize := queryInt(c, "page_size", 50)
-	total, items, err := server.ListGroups(c.Request.Context(), server.ListGroupsArg{UserID: currentUser(c), Page: page, PageSize: pageSize})
+	var req struct {
+		Page     int `form:"page"`
+		PageSize int `form:"page_size"`
+	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	total, items, err := server.ListGroups(c.Request.Context(), server.ListGroupsArg{UserID: currentUser(c), Page: req.Page, PageSize: req.PageSize})
 	if err != nil {
 		respondError(c, err)
 		return
@@ -47,10 +69,11 @@ func (GroupAPI) ListGroups(c *gin.Context) {
 
 // GetGroup 返回组信息(GET /groups/:id,管理员或组内成员)。
 func (GroupAPI) GetGroup(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
+	var req groupIDReq
+	if !bindRequest(c, &req) {
 		return
 	}
+	groupID := req.GroupID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -70,15 +93,16 @@ func (GroupAPI) GetGroup(c *gin.Context) {
 // UpdateGroup 更新用户组(PUT /groups/:id,管理员)。
 // 请求体:{"name"?,"description"?,"status"?}(非空字段才更新)。
 func (GroupAPI) UpdateGroup(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
-		return
-	}
 	var req struct {
+		groupIDReq
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Status      *int8  `json:"status"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	groupID := req.GroupID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -96,11 +120,11 @@ func (GroupAPI) UpdateGroup(c *gin.Context) {
 
 // DeleteGroup 删除用户组(DELETE /groups/:id,管理员,软删,成功 204)。
 func (GroupAPI) DeleteGroup(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
+	var req groupIDReq
+	if !bindRequest(c, &req) {
 		return
 	}
-	if err := server.DeleteGroup(c.Request.Context(), server.DeleteGroupArg{OperatorID: currentUser(c), GroupID: groupID}); err != nil {
+	if err := server.DeleteGroup(c.Request.Context(), server.DeleteGroupArg{OperatorID: currentUser(c), GroupID: req.GroupID}); err != nil {
 		respondError(c, err)
 		return
 	}
@@ -109,13 +133,14 @@ func (GroupAPI) DeleteGroup(c *gin.Context) {
 
 // AddGroupMember 添加组成员(POST /groups/:id/members,管理员);请求体:{"user_id"}。
 func (GroupAPI) AddGroupMember(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
-		return
-	}
 	var req struct {
+		groupIDReq
 		UserID uint `json:"user_id"`
 	}
+	if !bindRequest(c, &req) {
+		return
+	}
+	groupID := req.GroupID
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondError(c, server.ErrInvalidInput)
 		return
@@ -133,16 +158,12 @@ func (GroupAPI) AddGroupMember(c *gin.Context) {
 
 // RemoveGroupMember 移除组成员(DELETE /groups/:id/members/:uid,管理员,成功 204)。
 func (GroupAPI) RemoveGroupMember(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
+	var req groupMembersReq
+	if !bindRequest(c, &req) {
 		return
 	}
-	userID, err := strconv.ParseUint(c.Param("uid"), 10, 64)
-	if err != nil || userID == 0 {
-		respondError(c, server.ErrInvalidInput)
-		return
-	}
-	if err := server.RemoveGroupMember(c.Request.Context(), server.RemoveGroupMemberArg{OperatorID: currentUser(c), GroupID: groupID, UserID: uint(userID)}); err != nil {
+	groupID, userID := req.GroupID, req.UserID
+	if err := server.RemoveGroupMember(c.Request.Context(), server.RemoveGroupMemberArg{OperatorID: currentUser(c), GroupID: groupID, UserID: userID}); err != nil {
 		respondError(c, err)
 		return
 	}
@@ -151,10 +172,15 @@ func (GroupAPI) RemoveGroupMember(c *gin.Context) {
 
 // ListGroupMembers 分页返回组成员(GET /groups/:id/members,管理员或组内成员)。
 func (GroupAPI) ListGroupMembers(c *gin.Context) {
-	groupID := parseIDParam(c, "id")
-	if groupID == 0 {
+	var req struct {
+		groupIDReq
+		Page     int `form:"page"`
+		PageSize int `form:"page_size"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	groupID := req.GroupID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -168,9 +194,7 @@ func (GroupAPI) ListGroupMembers(c *gin.Context) {
 		return
 	}
 
-	page := queryInt(c, "page", 1)
-	pageSize := queryInt(c, "page_size", 50)
-	total, items, err := server.ListGroupMembers(ctx, server.ListGroupMembersArg{GroupID: groupID, Page: page, PageSize: pageSize})
+	total, items, err := server.ListGroupMembers(ctx, server.ListGroupMembersArg{GroupID: groupID, Page: req.Page, PageSize: req.PageSize})
 	if err != nil {
 		respondError(c, err)
 		return

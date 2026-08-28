@@ -8,18 +8,22 @@ import (
 	"orbitcloud/server"
 )
 
-type FileSearchArg struct {
-	common.PageInfo
-	BuketID  uint   //来自哪个桶
-	Path     string //在该路径下匹配(如果有)
-	FolderID uint   //在path==""时使用该ID来匹配文件夹,为0时全桶前缀匹配
+// fileSearchReq 搜索接口通用参数(路径参数 + 查询参数统一绑定)。
+type fileSearchReq struct {
+	bucketPathReq
+	Path     string `form:"path"`      // 在该路径下匹配(如果有)
+	FolderID uint   `form:"folder_id"` // path=="" 时使用该 ID 匹配文件夹;0 = 全桶前缀匹配
+	Key      string `form:"key"`       // 搜索前缀
+	Page     int    `form:"page"`      // 页码(默认 1)
+	PageSize int    `form:"page_size"` // 页大小(默认 50)
 }
 
 func (FileAPI) FileSearch(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req fileSearchReq
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	userID := currentUser(c)
 	ctx := c.Request.Context()
 
@@ -31,11 +35,11 @@ func (FileAPI) FileSearch(c *gin.Context) {
 	files, err := server.FileSearch(ctx, server.FileSearchArg{
 		UserID:   userID,
 		BucketID: bucketID,
-		Path:     c.Query("path"),
-		FolderID: uint(queryInt(c, "folder_id", 0)),
-		Key:      c.Query("key"),
-		Page:     queryInt(c, "page", 1),
-		PageSize: queryInt(c, "page_size", 50),
+		Path:     req.Path,
+		FolderID: req.FolderID,
+		Key:      req.Key,
+		Page:     req.Page,
+		PageSize: req.PageSize,
 	})
 	if err != nil {
 		respondError(c, err)
@@ -45,18 +49,12 @@ func (FileAPI) FileSearch(c *gin.Context) {
 	common.Success(c, gin.H{"files": files})
 }
 
-type FolderSearchArg struct {
-	common.PageInfo
-	BuketID  uint   //来自哪个桶
-	Path     string //在该路径下匹配(如果有)
-	FolderID uint   //在path==""时使用该ID来匹配文件夹,为0时全桶前缀匹配
-}
-
 func (FileAPI) FolderSearch(c *gin.Context) {
-	bucketID := parseIDParam(c, "id")
-	if bucketID == 0 {
+	var req fileSearchReq
+	if !bindRequest(c, &req) {
 		return
 	}
+	bucketID := req.BucketID
 	userID := currentUser(c)
 	ctx := c.Request.Context()
 
@@ -68,11 +66,11 @@ func (FileAPI) FolderSearch(c *gin.Context) {
 	folders, err := server.FolderSearch(ctx, server.FolderSearchArg{
 		UserID:   userID,
 		BucketID: bucketID,
-		Path:     c.Query("path"),
-		FolderID: uint(queryInt(c, "folder_id", 0)),
-		Key:      c.Query("key"),
-		Page:     queryInt(c, "page", 1),
-		PageSize: queryInt(c, "page_size", 50),
+		Path:     req.Path,
+		FolderID: req.FolderID,
+		Key:      req.Key,
+		Page:     req.Page,
+		PageSize: req.PageSize,
 	})
 	if err != nil {
 		respondError(c, err)

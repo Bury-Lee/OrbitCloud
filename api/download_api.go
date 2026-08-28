@@ -58,10 +58,13 @@ func (DownloadAPI) CreateDownloadTask(c *gin.Context) {
 // GetDownloadTask 查询下载任务及起点文件夹当前元数据(GET /download-tasks/:id),
 // 供前端校验任务仍有效并恢复下载;任务不存在 → 404,由前端重新登记。
 func (DownloadAPI) GetDownloadTask(c *gin.Context) {
-	taskID := parseIDParam(c, "id")
-	if taskID == 0 {
+	var req struct {
+		TaskID uint `uri:"id" form:"-"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	taskID := req.TaskID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
@@ -99,10 +102,13 @@ func downloadTaskResume(ctx context.Context, userID, taskID uint) (*model.Downlo
 // CompleteDownloadTask 完成/取消后清理任务(DELETE /download-tasks/:id,硬删,成功 204);
 // 仅创建者可清理。
 func (DownloadAPI) CompleteDownloadTask(c *gin.Context) {
-	taskID := parseIDParam(c, "id")
-	if taskID == 0 {
+	var req struct {
+		TaskID uint `uri:"id" form:"-"`
+	}
+	if !bindRequest(c, &req) {
 		return
 	}
+	taskID := req.TaskID
 	ctx := c.Request.Context()
 	userID := currentUser(c)
 
