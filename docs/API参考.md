@@ -167,8 +167,15 @@
 | DELETE `/shares/:id` | 创建者 | 删除 |
 | GET `/share/:token` | 公开 | 解析分享元数据;有提取码带 `?password=`;**下载/预览才计数** |
 
-## 7. 鉴权与中间件要点
+## 7. 系统运维(仅管理员)
 
+| 方法/路径 | 鉴权 | 说明 |
+|---|---|---|
+| GET `/system/status` | 管理员 | 运行状况:`boot_time`/`uptime_seconds`/`go_version`/`num_goroutine`/`num_cpu`/`heap_alloc_bytes`/`db_alive`/`storage_alive`/`version`/`environment` |
+| GET `/logs` | 管理员 | 日志文件列表(日期目录 + 文件:大小/修改时间/相对路径) |
+| GET `/logs/download?path=相对路径` | 管理员 | 下载日志文件(限日志根内 `.log`,防目录穿越) |
+
+## 8. 鉴权与中间件要点
 - 登录后 access_token 放入 `Authorization: Bearer <token>`;刷新令牌轮换:收到 401 先
   `POST /auth/refresh` 换新令牌对并重放原请求(前端已实现并发共享刷新);
 - 管理员判定:`PermissionLevel.IsAdmin()`(0/1);管理员改他人须权限严格高于目标;
