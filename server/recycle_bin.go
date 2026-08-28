@@ -27,31 +27,28 @@ const recyclePurgeBatch = 100
 
 // ListRecycleBinArg 回收站列表入参。
 type ListRecycleBinArg struct {
-	UserID   uint // 归属者 users.id(仅查自己的回收站)
-	Page     int  // 页码(≥1)
-	PageSize int  // 页大小(缺省 50,上限 500)
+	UserID uint           // 归属者 users.id(仅查自己的回收站)
+	Opt    *common.Option // 分页参数(common.NewOptionFromQuery 解析;nil = 默认第一页)
 }
 
-// ListRecycleBin 分页列出用户自己的回收站文件(软删行,deleted_at 倒序;
-// 分页统一走 common.Paginate)。他人归属/未删除的文件不出现。
-func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (total int64, items []model.File, err error) {
-	page, pageSize := arg.Page, arg.PageSize
-	opt := common.NewOption(page, pageSize)
+// ListRecycleBin 分页查询用户自己的回收站文件(软删行,deleted_at 倒序,
+// 走 common.Paginate 统一分页封装,响应含 total_pages/has_more/next_cursor,
+// 供回收站相关接口(含后续提前删除)共用同一分页形态)。
+// 他人归属/未删除的文件不出现。
+func ListRecycleBin(ctx context.Context, arg ListRecycleBinArg) (*common.PaginatedResult[model.File], error) {
+	opt := arg.Opt
+	if opt == nil {
+		opt = common.NewOption(1, 10)
+	}
 	opt.DefaultOrder = "deleted_at DESC, id DESC"
-
-	items = []model.File{}
-	// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤)
-	db := core.DB.WithContext(ctx).Unscoped().
-		Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID)
-	if _, err := common.Paginate(db, opt, &items); err != nil {
-		return 0, nil, fmt.Errorf("list recycle bin: %w", err)
+	opt.Filters = []func(*gorm.DB) *gorm.DB{
+		func(db *gorm.DB) *gorm.DB {
+			// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤)
+			return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID)
+		},
 	}
-	if err := core.DB.WithContext(ctx).Unscoped().Model(&model.File{}).
-		Where("deleted_at IS NOT NULL AND uploaded_by = ?", arg.UserID).
-		Count(&total).Error; err != nil {
-		return 0, nil, fmt.Errorf("list recycle bin count: %w", err)
-	}
-	return total, items, nil
+	files := []model.File{}
+	return common.Paginate(core.DB.WithContext(ctx), opt, &files)
 }
 
 // CleanExpiredRecycleBinArg 回收站过期清理入参。

@@ -111,7 +111,7 @@
 | GET `/buckets/:id/files?path=&page=&page_size=` | 目录列表(分页),`path` 缺省桶根 |
 | GET `/buckets/:id/files/:fid` | 文件元数据 |
 | GET `/buckets/:id/dirs/:fid` | 文件夹元数据(含 `isable`,删除中为 false) |
-| GET `/recycle-bin?page=&page_size=` | 我的回收站(已删除且归属自己的文件,`deleted_at` 倒序,返回 `{total, items}`) |
+| GET `/recycle-bin?page=&page_size=&cursor=&key=&order=` | 我的回收站(已删除且归属自己的文件,`deleted_at` 倒序;返回 common 统一分页结构 `{list, page, page_size, total_pages, has_more, next_cursor}`) |
 
 ### 下载与预览(流式)
 

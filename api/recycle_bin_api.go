@@ -12,17 +12,19 @@ import (
 // RecycleBinAPI 回收站模块接口(无状态)。
 type RecycleBinAPI struct{}
 
-// ListRecycleBin 分页返回自己的回收站(GET /recycle-bin?page=&page_size=):
-// 已删除(软删)且归属自己的文件,deleted_at 倒序。
+// ListRecycleBin 分页返回自己的回收站(GET /recycle-bin?page=&page_size=&cursor=&key=&order=):
+// 已删除(软删)且归属自己的文件,deleted_at 倒序;走 common 统一分页封装
+// (NewOptionFromQuery 解析参数,WrapPageResponse 输出 PaginatedResult,
+// 与后续回收站其他接口共用同一分页形态)。
 func (RecycleBinAPI) ListRecycleBin(c *gin.Context) {
-	page := queryInt(c, "page", 1)
-	pageSize := queryInt(c, "page_size", 50)
-
-	total, items, err := server.ListRecycleBin(c.Request.Context(), server.ListRecycleBinArg{UserID: currentUser(c), Page: page, PageSize: pageSize})
+	res, err := server.ListRecycleBin(c.Request.Context(), server.ListRecycleBinArg{
+		UserID: currentUser(c),
+		Opt:    common.NewOptionFromQuery(c),
+	})
 	if err != nil {
 		respondError(c, err)
 		return
 	}
 
-	common.Success(c, gin.H{"total": total, "items": items})
+	common.WrapPageResponse(c, res)
 }
