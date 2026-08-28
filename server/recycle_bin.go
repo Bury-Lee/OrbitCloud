@@ -47,8 +47,7 @@ func GetRecycledFile(ctx context.Context, arg GetRecycledFileArg) (*model.File, 
 
 // DeleteRecycledFileArg 回收站文件永久删除入参。
 type DeleteRecycledFileArg struct {
-	OperatorID uint // 操作者 users.id(操作日志)
-	FileID     uint // 回收站文件 files.id
+	FileID uint // 回收站文件 files.id
 }
 
 // DeleteRecycledFile 永久删除回收站文件(提前清除,不等保留期):
@@ -69,7 +68,6 @@ func DeleteRecycledFile(ctx context.Context, arg DeleteRecycledFileArg) error {
 	if err := purgeRecycledFile(ctx, &f); err != nil {
 		return err
 	}
-	log.Infof("delete recycled file: operator %d file %d purged (recycle bin early clear)", arg.OperatorID, arg.FileID)
 	return nil
 }
 
@@ -267,8 +265,8 @@ func purgeRecycledFolderSubtree(ctx context.Context, bucketID, folderID uint) er
 			Where("bucket_id = ? AND folder_id = ?", bucketID, fid).Find(&files).Error; err != nil {
 			return fmt.Errorf("purge recycled folder %d: query files: %w", folderID, err)
 		}
-		var folderSize int64               // 本文件夹文件总大小
-		byUser := map[uint]int64{}         // 用户用量归还汇总(按 UploadedBy 分组)
+		var folderSize int64       // 本文件夹文件总大小
+		byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
 		fileIDs := make([]uint, 0, len(files))
 		for i := range files {
 			if err := core.Storage.Delete(ctx, utils.BucketEncoder(bucketID), objectKeyForFile(files[i].ID)); err != nil && !errors.Is(err, core.ErrObjectNotFound) {

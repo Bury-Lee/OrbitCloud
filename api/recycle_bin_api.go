@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"orbitcloud/common"
+	"orbitcloud/log"
 	"orbitcloud/model"
 	"orbitcloud/server"
 )
@@ -86,12 +87,12 @@ func (RecycleBinAPI) DeleteRecycleFile(c *gin.Context) {
 	}
 
 	if err := server.DeleteRecycledFile(c.Request.Context(), server.DeleteRecycledFileArg{
-		OperatorID: operatorID,
-		FileID:     fileID,
+		FileID: fileID,
 	}); err != nil {
 		respondError(c, err)
 		return
 	}
+	log.Infof("delete recycled file: operator %d file %d purged (recycle bin early clear)", operatorID, fileID)
 	c.Status(204)
 }
 
