@@ -1,4 +1,4 @@
-﻿// middleware.go 鉴权/管理员/请求日志/执行池中间件。
+// middleware.go 鉴权/管理员/请求日志/执行池中间件。
 package api
 
 import (
@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	agilepool "github.com/Yiming1997/agilePool/v2"
 	"github.com/gin-gonic/gin"
@@ -59,6 +61,43 @@ func QueryTokenAuthMiddleware(c *gin.Context) {
 		return
 	}
 	c.Set(claimsKey, claims)
+	c.Next()
+}
+
+// RateLimitMiddleware 限流中间件(全局挂载):按 IP 与账号双维度令牌桶,
+// 超限 → 429 + 记录(IP/账号/路径,见 server/ratelimit.go)。
+// 配置 rate_limit.enabled 时生效;skip_paths 前缀放行。
+func RateLimitMiddleware(c *gin.Context) {
+	rl := server.RateLimit
+	if rl == nil || !rl.Enabled() {
+		c.Next()
+		return
+	}
+	// 放行路径前缀(如 /auth/login 防误伤)
+	path := c.Request.URL.Path
+	for _, p := range rl.SkipPaths() {
+		if p != "" && strings.HasPrefix(path, p) {
+			c.Next()
+			return
+		}
+	}
+	// IP 维度
+	ip := c.ClientIP()
+	if !rl.AllowIP(ip) {
+		rl.Record(server.RateLimitRecord{Time: time.Now(), IP: ip, Method: c.Request.Method, Path: path, Reason: "ip"})
+		common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
+		c.Abort()
+		return
+	}
+	// 账号维度(登录用户)
+	if claims := ClaimsFrom(c); claims != nil {
+		if !rl.AllowUser(claims.UserID) {
+			rl.Record(server.RateLimitRecord{Time: time.Now(), IP: ip, UserID: claims.UserID, Username: claims.Username, Method: c.Request.Method, Path: path, Reason: "user"})
+			common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
+			c.Abort()
+			return
+		}
+	}
 	c.Next()
 }
 

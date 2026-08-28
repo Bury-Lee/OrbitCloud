@@ -9,6 +9,7 @@ func SystemRouter(authed *gin.RouterGroup) {
 	admin.Use(AdminMiddleware)
 	{
 		admin.GET("/system/status", AuthMiddleware, App.System.Status)
+		admin.GET("/system/ratelimit", AuthMiddleware, App.System.RateLimitStats)
 		admin.GET("/logs", AuthMiddleware, App.System.ListLogs)
 		admin.GET("/logs/download", AuthMiddleware, App.System.DownloadLog)
 	}

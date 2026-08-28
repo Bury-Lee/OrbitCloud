@@ -35,6 +35,19 @@ func (SystemAPI) ListLogs(c *gin.Context) {
 	common.Success(c, gin.H{"files": infos})
 }
 
+// RateLimitStats 限流状态与记录(GET /system/ratelimit,管理员):
+// 返回启用状态/速率配置/被限流请求记录(IP/账号/路径,最新在前)。
+func (SystemAPI) RateLimitStats(c *gin.Context) {
+	if server.RateLimit == nil {
+		common.Success(c, gin.H{"enabled": false, "records": []server.RateLimitRecord{}})
+		return
+	}
+	common.Success(c, gin.H{
+		"stats":   server.RateLimit.Stats(),
+		"records": server.RateLimit.Records(),
+	})
+}
+
 // DownloadLog 下载日志文件(GET /logs/download?path=相对路径,管理员):
 // 路径限日志根内且仅 .log 文件(防目录穿越),流式返回。
 func (SystemAPI) DownloadLog(c *gin.Context) {

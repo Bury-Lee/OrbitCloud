@@ -1,4 +1,4 @@
-﻿// Package api 提供 HTTP 接入层:路由注册、鉴权、参数校验、权限预检与错误响应映射。
+// Package api 提供 HTTP 接入层:路由注册、鉴权、参数校验、权限预检与错误响应映射。
 // 本包不包含业务逻辑,业务由 server 包提供;路由按模块拆分在 router_*.go 中注册。
 package api
 
@@ -43,6 +43,8 @@ var App AppGroup
 func Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	// 限流中间件(全局;按 IP/账号双维度,配置 rate_limit.enabled 时生效)
+	r.Use(RateLimitMiddleware)
 	// 运行模式与配置对齐
 	if core.GlobalConfig != nil {
 		gin.SetMode(core.GlobalConfig.Server.Mode)
