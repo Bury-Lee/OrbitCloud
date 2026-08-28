@@ -90,6 +90,12 @@ impl UserCache {
             Ok(Some(cached)) => {
                 self.inner.insert(username.to_string(), cached.clone());
                 users_index.upsert(username, cached.user_id).await;
+                // 更新协议层用户表(认证 lookup 用;改密收敛的关键——表不更新,
+                // 认证仍走表命中短路用旧 hash)
+                let hash_hex = hex::encode(cached.creds.nt_hash);
+                if let Err(e) = handle.add_user_nt_hash(username, &hash_hex).await {
+                    warnf!("缓存:周期刷新写入用户 {username} 凭据失败:{e:?}", &["SMB"]);
+                }
                 self.ensure_user_acl(conn, registry, handle, username).await;
             }
             Ok(None) => {
