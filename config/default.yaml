@@ -357,7 +357,7 @@ rate_limit:
   # 每账号突发容量; 0 = 取 user_rate 的 2 倍
   user_burst: 100
   # 放行路径前缀(逗号分隔), 如 /auth/login 防误伤; 留空 = 全部限流
-  skip_paths: ""
+  skip_paths: []
   # 被限流请求的内存记录上限(管理员查询用; 环形覆盖)
   record_limit: 1000
   # 桶空闲回收时间(秒), 防大 key 量内存膨胀
