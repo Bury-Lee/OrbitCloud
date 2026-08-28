@@ -71,7 +71,7 @@ func UploadFile(ctx context.Context, arg UploadFileArg) (*model.File, error) {
 		return nil, err
 	}
 	// 目标目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, bucketID, folderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, bucketID, folderID); err != nil {
 		return nil, err
 	}
 
@@ -220,7 +220,7 @@ func CreateDir(ctx context.Context, arg CreateDirArg) (*model.Folder, error) {
 	if err := checkAncestorsAccessTree(ctx, userID, bucketID, parentID); err != nil {
 		return nil, err
 	}
-	if err := checkAncestorsWritable(ctx, bucketID, parentID); err != nil {
+	if err := CheckAncestorsWritable(ctx, bucketID, parentID); err != nil {
 		return nil, err
 	}
 	name := segs[len(segs)-1]

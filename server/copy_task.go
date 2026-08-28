@@ -254,7 +254,7 @@ func processCopyFolderTask(ctx context.Context, taskID uint) error {
 		}
 
 		// 目标侧可写性(正在删除的目标目录/父链拒绝写入)
-		if err := checkAncestorsWritable(ctx, task.DstBucketID, fr.dstParentID); err != nil {
+		if err := CheckAncestorsWritable(ctx, task.DstBucketID, fr.dstParentID); err != nil {
 			return fmt.Errorf("process copy task %d: dst dir not writable: %w", taskID, err)
 		}
 

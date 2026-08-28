@@ -83,7 +83,7 @@ type DeleteDirArg struct {
 
 // DeleteDir 删除文件夹:落 DeleteTask(带操作者/权限快照)后触发后台任务。
 // 关键语义:落表后文件夹置 FolderDeleting(正在删除)——文件夹**保持可见可读**,
-// 但拒绝一切新写入(上传/建目录/移动/复制进来,见 checkAncestorsWritable);
+// 但拒绝一切新写入(上传/建目录/移动/复制进来,见 CheckAncestorsWritable);
 // 后台任务深度优先先删内部(文件/子文件夹逐条软删进回收站),内部全部清空后
 // 才删除文件夹自身(置 FolderUnusable + 软删)。中断时子树结构完整,可续跑/恢复。
 // 错误语义:目录不存在/已进回收站 → ErrNotFound;桶禁用 → ErrForbidden。

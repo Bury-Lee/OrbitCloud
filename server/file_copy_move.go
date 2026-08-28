@@ -107,7 +107,7 @@ func copyFileInner(ctx context.Context, arg CopyFileArg, autoRename bool) (*mode
 		return nil, err
 	}
 	// 目标目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 	if autoRename {
@@ -271,7 +271,7 @@ func CopyFolder(ctx context.Context, arg CopyFolderArg) (*model.Folder, error) {
 		return nil, err
 	}
 	// 目标父目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 
@@ -397,7 +397,7 @@ func MoveFile(ctx context.Context, arg MoveFileArg) (*model.File, error) {
 		return nil, err
 	}
 	// 目标目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, dstBucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 	// 目标已存在(文件/文件夹)→ 冲突:不覆盖用户已有文件
@@ -462,7 +462,7 @@ func moveFileSameBucket(ctx context.Context, userID, bucketID uint, file *model.
 		return nil, err
 	}
 	// 目标目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 
@@ -565,7 +565,7 @@ func moveFolderSameBucket(ctx context.Context, userID, bucketID uint, folder *mo
 		return nil, err
 	}
 	// 目标目录可写性(正在删除的目录拒绝写入)
-	if err := checkAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
+	if err := CheckAncestorsWritable(ctx, bucketID, dstFolderID); err != nil {
 		return nil, err
 	}
 

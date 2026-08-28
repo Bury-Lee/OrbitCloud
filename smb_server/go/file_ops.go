@@ -407,6 +407,15 @@ func (f *FileOpsService) Open(ctx context.Context, args *OpenArgs, share ShareIn
 		}
 	}
 
+	// 写路径(创建/覆盖/截断)拒绝写入"正在删除"的目标目录(与 HTTP 侧
+	// CheckAncestorsWritable 同语义:FolderDeleting 拒写,防删除任务竞态;
+	// 只读打开不受影响)
+	if args.Write || args.Intent != "open" {
+		if err := server.CheckAncestorsWritable(ctx, share.BucketID, folderID); err != nil {
+			return nil, err
+		}
+	}
+
 	// ---- 5. 按 Intent 处理创建处置 ----
 	created := false     // 本次是否新建了文件记录(变更日志用)
 	truncAt := int64(-1) // 截断点(默认无截断;覆盖打开已存在文件 → 0:旧数据整体作废)

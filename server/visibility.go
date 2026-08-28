@@ -84,12 +84,12 @@ func checkItemAccessTree(ctx context.Context, user *model.User, groups *[]uint, 
 	return ItemVisibleRule(user.ID, visibleToGroups, uploadedBy, user, *groups)
 }
 
-// checkAncestorsWritable 沿祖先链校验目录可写(写路径专用):
+// CheckAncestorsWritable 沿祖先链校验目录可写(写路径专用):
 // 任一祖先已删(FolderUnusable)→ ErrNotFound;任一祖先正在删除(FolderDeleting)
 // → ErrForbidden(删除任务处理中,拒绝一切新写入)。
 // 与 checkAncestorsAccessTree 的差异:后者是读路径(Deleting 放行)。
-// folderID=0(桶根)直接通过。
-func checkAncestorsWritable(ctx context.Context, bucketID, folderID uint) error {
+// folderID=0(桶根)直接通过。SMB 网关写路径(Open 创建/覆盖/截断)同用。
+func CheckAncestorsWritable(ctx context.Context, bucketID, folderID uint) error {
 	cur := folderID
 	seen := map[uint]bool{} // 环保护(数据异常时防死循环)
 	for cur != 0 && !seen[cur] {
