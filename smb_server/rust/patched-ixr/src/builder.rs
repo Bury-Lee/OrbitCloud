@@ -1,14 +1,19 @@
 //! Public builder API for `SmbServer` and `Share`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::backend::ShareBackend;
-use crate::server::{ServerConfig, ServerState, ServerUsers, ShareBindings, ShareMode, SmbServer};
+use crate::proto::auth::ntlm::UserCreds;
+use crate::server::{
+    ServerConfig, ServerState, ServerUsers, ShareBindings, ShareMode, SmbServer, UserResolver,
+};
 
 // ---------------------------------------------------------------------------
 // Access
@@ -117,6 +122,7 @@ pub struct SmbServerBuilder {
     max_read_size: u32,
     max_write_size: u32,
     server_guid: Option<Uuid>,
+    user_resolver: Option<Arc<UserResolver>>,
 }
 
 impl Default for SmbServerBuilder {
@@ -136,6 +142,7 @@ impl SmbServerBuilder {
             max_read_size: 1024 * 1024,
             max_write_size: 1024 * 1024,
             server_guid: None,
+            user_resolver: None,
         }
     }
 
@@ -176,6 +183,20 @@ impl SmbServerBuilder {
     /// Override the random per-process server GUID. Mostly useful in tests.
     pub fn server_guid(mut self, guid: Uuid) -> Self {
         self.server_guid = Some(guid);
+        self
+    }
+
+    /// 注入按需用户解析器(认证未命中时拉取凭据;见 `ServerState::ensure_user`)。
+    pub fn user_resolver<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(
+                String,
+            ) -> Pin<Box<dyn Future<Output = Option<UserCreds>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.user_resolver = Some(Arc::new(resolver));
         self
     }
 
@@ -253,7 +274,7 @@ impl SmbServerBuilder {
             table: tokio::sync::RwLock::new(user_table),
         };
 
-        let state = ServerState::new(cfg, users, share_bindings);
+        let state = ServerState::new(cfg, users, share_bindings, self.user_resolver);
         Ok(SmbServer::from_state(state))
     }
 }

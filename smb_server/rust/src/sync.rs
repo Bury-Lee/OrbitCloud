@@ -2,18 +2,20 @@
 //! sync.rs —— 用户/共享/ACL 同步(驱动桶实例注册表 + ConfigHandle)
 //! ============================================================================
 //!
-//! 数据流:
+//! 数据流(用户维度已改为"按需缓存",见 user_cache.rs):
 //! ```text
 //!   Go 网关(权威源:users/buckets/ACL 表)
-//!      │ ① 启动/重连:MSG_OPERATE(CodeAuthSnapshot) 全量快照
+//!      │ ① 启动/重连:MSG_OPERATE(CodeAuthSnapshot) 全量快照(仅取共享段)
 //!      │ ② 常驻:MSG_AUTH_PUSH 增量变更(用户/共享/ACL upsert|delete)
+//!      │ ③ 按需:MSG_OPERATE(CodeAuthQueryUser) 认证未命中时拉单用户
 //!      ▼
 //!   sync.rs ──► BucketRegistry(桶实例表,一个桶 = 一台 SMB 服务端)
 //!      │           │  桶实例增删查 + 桶级元数据(配额/状态)
 //!      │           ▼  同步调用
 //!      │        ConfigHandle(add_user_nt_hash / add_share / grant...)
 //!      ▼
-//!   用户表由 ConfigHandle 直接管理;桶(共享)一律经注册表 upsert/delete
+//!   用户表:不再全量镜像,认证时经 UserCache 按需拉取并写入内存表;
+//!   桶(共享)一律经注册表 upsert/delete(保持全量对账)。
 //! ```
 
 use std::sync::Arc; // Arc:连接/注册表跨任务共享
@@ -24,30 +26,32 @@ use smb_server::ConfigHandle; // 库的配置句柄(用户表 + 共享注册)
 use crate::registry::BucketRegistry; // 桶实例注册表
 use crate::remote_backend::GatewayClient; // 网关客户端(发起快照 RPC)
 use crate::types::*; // 帧协议契约(统一取用)
+use crate::user_cache::UserCache; // 用户快照缓存(大 key 库,按需拉取)
 
 // ============================================================================
 // 同步任务入口
 // ============================================================================
 
-/// 启动同步任务(后台常驻):全量快照 + 增量推送。
+/// 启动同步任务(后台常驻):共享全量对账 + 增量推送;用户表按需缓存。
 ///
 /// 参数:
 /// - `conn`:到 Go 网关的连接(共享);
 /// - `registry`:桶实例注册表;
-/// - `handle`:库的 ConfigHandle(用户表 + 协议层共享注册);
+/// - `handle`:库的 ConfigHandle(协议层共享注册;用户表由缓存按需写入);
+/// - `cache`:用户快照缓存(认证按需拉取 + 推送即时维护);
 /// - `push_rx`:变更推送接收端(MSG_AUTH_PUSH body);
-/// - `interval`:全量对账周期(增量推送丢失时的兜底)。
+/// - `interval`:共享对账周期(增量推送丢失时的兜底)。
 ///
 /// 返回:该任务常驻;断线重连由调用方(main)驱动重跑本函数。
 pub async fn sync_loop(
     conn: Arc<GatewayClient>, // 网关连接(共享引用)
     registry: Arc<BucketRegistry>, // 桶注册表(共享引用)
     handle: ConfigHandle, // 配置句柄
+    cache: UserCache, // 用户快照缓存(认证按需)
     mut push_rx: tokio::sync::mpsc::Receiver<Vec<u8>>, // 增量推送接收端(mut:被 recv 消费)
-    interval: Duration, // 全量对账周期
-) {//TODO:可以考虑去除
-
-    if let Err(e) = reconcile(&conn, &registry, &handle).await { // 启动即全量快照:一次性搬入权威状态
+    interval: Duration, // 共享对账周期
+) {
+    if let Err(e) = reconcile(&conn, &registry, &handle).await { // 启动即共享全量对账
         errorf!("同步:初始快照失败:{e}", &["SMB"]); // 失败不退出(仅记日志):推送/对账会再收敛
     }
 
@@ -62,7 +66,7 @@ pub async fn sync_loop(
                                 if entry.op == "notify" && entry.kind == "dir" { // 目录变更通知?
                                     continue; // 无 CHANGE_NOTIFY 能力,直接忽略(等下次对账)
                                 }
-                                if let Err(e) = apply_push(&registry, &conn, &handle, entry).await { // 应用单条变更
+                                if let Err(e) = apply_push(&registry, &conn, &handle, &cache, entry).await { // 应用单条变更
                                     warnf!("同步:应用推送失败:{e}", &["SMB"]); // 失败仅告警,不打断推送流
                                 }
                             }
@@ -75,8 +79,8 @@ pub async fn sync_loop(
                     }
                 }
             }
-            _ = ticker.tick() => { // 分支 b:定时全量对账(兜底一致性)
-                if let Err(e) = reconcile(&conn, &registry, &handle).await { // 重拉快照并全量应用
+            _ = ticker.tick() => { // 分支 b:定时共享对账(兜底一致性;用户维度已按需,不再全量)
+                if let Err(e) = reconcile(&conn, &registry, &handle).await { // 重拉快照并应用共享部分
                     errorf!("同步:对账失败:{e}", &["SMB"]); // 失败仅记错误日志
                 }
             }
@@ -86,34 +90,22 @@ pub async fn sync_loop(
 
 /// 应用全量快照(启动/重连时把 Go 权威源状态同步到内存)。
 ///
+/// 仅同步**共享/桶注册表**(差集 upsert/delete);用户维度已改为按需缓存
+/// (user_cache),快照中的 users 段在此忽略,不再全量重建用户表。
+///
 /// 参数:
 /// - `registry`:桶实例注册表;
 /// - `conn`:到 Go 网关的连接(注册表构造 RemoteBackend 用);
-/// - `handle`:ConfigHandle(用户表);
+/// - `handle`:ConfigHandle(共享注册用);
 /// - `snap`:全量快照(用户 + 桶/共享)。
 pub async fn apply_snapshot(
-    registry: &BucketRegistry, // 桶注册表
+    registry: &BucketRegistry, // 桶实例注册表
     conn: &Arc<GatewayClient>, // 网关连接
-    handle: &ConfigHandle, // 配置句柄(用户表)
+    handle: &ConfigHandle, // 配置句柄
     snap: &SnapshotResult, // 全量快照(权威源)
 ) -> Result<(), String> {
-    handle
-        .clear_users() // 先清空用户表(整体重建:快照为权威,直接全量替换最可靠)
-        .await
-        .map_err(|e| format!("同步:清空用户表失败:{e}"))?; // 清表失败终止
-    let users_index = registry.users_index(); // 用户索引(操作身份映射,同步重建)
-    for user in &snap.users { // 遍历快照用户
-        if user.status != 1 || user.nt_hash_hex.is_empty() { // 禁用或无 NT hash?
-            continue; // 无法通过 NTLM 认证,不下发(SMB 登录直接失败)
-        }
-        handle
-            .add_user_nt_hash(&user.username, &user.nt_hash_hex) // 写入内存用户表(NT hash 直写)
-            .await
-            .map_err(|e| format!("同步:添加用户 {} 失败:{e}", user.username))?; // 单用户失败终止
-        users_index.upsert(&user.username, user.id).await; // 用户名 → users.id 登记
-    }
-    // 快照应用成功不再记录 INFO(周期性对账刷屏);异常由调用方 errorf 记录
-
+    // 用户维度按需缓存:快照 users 段不再全量写入(认证未命中时经 user_cache
+    // 按需拉取;变更由推送即时维护),此处仅同步共享注册表。
     registry.apply_snapshot(snap, conn, handle).await?; // 桶/共享:整体交给注册表做差集同步(内部联动协议层)
     Ok(())
 }
@@ -124,18 +116,21 @@ pub async fn apply_snapshot(
 /// - `registry`:桶实例注册表;
 /// - `conn`:到 Go 网关的连接(注册表构造 RemoteBackend 用);
 /// - `handle`:ConfigHandle;
+/// - `cache`:用户快照缓存(推送即时覆盖/失效);
 /// - `entry`:变更条目(op/kind 见 AclEntry)。
 pub async fn apply_push(
-    registry: &BucketRegistry, // 桶注册表
+    registry: &BucketRegistry, // 桶实例注册表
     conn: &Arc<GatewayClient>, // 网关连接
     handle: &ConfigHandle, // 配置句柄
+    cache: &UserCache, // 用户快照缓存(推送即时维护)
     entry: AclEntry, // 变更条目(按 op/kind 路由)
 ) -> Result<(), String> {
     debugf!("同步:推送 操作={} 类型={} 共享={}", &["SMB"], entry.op, entry.kind, entry.share_name); // 记录变更推送(操作/类型/共享)
     let users_index = registry.users_index(); // 用户索引(操作身份映射,随推送维护)
     match (entry.op.as_str(), entry.kind.as_str()) { // 按 (op, kind) 组合路由到对应处理
-        ("upsert", "user") => { // 用户新增/更新 → 写入内存用户表
+        ("upsert", "user") => { // 用户新增/更新 → 缓存即时覆盖 + 写入内存用户表
             let user = entry.user.ok_or("推送:条目缺少用户数据")?; // 取用户载荷,缺失即报错
+            cache.apply_push_cred(&user); // 缓存即时覆盖/失效(TTL 之外的安全通道)
             if user.status != 1 || user.nt_hash_hex.is_empty() { // 禁用/无 hash 用户?
                 let _ = handle.remove_user(&user.username).await; // 主动移除(等价下线,不可登录)
                 users_index.remove(&user.username).await; // 同步移除身份映射
@@ -148,8 +143,9 @@ pub async fn apply_push(
             users_index.upsert(&user.username, user.id).await; // 同步登记身份映射
             Ok(())
         }
-        ("delete", "user") => { // 用户删除 → 从用户表移除
+        ("delete", "user") => { // 用户删除 → 缓存失效 + 从用户表移除
             let user = entry.user.ok_or("推送:条目缺少用户数据")?; // 取用户载荷
+            cache.invalidate(&user.username); // 缓存立即失效(不可再按需拉取)
             let _ = handle.remove_user(&user.username).await; // 移除(此后该用户名登录失败)
             users_index.remove(&user.username).await; // 同步移除身份映射
             infof!("同步:用户 {} 已删除", &["SMB"], user.username); // 记录删除
@@ -181,7 +177,7 @@ pub async fn apply_push(
     }
 }
 
-/// 全量对账:拉取当前快照并全量应用(重建用户表 + 注册表 diff)。
+/// 共享全量对账:拉取当前快照并应用共享注册表部分(用户维度按需缓存,不重建)。
 ///
 /// 参数:
 /// - `conn`:GatewayClient(发起 MSG_OPERATE(CodeAuthSnapshot));
@@ -215,7 +211,7 @@ pub async fn reconcile(
     let snap = resp.snapshot.ok_or("sync: snapshot result missing")?; // 取快照结果,缺失即协议错误
     debugf!("同步:收到快照:{} 用户,{} 共享", &["SMB"], snap.users.len(), snap.shares.len()); // 记录快照规模
 
-    apply_snapshot(registry, conn, handle, &snap).await // 全量应用:用户表重建 + 注册表差集同步
+    apply_snapshot(registry, conn, handle, &snap).await // 应用共享注册表部分(用户段忽略)
 }
 
 /// access 字符串 → 库的 Access(与 registry::access_from_str 同义,避免循环)。

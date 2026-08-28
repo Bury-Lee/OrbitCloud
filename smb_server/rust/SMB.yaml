@@ -24,6 +24,9 @@ gateway:
   channel_buffer: 1024            # 发送管道缓冲长度(设计点 6;与 Go 侧请求池队列深度对齐)
   rpc_timeout_secs: 30            # RPC 请求应答超时(秒;大文件 Flush/Close 整体上传耗时可调大,
                                   #   避免大文件保存被误判超时——客户端已写入但显示失败)
+  user_cache_ttl_secs: 60         # 用户快照缓存 TTL(秒):认证"本地命中 → 过期/未命中按需拉取"
+                                  #   三级路径的过期基准;变更即时性由推送保证,TTL 仅兜底刷新
+  user_cache_capacity: 10000      # 用户快照缓存容量上限(Moka 自动逐出,防误配膨胀)
 
 log:
   level: "debug"                  # 日志级别(debug/info/warn/error;可用 RUST_LOG 覆盖)

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::proto::auth::ntlm::{Identity, NtlmServer, NtlmTargetInfo, UserCreds};
+use crate::proto::auth::ntlm::{Identity, NtlmAuthenticate, NtlmServer, NtlmTargetInfo, UserCreds};
 use crate::proto::auth::spnego::{
     NegState, OID_NTLMSSP, decode_init_token, decode_resp_token, encode_resp_token,
 };
@@ -177,6 +177,14 @@ pub async fn handle(
         Some(a) => a,
         None => return HandlerResponse::err(ntstatus::STATUS_USER_SESSION_DELETED),
     };
+    // 按需刷新用户凭据(认证前置):Type3 中提取用户名,未命中/过期时经业务层
+    // resolver 拉取并写表,保证下方 authenticate 的 lookup 必命中。
+    // Type1/2 轮次 parse 失败无害(认证还在早期,无需拉取)。
+    if let Ok(auth) = NtlmAuthenticate::parse(&inner_token) {
+        if !auth.user.is_empty() {
+            server.ensure_user(&auth.user).await;
+        }
+    }
     let users = server.users.table.read().await.clone();
     let (outcome, raw_form) = {
         let pair = acceptor_arc

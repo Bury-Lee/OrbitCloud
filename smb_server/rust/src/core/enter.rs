@@ -65,6 +65,23 @@ pub struct GatewayConfig {
     /// 保存被误判超时(客户端已写入但显示失败)。
     #[serde(default = "default_rpc_timeout_secs")]
     pub rpc_timeout_secs: u64,
+    /// 用户快照缓存 TTL(秒;缺省 60):认证"本地命中 → 过期/未命中按需拉取"
+    /// 三级路径的过期基准;变更即时性由推送保证,TTL 仅兜底刷新。
+    #[serde(default = "default_user_cache_ttl_secs")]
+    pub user_cache_ttl_secs: u64,
+    /// 用户快照缓存容量上限(缺省 10000):Moka 自动逐出,防误配膨胀。
+    #[serde(default = "default_user_cache_capacity")]
+    pub user_cache_capacity: u64,
+}
+
+/// 缺省用户缓存 TTL(秒)。
+fn default_user_cache_ttl_secs() -> u64 {
+    60
+}
+
+/// 缺省用户缓存容量上限。
+fn default_user_cache_capacity() -> u64 {
+    10000
 }
 
 /// 缺省 RPC 超时(秒;与旧行为一致)。

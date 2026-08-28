@@ -2,8 +2,10 @@
 //! graceful shutdown.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -189,6 +191,14 @@ impl Default for ActiveConnections {
     }
 }
 
+/// 用户凭据异步解析器(业务层注入;认证未命中时按需拉取)。
+/// 返回 None = 用户不存在/禁用(认证方按 LOGON_FAILURE 处理)。
+pub type UserResolver = dyn Fn(
+        String,
+    ) -> Pin<Box<dyn Future<Output = Option<UserCreds>> + Send>>
+    + Send
+    + Sync;
+
 /// Top-level immutable-ish state shared across connections.
 pub struct ServerState {
     pub config: ServerConfig,
@@ -196,6 +206,8 @@ pub struct ServerState {
     pub shares: ServerShares,
     pub active_connections: ActiveConnections,
     pub server_start_filetime: u64,
+    /// 按需用户解析器(可选):认证未命中时经它拉取凭据并写表。
+    pub user_resolver: Option<Arc<UserResolver>>,
     /// Set when `shutdown()` is invoked; the accept loop stops on the next
     /// iteration and connection loops abandon their next read.
     pub shutdown: Arc<Notify>,
@@ -203,13 +215,19 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(config: ServerConfig, users: ServerUsers, shares: Vec<Arc<ShareBindings>>) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        users: ServerUsers,
+        shares: Vec<Arc<ShareBindings>>,
+        user_resolver: Option<Arc<UserResolver>>,
+    ) -> Self {
         Self {
             config,
             users,
             shares: ServerShares::new(shares),
             active_connections: ActiveConnections::new(),
             server_start_filetime: now_filetime(),
+            user_resolver,
             shutdown: Arc::new(Notify::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -223,6 +241,27 @@ impl ServerState {
     /// Look up a user's NT hash by name.
     pub async fn lookup_user(&self, name: &str) -> Option<UserCreds> {
         self.users.table.read().await.get(name).cloned()
+    }
+
+    /// 按需确保用户凭据在表内(认证前置):
+    /// 已缓存 → 直接可用;未命中 → 调业务层 resolver 拉取并写表。
+    /// 返回 false = 用户不存在/禁用/拉取失败(认证方按 LOGON_FAILURE 处理)。
+    pub async fn ensure_user(&self, name: &str) -> bool {
+        if self.lookup_user(name).await.is_some() {
+            return true;
+        }
+        let Some(resolver) = &self.user_resolver else {
+            return false;
+        };
+        let Some(creds) = resolver(name.to_string()).await else {
+            return false;
+        };
+        self.users
+            .table
+            .write()
+            .await
+            .insert(name.to_string(), creds);
+        true
     }
 
     /// Whether anonymous logon is permitted (i.e. at least one share is public).

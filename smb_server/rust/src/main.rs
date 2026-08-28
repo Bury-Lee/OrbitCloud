@@ -39,8 +39,9 @@ mod log; // 日志模块(与 Go 侧 orbitcloud/log 对齐;宏经 #[macro_use] �
 mod flag; // 配置读取/解析与命令行入口
 mod registry; // 桶实例注册表(连接意图 → 桶实例)
 mod remote_backend; // 到 Go 网关的帧协议客户端 + SMB 后端适配
-mod sync; // 用户/共享/ACL 同步
+mod sync; // 共享对账 + 增量推送(用户维度按需缓存)
 mod types; // 帧协议契约类型与常量
+mod user_cache; // 用户快照缓存(大 key 库,认证按需拉取)
 
 use std::sync::Arc; // Arc:跨任务共享所有权(连接/注册表等)
 use std::time::Duration; // 时长类型(退避等待/对账周期)
@@ -85,6 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     infof!("网关:已连接 {} (客户端 {})", &["SMB"], cfg.gateway.addr, hostname()); // 记录连接成功
 
     // ---- 5. 构建 SMB 服务器(初始无共享,全部动态注册)----
+    // 桶实例注册表提前创建:认证按需解析器(user_resolver)需要引用它
+    // (users_index 身份映射由按需拉取维护)。
+    let registry = Arc::new(BucketRegistry::new()); // 桶实例注册表(Arc:sync 任务写、协议层读)
+    // 用户快照缓存(大 key 库):TTL 自动过期 + 容量上限兜底;认证未命中时
+    // 经 CODE_AUTH_QUERY_USER 按需拉取并回填(取代全量用户表对账)。
+    let user_cache = crate::user_cache::UserCache::new(
+        Duration::from_secs(cfg.gateway.user_cache_ttl_secs.max(1)), // TTL(秒,下限 1)
+        cfg.gateway.user_cache_capacity.max(1), // 容量上限(下限 1)
+    );
     let listen: std::net::SocketAddr = cfg
         .smb
         .listen
@@ -93,12 +103,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server: SmbServer = SmbServer::builder() // 构建 SMB 服务端
         .listen(listen) // 监听地址(如 0.0.0.0:2445)
         .netbios_name(&cfg.smb.netbios_name) // NetBIOS 显示名
+        .user_resolver({
+            // 认证按需解析器:缓存命中直接返回;未命中/过期 → RPC 拉取并回填。
+            let registry2 = Arc::clone(&registry);
+            let cache2 = user_cache.clone();
+            let conn2 = Arc::clone(&conn);
+            move |username: String| {
+                let registry3 = Arc::clone(&registry2);
+                let cache3 = cache2.clone();
+                let conn3 = Arc::clone(&conn2);
+                Box::pin(async move {
+                    cache3
+                        .ensure(&conn3, &registry3.users_index(), &username)
+                        .await
+                        .map(|c| c.creds)
+                })
+            }
+        })
         .build() // 完成构建
         .map_err(|e| format!("SMB 服务器构建失败:{e:?}"))?; // 构建失败终止
     let handle = server.config_handle(); // 配置句柄:后续动态注册用户/共享/ACL 都经它
 
-    // ---- 6. 启动同步任务(全量快照 + 增量推送 + 定期对账)----
-    let registry = Arc::new(BucketRegistry::new()); // 桶实例注册表(Arc:sync 任务写、协议层读)
+    // ---- 6. 启动同步任务(共享全量对账 + 增量推送;用户按需缓存)----
     let interval = if cfg.gateway.sync_interval_secs > 0 {
         Duration::from_secs(cfg.gateway.sync_interval_secs) // 用配置的对账周期
     } else {
@@ -116,12 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let registry2 = Arc::clone(&registry); // 克隆注册表引用给同步任务
         let handle2 = handle.clone(); // 克隆配置句柄给同步任务
+        let cache2 = user_cache.clone(); // 克隆用户缓存给同步任务
         sync_task = Some(tokio::spawn(sync_loop( // 首次拉起同步任务(后台常驻)
             Arc::clone(&current), // 共享当前连接
             registry2, // 桶注册表
             handle2, // 配置句柄
+            cache2, // 用户快照缓存(认证按需)
             push_rx, // 增量推送接收端(MSG_AUTH_PUSH)
-            interval, // 对账周期
+            interval, // 共享对账周期
         )));
         infof!("同步任务已启动(每 {} 秒对账一次)", &["SMB"], interval.as_secs()); // 记录同步任务启动
     }
@@ -143,13 +171,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let registry3 = Arc::clone(&registry); // 重新克隆注册表
                     let handle3 = handle.clone(); // 重新克隆配置句柄
+                    let cache3 = user_cache.clone(); // 重新克隆用户缓存
                     sync_task = Some(tokio::spawn(sync_loop( // 用新连接重建同步任务
                         Arc::clone(&new_conn), // 新连接
                         registry3, // 桶注册表
                         handle3, // 配置句柄
+                        cache3, // 用户快照缓存(认证按需)
                         new_push_rx, // 新推送接收端
-                        interval, // 对账周期
-                    ))); // 启动即全量快照:补回断线期间丢失的增量推送
+                        interval, // 共享对账周期
+                    ))); // 启动即共享对账:补回断线期间丢失的增量推送
                     infof!("网关:已重新连接", &["SMB"]); // 记录重连成功
                     delay = 1; // 退避归零
                 }
