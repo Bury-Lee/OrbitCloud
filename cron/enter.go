@@ -16,6 +16,7 @@ import (
 	"orbitcloud/core"
 	"orbitcloud/log"
 	"orbitcloud/model"
+	"orbitcloud/server"
 )
 
 // Start 启动全部定时任务(由 main 调用;常驻协程,进程退出即终止)。
@@ -45,6 +46,13 @@ func Start(cfg *config.Config, db *gorm.DB) {
 				}
 				if err := ResumeCopyTasks(context.Background()); err != nil {
 					log.Errorf("cron: resume copy tasks: %v", err)
+				}
+				// 回收站过期清理:保留期 >0 才启用(软删超过保留天数 → 物理清除)
+				if days := cfg.RecycleBin.RetentionDays; days > 0 {
+					if _, _, err := server.CleanExpiredRecycleBin(context.Background(),
+						server.CleanExpiredRecycleBinArg{Cutoff: time.Now().AddDate(0, 0, -days)}); err != nil {
+						log.Errorf("cron: clean expired recycle bin: %v", err)
+					}
 				}
 				// 用户用量对账:以 files 表为权威修正 users.used_space 漂移
 				// if _, err := ReconcileUserUsages(db); err != nil {
