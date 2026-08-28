@@ -8,7 +8,8 @@
 //
 // 删除语义:
 //   - Isable=false 表示"已被删除":其下所有子文件/子文件夹立即不可用不可达(读路径 404);
-//   - 物理清理由后台删除任务深度优先逐文件夹完成;Isable 为回收站功能预留。
+//   - 删除进回收站 = Isable=false + GORM 软删(置 deleted_at=now),记录/对象/用量保留,
+//     回收站清除时才物理清理(见 server/file_delete.go 与 DeleteTask)。
 //
 // 大小写语义:NameLower 存小写,唯一索引/查找全部走 NameLower。
 package model
