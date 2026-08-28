@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -167,5 +168,57 @@ func TestCleanExpiredRecycleBin(t *testing.T) {
 	// 幂等:再跑一轮无更多可清条目
 	if _, _, err := CleanExpiredRecycleBin(ctx, CleanExpiredRecycleBinArg{Cutoff: time.Now().AddDate(0, 0, -30)}); err != nil {
 		t.Fatalf("re-clean: %v", err)
+	}
+}
+
+// TestDeleteRecycledFile 回收站文件永久删除(提前清除):删对象 + 硬删记录 +
+// 归还桶/用户用量 + 级联删分享;非回收站条目 → ErrNotFound。
+func TestDeleteRecycledFile(t *testing.T) {
+	newP0TestDB(t)
+	ctx := context.Background()
+	admin := mkUserP0(t, "drf-admin", model.Admin)
+	b := mkBucketP0(t, "drf-bucket", model.NormalUser, admin.ID)
+	setUsed(t, b.ID, 100)
+	if err := core.DB.Model(&model.User{}).Where("id = ?", admin.ID).Update("used_space", 100).Error; err != nil {
+		t.Fatalf("set user used: %v", err)
+	}
+
+	// 回收站文件(软删)带分享
+	f := mkFileP0(t, b.ID, 0, "del.txt", 100)
+	putMemObject(t, b.ID, f.ID, string(make([]byte, 100)))
+	mkShareP0(t, f.ID, ItemKindFile)
+	if err := DeleteFile(ctx, DeleteFileArg{UserID: admin.ID, BucketID: b.ID, FileID: f.ID}); err != nil {
+		t.Fatalf("delete file: %v", err)
+	}
+
+	// 永久删除
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: f.ID}); err != nil {
+		t.Fatalf("delete recycled file: %v", err)
+	}
+	if n := countRows(t, &model.File{}, "id = ?", f.ID); n != 0 {
+		t.Fatalf("file rows = %d, want 0(硬删)", n)
+	}
+	if objExists(b.ID, f.ID) {
+		t.Fatal("object should be purged")
+	}
+	if n := countRows(t, &model.ShareLink{}, "bucket_item_id = ?", f.ID); n != 0 {
+		t.Fatalf("share rows = %d, want 0(级联删)", n)
+	}
+	var bb model.Bucket
+	if err := core.DB.First(&bb, b.ID).Error; err != nil || bb.UsedSpace != 0 {
+		t.Fatalf("bucket used = %d, want 0(归还)", bb.UsedSpace)
+	}
+	if got := userUsed(t, admin.ID); got != 0 {
+		t.Fatalf("user used = %d, want 0(归还)", got)
+	}
+
+	// 非回收站条目(活跃文件)→ ErrNotFound
+	active := mkFileP0(t, b.ID, 0, "active.txt", 10)
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: active.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("active file: want ErrNotFound, got %v", err)
+	}
+	// 不存在的文件 → ErrNotFound
+	if err := DeleteRecycledFile(ctx, DeleteRecycledFileArg{OperatorID: admin.ID, FileID: 99999}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing file: want ErrNotFound, got %v", err)
 	}
 }

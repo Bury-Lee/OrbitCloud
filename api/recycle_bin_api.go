@@ -8,6 +8,7 @@ import (
 
 	"orbitcloud/common"
 	"orbitcloud/model"
+	"orbitcloud/server"
 )
 
 // RecycleBinAPI 回收站模块接口(无状态)。
@@ -41,7 +42,7 @@ func (RecycleBinAPI) ListRecycleFile(c *gin.Context) {
 		}
 	}
 
-	// 直接查询,不用调用 server 层
+	// 直接查询
 	opt := common.Option{
 		PageInfo:     arg.PageInfo,
 		DefaultOrder: "deleted_at DESC, id DESC",
@@ -58,6 +59,40 @@ func (RecycleBinAPI) ListRecycleFile(c *gin.Context) {
 		return
 	}
 	common.WrapPageResponse(c, res)
+}
+
+// DeleteRecycleFile 永久删除回收站文件(DELETE /recycle-bin/files/:id,成功 204):
+// 提前清除(不等保留期)——删对象 + 硬删记录 + 归还桶/用户用量 + 级联删分享。
+// 校验都在本层:条目须在回收站(404),仅归属者或管理员可删(403)。
+func (RecycleBinAPI) DeleteRecycleFile(c *gin.Context) {
+	fileID := parseIDParam(c, "id")
+	if fileID == 0 {
+		return
+	}
+
+	// 可行性预检:文件存在且在回收站
+	file, err := server.GetRecycledFile(c.Request.Context(), server.GetRecycledFileArg{FileID: fileID})
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	// 归属校验:归属者本人,或管理员(JWT claims 判定)
+	operatorID := currentUser(c)
+	if file.UploadedBy != operatorID {
+		if claims := ClaimsFrom(c); claims == nil || !claims.PermissionLevel.IsAdmin() {
+			respondError(c, common.ErrForbidden)
+			return
+		}
+	}
+
+	if err := server.DeleteRecycledFile(c.Request.Context(), server.DeleteRecycledFileArg{
+		OperatorID: operatorID,
+		FileID:     fileID,
+	}); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(204)
 }
 
 // ListRecycleFolder 分页返回自己的回收站文件夹(GET /recycle-bin/folders?page=&page_size=&cursor=&key=&order=&user_id=):

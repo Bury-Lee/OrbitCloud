@@ -7,4 +7,5 @@ import "github.com/gin-gonic/gin"
 func RecycleBinRouter(authed *gin.RouterGroup) {
 	authed.GET("/recycle-bin/files", AuthMiddleware, App.RecycleBin.ListRecycleFile)
 	authed.GET("/recycle-bin/folders", AuthMiddleware, App.RecycleBin.ListRecycleFolder)
+	authed.DELETE("/recycle-bin/files/:id", AuthMiddleware, App.RecycleBin.DeleteRecycleFile)
 }

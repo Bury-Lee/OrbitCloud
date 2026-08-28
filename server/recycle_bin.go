@@ -24,6 +24,54 @@ import (
 // recyclePurgeBatch 单批扫描上限(防一次查询过载;循环直到清完)。
 const recyclePurgeBatch = 100
 
+// GetRecycledFileArg 回收站文件预检入参。
+type GetRecycledFileArg struct {
+	FileID uint // 回收站文件 files.id
+}
+
+// GetRecycledFile 按 ID 加载回收站文件(软删行,Unscoped 越过 GORM 软删过滤)。
+// 供 api 层预检:存在性 + 读取 UploadedBy 做归属校验。
+// 错误语义:文件不存在或不在回收站 → ErrNotFound。
+func GetRecycledFile(ctx context.Context, arg GetRecycledFileArg) (*model.File, error) {
+	var f model.File
+	if err := core.DB.WithContext(ctx).Unscoped().
+		Where("id = ? AND deleted_at IS NOT NULL", arg.FileID).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get recycled file %d: %w", arg.FileID, err)
+	}
+	return &f, nil
+}
+
+// DeleteRecycledFileArg 回收站文件永久删除入参。
+type DeleteRecycledFileArg struct {
+	OperatorID uint // 操作者 users.id(操作日志)
+	FileID     uint // 回收站文件 files.id
+}
+
+// DeleteRecycledFile 永久删除回收站文件(提前清除,不等保留期):
+// 删对象 + 硬删记录 + 归还桶/用户用量 + 级联删分享(复用 purgeRecycledFile)。
+// 权限校验(归属者或管理员)由 api 层预检,本函数只做可行性:文件须在回收站(软删行)。
+// 错误语义:文件不存在或不在回收站 → ErrNotFound。
+func DeleteRecycledFile(ctx context.Context, arg DeleteRecycledFileArg) error {
+	// 可行性:软删行 = 回收站条目
+	var f model.File
+	if err := core.DB.WithContext(ctx).Unscoped().
+		Where("id = ? AND deleted_at IS NOT NULL", arg.FileID).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("delete recycled file %d: query: %w", arg.FileID, err)
+	}
+
+	if err := purgeRecycledFile(ctx, &f); err != nil {
+		return err
+	}
+	log.Infof("delete recycled file: operator %d file %d purged (recycle bin early clear)", arg.OperatorID, arg.FileID)
+	return nil
+}
+
 // CleanExpiredRecycleBinArg 回收站过期清理入参。
 type CleanExpiredRecycleBinArg struct {
 	Cutoff time.Time // 清理 deleted_at < cutoff 的回收站条目
