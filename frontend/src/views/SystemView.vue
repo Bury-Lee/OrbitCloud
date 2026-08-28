@@ -1,10 +1,10 @@
 <script setup lang="ts">
-// 系统运维页面(仅管理员):运行状况卡片 + 日志文件列表/下载。
-import { onMounted, ref } from 'vue'
+// 系统运维页面(仅管理员):运行状况卡片 + 日志文件列表(下载/预览美化)。
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, Monitor, Refresh } from '@element-plus/icons-vue'
+import { Download, Monitor, Refresh, View } from '@element-plus/icons-vue'
 
-import { downloadLog, getSystemStatus, listLogs, type LogFileInfo, type SystemStatus } from '@/api/system'
+import { downloadLog, getSystemStatus, listLogs, previewLog, type LogFileInfo, type SystemStatus } from '@/api/system'
 import { formatSize, formatTime } from '@/api/types'
 import AppLayout from '@/components/AppLayout.vue'
 
@@ -52,6 +52,59 @@ async function onDownloadLog(row: LogFileInfo) {
     ElMessage.error(e instanceof Error ? e.message : '下载失败')
   }
 }
+
+// ---- 日志预览(美化:行号 + 级别着色) ----
+const PREVIEW_MAX_LINES = 5000 // 超长日志只预览前 N 行,完整内容走下载
+
+interface LogLine {
+  no: number
+  /** 级别:INFO/WARN/ERROR/DEBUG(其余空串不着色) */
+  level: string
+  text: string
+}
+
+const previewOpen = ref(false)
+const previewTitle = ref('')
+const previewLines = ref<LogLine[]>([])
+const previewLoading = ref(false)
+const previewTruncated = ref(false)
+
+/** 从日志行文本提取级别标记(如 "[INFO]"),供着色 */
+function extractLevel(line: string): string {
+  const m = /\[(DEBUG|INFO|WARN|ERROR|FATAL|WARNING)\]/i.exec(line)
+  return m ? m[1].toUpperCase() : ''
+}
+
+const levelClass: Record<string, string> = {
+  DEBUG: 'lv-debug',
+  INFO: 'lv-info',
+  WARN: 'lv-warn',
+  ERROR: 'lv-error',
+  FATAL: 'lv-error',
+  WARNING: 'lv-warn',
+}
+
+async function onPreviewLog(row: LogFileInfo) {
+  previewOpen.value = true
+  previewTitle.value = row.name
+  previewLoading.value = true
+  previewLines.value = []
+  previewTruncated.value = false
+  try {
+    const text = await previewLog(row.path)
+    const lines = text.split(/\r?\n/)
+    const shown = lines.slice(0, PREVIEW_MAX_LINES)
+    previewTruncated.value = lines.length > PREVIEW_MAX_LINES
+    previewLines.value = shown.map((t, i) => ({ no: i + 1, level: extractLevel(t), text: t }))
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '预览失败')
+    previewOpen.value = false
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+const lineCount = computed(() => previewLines.value.length)
 
 onMounted(load)
 </script>
@@ -108,8 +161,11 @@ onMounted(load)
         <el-table-column label="修改时间" width="180">
           <template #default="{ row }">{{ formatTime(row.mod_time) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
+            <el-button link type="primary" :icon="View" :disabled="!row.complete" @click="onPreviewLog(row)">
+              预览
+            </el-button>
             <el-button link type="primary" :icon="Download" :disabled="!row.complete" @click="onDownloadLog(row)">
               下载
             </el-button>
@@ -120,6 +176,32 @@ onMounted(load)
         </template>
       </el-table>
     </el-card>
+
+    <!-- 日志预览弹窗(行号 + 级别着色,等宽字体) -->
+    <el-dialog v-model="previewOpen" :title="previewTitle" width="80%" top="4vh">
+      <div v-loading="previewLoading" class="preview-wrap">
+        <el-alert
+          v-if="previewTruncated"
+          type="warning"
+          :closable="false"
+          class="preview-alert"
+          :title="`日志超过 ${PREVIEW_MAX_LINES} 行,仅预览前 ${PREVIEW_MAX_LINES} 行,完整内容请下载查看`"
+        />
+        <div v-if="lineCount > 0" class="preview-log">
+          <div v-for="l in previewLines" :key="l.no" class="preview-line">
+            <span class="preview-no">{{ l.no }}</span>
+            <span class="preview-text">
+              <span v-if="l.level" :class="['lv', levelClass[l.level]]">[{{ l.level }}]</span>
+              {{ l.text }}
+            </span>
+          </div>
+        </div>
+        <el-empty v-else-if="!previewLoading" description="日志为空" :image-size="60" />
+      </div>
+      <template #footer>
+        <el-button @click="previewOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </AppLayout>
 </template>
 
@@ -163,5 +245,66 @@ onMounted(load)
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.preview-alert {
+  margin-bottom: 10px;
+}
+
+.preview-wrap {
+  min-height: 200px;
+  max-height: 72vh;
+  overflow: auto;
+  background: #1e1e1e;
+  border-radius: 6px;
+}
+
+.preview-log {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 0;
+}
+
+.preview-line {
+  display: flex;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.preview-line:hover {
+  background: #2d2d2d;
+}
+
+.preview-no {
+  flex-shrink: 0;
+  width: 52px;
+  text-align: right;
+  padding-right: 12px;
+  color: #6a737d;
+  user-select: none;
+}
+
+.preview-text {
+  color: #d4d4d4;
+}
+
+.lv {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.lv-debug {
+  color: #6a737d;
+}
+.lv-info {
+  color: #4fc1ff;
+}
+.lv-warn {
+  color: #ffb86c;
+}
+.lv-error {
+  color: #ff6b6b;
 }
 </style>

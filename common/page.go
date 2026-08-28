@@ -21,8 +21,8 @@ type PageInfo struct {
 	// 页码偏移
 	Page     int    `json:"page" form:"page"`         // 从 cursor 开始的第几页(从 1 开始)
 	PageSize int    `json:"page_size" form:"page_size"` // 每页条数
-	Key      string `json:"key" form:"key"`           // 模糊匹配关键词
-	Order    string `json:"order" form:"order"`       // 排序方式
+	Key      string `json:"key" form:"key"`           // 模糊匹配关键词(业务侧指定 KeyList 列)
+	Order    string `json:"order" form:"order"`       // 排序(业务侧白名单枚举,如 name_asc/time_desc;空 = 默认)
 }
 
 // TimeInfo 查询时间范围(匹配 gorm.Model 的 CreatedAt,即 created_at 字段),独立字段

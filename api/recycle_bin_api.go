@@ -1,4 +1,4 @@
-﻿// recycle_bin_api.go —— 回收站接口:查询自己的回收站(已删除且归属自己的文件/文件夹)。
+// recycle_bin_api.go —— 回收站接口:查询自己的回收站(已删除且归属自己的文件/文件夹)。
 // 直接走 common.PageQuery,不经过 server 层。
 package api
 
@@ -19,6 +19,17 @@ type RecycleBinAPI struct{}
 type ListRecycleBinArg struct {
 	common.PageInfo      // 查询参数(page/page_size/cursor/key/order)
 	UserID          uint // 目标用户 users.id;0 = 当前用户;非管理员只可查询自己的
+}
+
+// recycleSortOrders 回收站排序白名单(order 参数枚举 → ORDER BY 子句):
+// 仅暴露固定枚举(name/time/size × asc/desc),前端无法传任意字段名(防嗅探)。
+var recycleSortOrders = map[string]string{
+	"time_desc": "deleted_at DESC, id DESC",
+	"time_asc":  "deleted_at ASC, id ASC",
+	"name_desc": "name_lower DESC, id DESC",
+	"name_asc":  "name_lower ASC, id ASC",
+	"size_desc": "file_size DESC, id DESC",
+	"size_asc":  "file_size ASC, id ASC",
 }
 
 // ListRecycleFile 分页返回自己的回收站文件(GET /recycle-bin/files?page=&page_size=&cursor=&key=&order=&user_id=):
@@ -43,15 +54,17 @@ func (RecycleBinAPI) ListRecycleFile(c *gin.Context) {
 		}
 	}
 
-	// 直接查询
+	// 直接查询(排序字段后端固定,前端仅经 PageInfo.Order 传方向 asc/desc,防字段注入)
 	opt := common.Option{
 		PageInfo:     arg.PageInfo,
 		DefaultOrder: "deleted_at DESC, id DESC",
-		Filters: []func(*gorm.DB) *gorm.DB{
-			func(db *gorm.DB) *gorm.DB {
-				// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤),按归属者过滤
-				return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", targetID)
-			},
+		KeyList:      []string{"name_lower"}, // key 名称前缀搜索
+		Orderby:      "deleted_at",           // 固定排序字段(不来自前端)
+	}
+	opt.Filters = []func(*gorm.DB) *gorm.DB{
+		func(db *gorm.DB) *gorm.DB {
+			// 软删行 = 回收站条目(Unscoped 越过 GORM 软删过滤),按归属者过滤
+			return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", targetID)
 		},
 	}
 	res, err := common.PageQuery(model.File{}, opt, nil)
@@ -159,10 +172,12 @@ func (RecycleBinAPI) ListRecycleFolder(c *gin.Context) {
 		}
 	}
 
-	// 直接查询,不用调用 server 层
+	// 直接查询(排序字段后端固定,前端仅经 PageInfo.Order 传方向 asc/desc,防字段注入)
 	opt := common.Option{
 		PageInfo:     arg.PageInfo,
 		DefaultOrder: "deleted_at DESC, id DESC",
+		KeyList:      []string{"name_lower"}, // key 名称前缀搜索
+		Orderby:      "deleted_at",           // 固定排序字段(不来自前端)
 		Filters: []func(*gorm.DB) *gorm.DB{
 			func(db *gorm.DB) *gorm.DB {
 				return db.Unscoped().Where("deleted_at IS NOT NULL AND uploaded_by = ?", targetID)

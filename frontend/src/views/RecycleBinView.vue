@@ -3,7 +3,7 @@
 // 文件/文件夹两个 Tab;管理员可传 user_id 查询他人回收站。
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, FolderOpened, Refresh, RefreshLeft } from '@element-plus/icons-vue'
+import { Delete, FolderOpened, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
 
 import {
   deleteRecycleFile,
@@ -25,6 +25,8 @@ const tab = ref<'files' | 'folders'>('files')
 const page = ref(1)
 const pageSize = ref(50)
 const userId = ref<number | undefined>(undefined)
+const keyword = ref('')
+const order = ref('desc') // 排序方向(字段固定为删除时间;仅 asc/desc)
 
 const files = ref<FileItem[]>([])
 const folders = ref<FolderItem[]>([])
@@ -61,6 +63,8 @@ function params() {
   return {
     page: page.value,
     page_size: pageSize.value,
+    key: keyword.value || undefined,
+    order: order.value,
     ...(userId.value ? { user_id: userId.value } : {}),
   }
 }
@@ -80,7 +84,17 @@ async function load() {
   total.value = res.list.total
 }
 
-watch([tab, page, userId], load, { immediate: true })
+watch([tab, page, userId, keyword, order], load, { immediate: true })
+
+// 搜索防抖(输入停止 300ms 后触发)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+function onSearchInput() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    page.value = 1
+    load()
+  }, 300)
+}
 
 function onTabChange() {
   page.value = 1
@@ -124,6 +138,20 @@ function fmtSize(row: RecycleRow): string {
 <template>
   <AppLayout>
     <div class="toolbar">
+      <el-input
+        v-model="keyword"
+        placeholder="搜索文件名…"
+        clearable
+        style="width: 220px"
+        @input="onSearchInput"
+        @clear="onSearchInput"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-select v-model="order" style="width: 140px" @change="page = 1">
+        <el-option label="删除时间 ↓" value="desc" />
+        <el-option label="删除时间 ↑" value="asc" />
+      </el-select>
       <el-button :icon="Refresh" @click="load">刷新</el-button>
       <el-select
         v-if="auth.isAdmin"

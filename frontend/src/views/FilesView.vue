@@ -9,6 +9,7 @@ import { listBuckets } from '@/api/buckets'
 import { batchDelete, deleteDir, deleteFile, downloadFile } from '@/api/files'
 import { isFolder, toRows, type FileRow } from '@/api/types'
 import { isPreviewable } from '@/utils/preview'
+import { Search } from '@element-plus/icons-vue'
 import AppLayout from '@/components/AppLayout.vue'
 import DownloadTasksDialog from '@/components/files/DownloadTasksDialog.vue'
 import FileListTable from '@/components/files/FileListTable.vue'
@@ -41,6 +42,8 @@ const page = computed(() => {
   return Number.isFinite(p) && p >= 1 ? p : 1
 })
 const pageSize = ref(50)
+const keyword = ref('')
+const order = ref('desc') // 排序方向(字段固定为创建时间;仅 asc/desc)
 
 function joinPath(dir: string, name: string): string {
   return dir === '/' ? `/${name}` : `${dir}/${name}`
@@ -77,7 +80,13 @@ async function load() {
     const b = res.find((x) => x.ID === bucketId.value)
     if (!b) throw new Error('桶不存在')
     const list = await import('@/api/files').then((m) =>
-      m.listFiles(bucketId.value, { path: currentPath.value, page: page.value, page_size: pageSize.value }),
+      m.listFiles(bucketId.value, {
+        path: currentPath.value,
+        page: page.value,
+        page_size: pageSize.value,
+        key: keyword.value || undefined,
+        order: order.value,
+      }),
     )
     return { rows: toRows(list), total: list.total }
   })
@@ -85,6 +94,21 @@ async function load() {
     items.value = rows.rows
     total.value = rows.total
   }
+}
+
+// 搜索/排序变化:重置到第一页后加载(page 为路由派生只读,经 goToPath 重置)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+function onSearchInput() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    goToPath(currentPath.value)
+    load()
+  }, 300)
+}
+
+function onOrderChange() {
+  goToPath(currentPath.value)
+  load()
 }
 
 watch([bucketId, currentPath, page], load, { immediate: true })
@@ -336,6 +360,23 @@ function openPreview(row: FileRow) {
       </el-breadcrumb>
     </div>
 
+    <div class="toolbar-row">
+      <el-input
+        v-model="keyword"
+        placeholder="搜索文件名…"
+        clearable
+        style="width: 220px"
+        @input="onSearchInput"
+        @clear="onSearchInput"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-select v-model="order" style="width: 140px" @change="onOrderChange">
+        <el-option label="创建时间 ↓" value="desc" />
+        <el-option label="创建时间 ↑" value="asc" />
+      </el-select>
+    </div>
+
     <FilesToolbar
       :can-go-up="currentPath !== '/'"
       :selected-count="selected.length"
@@ -429,6 +470,13 @@ function openPreview(row: FileRow) {
 
 <style scoped>
 .crumb-bar {
+  margin-bottom: 12px;
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
 }
 

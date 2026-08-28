@@ -54,3 +54,9 @@ export async function downloadLog(path: string): Promise<Blob> {
   const resp = await raw.get('/logs/download', { params: { path }, responseType: 'blob' })
   return resp.data as Blob
 }
+
+/** 预览日志内容(拉取文本;超长只取前 N 行由调用方截断) */
+export async function previewLog(path: string): Promise<string> {
+  const blob = await downloadLog(path)
+  return blob.text()
+}

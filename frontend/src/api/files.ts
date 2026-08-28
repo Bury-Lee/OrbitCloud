@@ -30,13 +30,15 @@ raw.interceptors.request.use((config) => {
 })
 
 /**
- * GET /buckets/:id/files?path=&page=&page_size=
+ * GET /buckets/:id/files?path=&page=&page_size=&key=&order=
  * 列出桶内某目录下的文件与子文件夹(offset 分页,页面浏览;文件与文件夹分数组返回)。
  * @param path 目录路径,缺省桶根 "/";目录不存在时返回 404(浏览语义只读,不自动建目录)
+ * @param key 名称前缀搜索(可选)
+ * @param order 排序方向 asc/desc(缺省 desc;字段固定为创建时间,防字段注入)
  */
 export function listFiles(
   bucketId: number,
-  params: { path?: string; page?: number; page_size?: number } = {},
+  params: { path?: string; page?: number; page_size?: number; key?: string; order?: string } = {},
 ): Promise<ListResult> {
   return http.get(`/buckets/${bucketId}/files`, { params })
 }

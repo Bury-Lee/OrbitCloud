@@ -167,7 +167,6 @@ func (FileAPI) ListFiles(c *gin.Context) {
 		FilesCursor   string `form:"files_cursor"`
 		FoldersCursor string `form:"folders_cursor"`
 		Key           string `form:"key"`
-		Sort          string `form:"sort"`
 		Order         string `form:"order"`
 	}
 	if !bindRequest(c, &req) {
@@ -215,7 +214,7 @@ func (FileAPI) ListFiles(c *gin.Context) {
 	files, folders, total, err := server.ListFiles(ctx, server.ListFilesArg{
 		UserID: userID, BucketID: bucketID, DirPath: req.Path,
 		Page: page, PageSize: pageSize,
-		Key: req.Key, Sort: req.Sort, Order: req.Order,
+		Key: req.Key, Order: req.Order,
 	})
 	if err != nil {
 		respondError(c, err)
