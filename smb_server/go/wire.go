@@ -67,11 +67,17 @@ func BuildGateway(cfg config.SmbGatewayConfig) (*Gateway, error) {
 	handles := NewHandleRegistry()                           // 句柄表
 	files := NewFileOpsService(core.Storage, handles)        // 文件操作服务(全局存储 + 句柄表)
 
-	// 注入用户注册/改密即时同步钩子:server 层改密后立即推送 NT hash,
-	// SMB 旧密码立即失效(不等 60s 周期对账)。
-	server.NtHashSyncHook = func(ctx context.Context, username, plainPassword string) {
-		if err := auth.SetUserNTHash(ctx, username, plainPassword); err != nil {
-			smbWarnf("smb_gateway: 同步用户 %q NT hash 失败:%v", username, err)
+	// 注入用户注册/改密/状态变更即时同步钩子:server 层变更后立即推送,
+	// SMB 侧旧密码立即失效、禁用/降权立即拒登(不等 60s 周期对账)。
+	server.UserChangedHook = func(ctx context.Context, username, plainPassword string) {
+		if plainPassword != "" {
+			// 改密:计算并落库 NT hash 后推送(SetUserNTHash 内部重查,推送含最新状态)
+			if err := auth.SetUserNTHash(ctx, username, plainPassword); err != nil {
+				smbWarnf("smb_gateway: 同步用户 %q NT hash 失败:%v", username, err)
+			}
+		} else {
+			// 仅状态变更(禁用/降权等):重查最新状态推送
+			auth.SyncUserState(ctx, username)
 		}
 	}
 

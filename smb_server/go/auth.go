@@ -337,6 +337,27 @@ func (a *AuthService) dirFingerprintChanged(ctx context.Context) bool {
 	return changed                    // 有变化才触发通知
 }
 
+// SyncUserState 用户状态变更即时同步(禁用/降权/改密后调用):
+// 重查用户并推送 upsert(禁用用户 QueryUser 返回 nil → 推送 status=0 最小
+// 凭据,网关侧立即失效缓存并拒登;恢复/变更 → 推送完整凭据)。
+func (a *AuthService) SyncUserState(ctx context.Context, username string) {
+	cred, err := a.QueryUser(ctx, username)
+	if err != nil || cred == nil {
+		// 不存在/禁用:推送最小凭据(status=0)让网关失效缓存 + 移除用户表
+		select {
+		case a.pushCh <- AclEntry{Op: "upsert", Kind: "user", User: &UserCred{Username: username, Status: 0}}:
+		default:
+			smbWarnf("smb_gateway: 推送通道已满,丢弃 %q 的状态变更", username)
+		}
+		return
+	}
+	select {
+	case a.pushCh <- AclEntry{Op: "upsert", Kind: "user", User: cred}:
+	default:
+		smbWarnf("smb_gateway: 推送通道已满,丢弃 %q 的状态变更", username)
+	}
+}
+
 // SetUserNTHash 设置用户 NT hash(密码设置/修改流程钩子)。
 // 参数:username 用户名;plainPassword 明文密码(仅此处使用,不留存)。
 // 返回值:错误(用户不存在/计算失败)。
