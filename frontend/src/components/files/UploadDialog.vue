@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 上传对话框(自包含):文件/文件夹混合选择 + 拖拽,自动复刻目录结构,进度展示。
-import { ref } from 'vue'
+// 语义与原 FilesView 一致:打开时清空已选列表与进度;成功关闭并清空;失败保留可重试。
+import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 
@@ -29,6 +30,19 @@ const uploadTotal = ref(0)
 const uploadItems = ref<UploadTreeItem[]>([])
 const pickFilesInput = ref<HTMLInputElement>()
 const pickFolderInput = ref<HTMLInputElement>()
+
+// 每次打开对话框:清空已选列表与进度(等价原 openUpload,防上次遗留)
+watch(
+  () => props.modelValue,
+  (open) => {
+    if (open) {
+      uploadItems.value = []
+      uploadPercent.value = 0
+      uploadLoaded.value = 0
+      uploadTotal.value = 0
+    }
+  },
+)
 
 function onPickFiles(e: Event) {
   const input = e.target as HTMLInputElement
@@ -87,11 +101,12 @@ async function onUpload() {
     const ok = res.ok
     const bad = res.failed.length
     if (bad === 0) {
-      ElMessage.success(`上传完成:${ok} 项`)
+      ElMessage.success(`上传完成:${ok} 项(目录结构已复刻)`)
     } else {
       const detail = res.failed.map((f) => `${f.relPath}(${f.error})`).join('、')
       ElMessage.warning(`上传成功 ${ok} 项,失败 ${bad} 项:${detail}`)
     }
+    uploadItems.value = [] // 成功即清空,防遗留(失败保留,便于重试)
     emit('success')
     emit('update:modelValue', false)
   } catch (e) {

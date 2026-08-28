@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 新建文件夹对话框(自包含):mkdir -p 语义,提交后父级刷新。
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import { createDir } from '@/api/files'
@@ -17,6 +17,14 @@ const emit = defineEmits<{
 
 const name = ref('')
 const creating = ref(false)
+
+// 打开时清空输入框(防上次输入残留)
+watch(
+  () => props.modelValue,
+  (open) => {
+    if (open) name.value = ''
+  },
+)
 
 function joinPath(dir: string, n: string): string {
   return dir === '/' ? `/${n}` : `${dir}/${n}`
