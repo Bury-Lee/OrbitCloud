@@ -82,9 +82,17 @@ func (d Database) InitDB(lg logger.Interface) (*gorm.DB, error) {
 		&model.UserGroup{}, &model.UserGroupMember{},
 		&model.RefreshToken{}, &model.ShareLink{}, &model.OperationLog{},
 		&model.Log{}, &model.DeleteTask{}, &model.CopyTask{},
-		&model.DownloadTask{}, // 下载任务(断点续传)
+		&model.DownloadTask{}, // 历史遗留(已废弃)
 	); err != nil {
 		return nil, fmt.Errorf("config: automigrate: %w", err)
+	}
+
+	// 4.1 回收站软删:唯一索引改部分索引(仅约束 deleted_at IS NULL 的活动行)。
+	// gorm.Model.DeletedAt 软删后行仍保留,若唯一索引仍含全部行,回收站内旧记录
+	// 会挡住同名重新上传/建目录/改名(违反唯一约束);部分索引让回收站行与活动行
+	// 同名共存。sqlite 与 postgres 均支持部分唯一索引;幂等(IF EXISTS/IF NOT EXISTS)。
+	if err := migrateRecycleBinIndexes(db); err != nil {
+		return nil, fmt.Errorf("config: recycle bin indexes: %w", err)
 	}
 
 	// 5. 读写分离:多写库或配置了读库 → 注册 dbresolver(写 sources / 读 replicas)
@@ -128,6 +136,26 @@ func (d Database) InitDB(lg logger.Interface) (*gorm.DB, error) {
 	}
 
 	return db, nil
+}
+
+// migrateRecycleBinIndexes 重建 files/folders 的唯一名索引为部分索引
+// (WHERE deleted_at IS NULL):回收站软删行与活动行同名共存,活动行之间
+// 仍保持唯一(并发创建兜底)。
+func migrateRecycleBinIndexes(db *gorm.DB) error {
+	stmts := []string{
+		// files:同文件夹内 (bucket_id, folder_id, name_lower) 唯一(活动行)
+		"DROP INDEX IF EXISTS uk_file_lower",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uk_file_lower ON files (bucket_id, folder_id, name_lower) WHERE deleted_at IS NULL",
+		// folders:同父目录下 (bucket_id, parent_id, name_lower) 唯一(活动行)
+		"DROP INDEX IF EXISTS uk_folder_lower",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uk_folder_lower ON folders (bucket_id, parent_id, name_lower) WHERE deleted_at IS NULL",
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // connDialector 为单个连接配置构建 gorm.Dialector(sqlite|postgres)。

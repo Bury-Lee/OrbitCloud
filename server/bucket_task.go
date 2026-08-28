@@ -113,22 +113,23 @@ func processDeleteTask(ctx context.Context, taskID uint) error {
 
 	// 收尾(单事务硬删除):条目记录 + 桶 + 任务 + 级联删分享 + 归还用户用量
 	if err := core.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 先取全部文件记录(用量归还按 UploadedBy 分组;须在删记录前查;
-		// share_links 无 bucket 列,按条目 ID 匹配)。
-		var files []model.File
-		if err := tx.Model(&model.File{}).Where("bucket_id = ?", task.BucketID).Find(&files).Error; err != nil {
-			return err
-		}
-		fileIDs := make([]uint, 0, len(files))
-		byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
-		for i := range files {
-			fileIDs = append(fileIDs, files[i].ID)
-			byUser[files[i].UploadedBy] += files[i].FileSize
-		}
-		var folderIDs []uint
-		if err := tx.Model(&model.Folder{}).Where("bucket_id = ?", task.BucketID).Pluck("id", &folderIDs).Error; err != nil {
-			return err
-		}
+	// 先取全部文件记录(用量归还按 UploadedBy 分组;须在删记录前查;
+	// share_links 无 bucket 列,按条目 ID 匹配)。Unscoped 必须含回收站软删行
+	// ——软删不归还用量,整桶清除时一并归还。
+	var files []model.File
+	if err := tx.Unscoped().Model(&model.File{}).Where("bucket_id = ?", task.BucketID).Find(&files).Error; err != nil {
+		return err
+	}
+	fileIDs := make([]uint, 0, len(files))
+	byUser := map[uint]int64{} // 用户用量归还汇总(按 UploadedBy 分组)
+	for i := range files {
+		fileIDs = append(fileIDs, files[i].ID)
+		byUser[files[i].UploadedBy] += files[i].FileSize
+	}
+	var folderIDs []uint
+	if err := tx.Unscoped().Model(&model.Folder{}).Where("bucket_id = ?", task.BucketID).Pluck("id", &folderIDs).Error; err != nil {
+		return err
+	}
 		// 级联:分享随桶删除一并物理清除
 		shareCond := "bucket_item_id IN ? AND item_type = 'file'"
 		shareArgs := []any{fileIDs}
@@ -238,9 +239,9 @@ func processDeleteDirTask(ctx context.Context, taskID uint) error {
 			stack = append(stack, children[i].ID)
 		}
 
-		// 先删对象,全部成功才硬删记录
+		// 先删对象,全部成功才硬删记录(Unscoped 含回收站软删行,一并物理清除并归还用量)
 		files := []model.File{}
-		if err := core.DB.WithContext(ctx).Where("bucket_id = ? AND folder_id = ?", task.BucketID, fid).Find(&files).Error; err != nil {
+		if err := core.DB.WithContext(ctx).Unscoped().Where("bucket_id = ? AND folder_id = ?", task.BucketID, fid).Find(&files).Error; err != nil {
 			return fmt.Errorf("process delete dir task %d: query files: %w", taskID, err)
 		}
 		allOK := true
