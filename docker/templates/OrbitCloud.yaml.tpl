@@ -90,6 +90,16 @@ bucket:
 recycle_bin:
   retention_days: ${ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS}
 
+rate_limit:
+  enabled: ${ORBITCLOUD_RATE_LIMIT_ENABLED}
+  ip_rate: ${ORBITCLOUD_RATE_LIMIT_IP_RATE}
+  ip_burst: ${ORBITCLOUD_RATE_LIMIT_IP_BURST}
+  user_rate: ${ORBITCLOUD_RATE_LIMIT_USER_RATE}
+  user_burst: ${ORBITCLOUD_RATE_LIMIT_USER_BURST}
+  skip_paths: ${ORBITCLOUD_RATE_LIMIT_SKIP_PATHS}
+  record_limit: ${ORBITCLOUD_RATE_LIMIT_RECORD_LIMIT}
+  bucket_ttl_seconds: ${ORBITCLOUD_RATE_LIMIT_BUCKET_TTL_SECONDS}
+
 smb_gateway:
   listen_addr: "${ORBITCLOUD_SMB_GATEWAY_LISTEN_ADDR}"
   shared_key: "${ORBITCLOUD_SMB_SHARED_KEY}"

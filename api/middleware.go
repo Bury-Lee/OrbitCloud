@@ -39,6 +39,20 @@ func AuthMiddleware(c *gin.Context) {
 		return
 	}
 
+	// 限流:账号维度(AuthMiddleware 在 handler 链中执行,此时 claims 已就绪;
+	// 全局 RateLimitMiddleware 先于本中间件,只能做 IP 维度)
+	if rl := server.RateLimit; rl != nil && rl.Enabled() {
+		if !rl.AllowUser(claims.UserID) {
+			rl.Record(server.RateLimitRecord{
+				Time: time.Now(), IP: c.ClientIP(), Method: c.Request.Method,
+				Path: c.Request.URL.Path, UserID: claims.UserID, Username: claims.Username, Reason: "user",
+			})
+			common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
+			c.Abort()
+			return
+		}
+	}
+
 	// 注入 gin context
 	c.Set(claimsKey, claims)
 	c.Next()
@@ -88,15 +102,6 @@ func RateLimitMiddleware(c *gin.Context) {
 		common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
 		c.Abort()
 		return
-	}
-	// 账号维度(登录用户)
-	if claims := ClaimsFrom(c); claims != nil {
-		if !rl.AllowUser(claims.UserID) {
-			rl.Record(server.RateLimitRecord{Time: time.Now(), IP: ip, UserID: claims.UserID, Username: claims.Username, Method: c.Request.Method, Path: path, Reason: "user"})
-			common.Error(c, http.StatusTooManyRequests, "请求过于频繁,请稍后再试")
-			c.Abort()
-			return
-		}
 	}
 	c.Next()
 }

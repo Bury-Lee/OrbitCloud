@@ -83,6 +83,16 @@ services:
       # ---- 日志:落盘到 /data/logs(系统运维页可浏览/下载;留空=仅 stdout) ----
       ORBITCLOUD_LOG_OUTPUT_PATH: "/data/logs"
 
+      # ---- 限流:按 IP 与账号双维度令牌桶(测试阈值,生产按需调大) ----
+      ORBITCLOUD_RATE_LIMIT_ENABLED: "true"
+      ORBITCLOUD_RATE_LIMIT_IP_RATE: "10"
+      ORBITCLOUD_RATE_LIMIT_IP_BURST: "20"
+      ORBITCLOUD_RATE_LIMIT_USER_RATE: "10"
+      ORBITCLOUD_RATE_LIMIT_USER_BURST: "20"
+      ORBITCLOUD_RATE_LIMIT_SKIP_PATHS: '["/api/v1/auth/login","/api/v1/auth/refresh"]'
+      ORBITCLOUD_RATE_LIMIT_RECORD_LIMIT: "1000"
+      ORBITCLOUD_RATE_LIMIT_BUCKET_TTL_SECONDS: "600"
+
 volumes:
   pg-data:
   rustfs-data:
