@@ -1,6 +1,7 @@
 package common
 
 import (
+	"net/url"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -68,26 +69,29 @@ func NewOption(page, pageSize int) *Option {
 	}
 }
 
-// NewOptionFromQuery 从 Gin 查询参数构建 Option
-// 支持的查询参数:
+// ParseOption 从通用查询参数构造 Option(纯函数,不依赖 gin;gin 调用方传
+// c.Request.URL.Query() 即可)。支持的参数:
 //   - cursor:     起始游标
-//   - page:       当前页码（默认 1）
-//   - page_size:  每页条数（默认 10）
+//   - page:       当前页码(默认 1)
+//   - page_size:  每页条数(默认 10)
 //   - key:        模糊搜索关键词
-//   - order:      排序方向（ASC / DESC）
-//   - start_time: 开始时间（RFC3339 格式）
-//   - end_time:   结束时间（RFC3339 格式）
-func NewOptionFromQuery(c *gin.Context) *Option {
-	opt := NewOption(queryInt(c, "page", 1), queryInt(c, "page_size", 10))
-	opt.Cursor = int64(queryInt(c, "cursor", 0))
-	opt.Key = c.Query("key")
-	opt.Order = c.Query("order")
-	if t := c.Query("start_time"); t != "" {
+//   - order:      排序方向(ASC / DESC)
+//   - start_time: 开始时间(RFC3339 格式)
+//   - end_time:   结束时间(RFC3339 格式)
+//
+// 推荐用法:调用方构造好 Option 后传入 common.Paginate,不要在业务代码里
+// 逐个从请求拆字段。
+func ParseOption(values url.Values) *Option {
+	opt := NewOption(intVal(values.Get("page"), 1), intVal(values.Get("page_size"), 10))
+	opt.Cursor = int64(intVal(values.Get("cursor"), 0))
+	opt.Key = values.Get("key")
+	opt.Order = values.Get("order")
+	if t := values.Get("start_time"); t != "" {
 		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
 			opt.StartTime = parsed
 		}
 	}
-	if t := c.Query("end_time"); t != "" {
+	if t := values.Get("end_time"); t != "" {
 		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
 			opt.EndTime = parsed
 		}
@@ -227,9 +231,8 @@ func extractLastID[T any](items []T) int64 {
 	return 0
 }
 
-// queryInt 从 Gin 查询参数读取整数，不存在或非法时返回默认值
-func queryInt(c *gin.Context, key string, defaultVal int) int {
-	s := c.Query(key)
+// intVal 从查询参数读取整数,不存在或非法时返回默认值(纯函数,不依赖 gin)。
+func intVal(s string, defaultVal int) int {
 	if s == "" {
 		return defaultVal
 	}

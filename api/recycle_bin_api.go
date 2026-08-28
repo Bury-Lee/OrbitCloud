@@ -14,12 +14,12 @@ type RecycleBinAPI struct{}
 
 // ListRecycleBin 分页返回自己的回收站(GET /recycle-bin?page=&page_size=&cursor=&key=&order=):
 // 已删除(软删)且归属自己的文件,deleted_at 倒序;走 common 统一分页封装
-// (NewOptionFromQuery 解析参数,WrapPageResponse 输出 PaginatedResult,
+// (ParseOption 解析查询参数构造 Option,WrapPageResponse 输出 PaginatedResult,
 // 与后续回收站其他接口共用同一分页形态)。
 func (RecycleBinAPI) ListRecycleBin(c *gin.Context) {
 	res, err := server.ListRecycleBin(c.Request.Context(), server.ListRecycleBinArg{
 		UserID: currentUser(c),
-		Opt:    common.NewOptionFromQuery(c),
+		Opt:    common.ParseOption(c.Request.URL.Query()),
 	})
 	if err != nil {
 		respondError(c, err)

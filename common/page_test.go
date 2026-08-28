@@ -1,13 +1,11 @@
 package common
 
-// page_test.go —— 分页工具纯函数测试:NewOption 归一、keyset 游标编解码、
-// 排序子句安全组装、末条 ID 提取;NewOptionFromQuery 走 gin 测试上下文。
+// page_test.go —— 分页工具纯函数测试:NewOption 归一、ParseOption 参数解析、
+// keyset 游标编解码、排序子句安全组装、末条 ID 提取。
 
 import (
-	"net/http/httptest"
+	"net/url"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
 
 func TestNewOptionNormalize(t *testing.T) {
@@ -36,12 +34,16 @@ func TestNewOptionNormalize(t *testing.T) {
 	}
 }
 
-func TestNewOptionFromQuery(t *testing.T) {
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest("GET",
-		"/?page=3&page_size=50&cursor=123&key=report&order=asc&start_time=2026-01-02T03:04:05Z&end_time=bad-time",
-		nil)
-	opt := NewOptionFromQuery(c)
+func TestParseOption(t *testing.T) {
+	values := url.Values{}
+	values.Set("page", "3")
+	values.Set("page_size", "50")
+	values.Set("cursor", "123")
+	values.Set("key", "report")
+	values.Set("order", "asc")
+	values.Set("start_time", "2026-01-02T03:04:05Z")
+	values.Set("end_time", "bad-time")
+	opt := ParseOption(values)
 	if opt.Page != 3 {
 		t.Errorf("Page = %d, want 3", opt.Page)
 	}
@@ -62,6 +64,12 @@ func TestNewOptionFromQuery(t *testing.T) {
 	}
 	if !opt.EndTime.IsZero() {
 		t.Errorf("EndTime 非法格式应保持零值, got %v", opt.EndTime)
+	}
+
+	// 缺省:空参数 → 默认第 1 页 / 每页 10 条
+	def := ParseOption(url.Values{})
+	if def.Page != 1 || def.PageSize != 10 {
+		t.Errorf("default = {%d,%d}, want {1,10}", def.Page, def.PageSize)
 	}
 }
 

@@ -28,7 +28,7 @@ const recyclePurgeBatch = 100
 // ListRecycleBinArg 回收站列表入参。
 type ListRecycleBinArg struct {
 	UserID uint           // 归属者 users.id(仅查自己的回收站)
-	Opt    *common.Option // 分页参数(common.NewOptionFromQuery 解析;nil = 默认第一页)
+	Opt    *common.Option // 分页参数(common.ParseOption 从查询参数构造;nil = 默认第一页)
 }
 
 // ListRecycleBin 分页查询用户自己的回收站文件(软删行,deleted_at 倒序,
