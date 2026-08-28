@@ -290,6 +290,9 @@ func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (strin
 	// 拼接组匹配子句(IN 列表;损坏/非数组 JSON 行在解析层被守卫拦截,不外抛):
 	//   - sqlite: json_valid + json_type = 'array' 守卫后 json_each
 	//   - postgres: 正则守卫(仅数字数组)后 cast 再展开
+	//     ★ 正则禁止含 ? 量词:被 GORM Raw 的 ?→$N 占位符替换误伤
+	//       (纯文本替换不识别引号,正则内 ? 会被换成 $N,SQL 损坏报
+	//       syntax error near OFFSET);空数组 [] 保守隐藏(与无组成员等价)
 	var groupClause string
 	if len(userGroupIDs) > 0 {
 		switch dialect {
@@ -298,7 +301,7 @@ func visibilitySQL(dialect string, user *model.User, userGroupIDs []uint) (strin
 			groupClause = fmt.Sprintf(" OR (json_valid(visible_to_groups) AND json_type(visible_to_groups) = 'array' AND EXISTS (SELECT 1 FROM json_each(visible_to_groups) WHERE CAST(json_each.value AS INTEGER) IN (%s)))", placeholders)
 		default: // postgres / postgresql
 			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(userGroupIDs)), ",")
-			groupClause = fmt.Sprintf(" OR (visible_to_groups ~ '^\\s*\\[(\\s*[0-9]+\\s*(,\\s*[0-9]+\\s*)*)?\\]\\s*$' AND EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s)))", placeholders)
+			groupClause = fmt.Sprintf(" OR (visible_to_groups ~ '^\\s*\\[[0-9]+\\s*(,\\s*[0-9]+\\s*)*\\]\\s*$' AND EXISTS (SELECT 1 FROM json_array_elements_text(visible_to_groups::json) WHERE CAST(value AS INTEGER) IN (%s)))", placeholders)
 		}
 	}
 	// 参数顺序:组 ID 列表...
