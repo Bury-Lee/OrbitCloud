@@ -1,11 +1,54 @@
+# ============================================================
+# OrbitCloud - 一键启动(开箱即用版)
+#
+# 适用:单机体验/小型部署,零外部依赖(SQLite + 本地存储)。
+# 生产多机部署请改用 docker-compose.rustfs.yml(RustFS + PostgreSQL)。
+#
+# 用法:
+#   启动:  docker compose up -d
+#   停止:  docker compose down
+#   看日志: docker compose logs -f
+#
+# 端口:
+#   18080  Web 前端(改 "80:80" 用标准端口)
+#   8080   HTTP API
+#   1445   SMB(Windows 资源管理器 \\服务器IP\桶名 挂载)
+#
+# 数据:全部在 named volume orbitcloud-data(/data),容器删除数据不丢。
+#
+# 重要:首次启动后必须创建超级管理员(见 部署说明.md):
+#   docker exec -it orbitcloud /usr/local/bin/orbitcloud --add-superadmin admin '<强密码>'
+# ============================================================
+
 services:
   orbitcloud:
-    image: golang:1.25
+    image: orbitcloud:latest
     container_name: orbitcloud
-    working_dir: /app
-    volumes:
-      - .:/app
-    command: sh -c "go build -o /orbitcloud . && /orbitcloud -initConfig && /orbitcloud"
-    ports:
-      - "8080:8080"
     restart: unless-stopped
+    ports:
+      - "18080:80"       # 前端 Web
+      - "8080:8080"      # 后端 HTTP API
+      - "1445:445"       # SMB
+    volumes:
+      - orbitcloud-data:/data
+    environment:
+      # ---- 应用 ----
+      ORBITCLOUD_APP_ENVIRONMENT: prod
+      ORBITCLOUD_SERVER_MODE: release
+
+      # ---- 认证:生产必改(32 字节以上随机串) ----
+      ORBITCLOUD_JWT_SECRET: "please-change-me-32-bytes-random-string!!"
+      ORBITCLOUD_SMB_SHARED_KEY: "please-change-me-32-bytes-random-key!!!!"
+
+      # ---- 存储:本地磁盘(单机开箱即用) ----
+      ORBITCLOUD_STORAGE_DRIVER: local
+      ORBITCLOUD_STORAGE_PROVIDER: local
+
+      # ---- 数据库:SQLite(仅单机;生产用 PostgreSQL) ----
+      ORBITCLOUD_DB_SOURCE: sqlite
+
+      # ---- 回收站:软删保留 30 天,超期自动物理清除(<=0 永久保留) ----
+      ORBITCLOUD_RECYCLE_BIN_RETENTION_DAYS: "30"
+
+volumes:
+  orbitcloud-data:

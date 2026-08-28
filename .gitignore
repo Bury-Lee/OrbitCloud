@@ -28,7 +28,12 @@ other_software/
 .VSCodeCounter/
 tem/
 dist/
-docker/
+# docker/ 构建产物与二进制(保留 entrypoint.sh / templates / nginx 配置等构建脚本)
+docker/orbitcloud/bin/
+docker/smb-gateway/bin/
+docker/rustfs/bin/
+docker/web/web/
+docker/.env
 # 部署运维工具产物
 OrbitCloudDeployTool.exe
 config.json
