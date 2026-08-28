@@ -101,9 +101,15 @@ async function onUpload() {
     const ok = res.ok
     const bad = res.failed.length
     if (bad === 0) {
-      ElMessage.success(`上传完成:${ok} 项(目录结构已复刻)`)
+      ElMessage.success(`上传成功 ${ok} 项(目录结构已复刻)`)
     } else {
-      const detail = res.failed.map((f) => `${f.relPath}(${f.error})`).join('、')
+      // 失败明细最多展示 5 条,其余折叠计数(防止长文件名把提示撑爆)
+      const MAX_SHOWN = 5
+      const shown = res.failed.slice(0, MAX_SHOWN)
+      let detail = shown.map((f) => `${f.relPath}(${f.error})`).join('、')
+      if (res.failed.length > MAX_SHOWN) {
+        detail += `、等 ${res.failed.length - MAX_SHOWN} 项`
+      }
       ElMessage.warning(`上传成功 ${ok} 项,失败 ${bad} 项:${detail}`)
     }
     uploadItems.value = [] // 成功即清空,防遗留(失败保留,便于重试)
