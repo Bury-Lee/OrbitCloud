@@ -49,8 +49,10 @@ pub struct BucketInstance {
 impl BucketInstance {
     /// 判定共享"定义"是否未变化(upsert 快速路径用)。
     ///
-    /// 比较:共享名 / 桶 ID / 桶名 / 权限模式 / 状态 / ACL 用户清单。
-    /// 不比较:配额与已用空间(桶级元数据,变化不应触发协议层重建)。
+    /// 比较:共享名 / 桶 ID / 桶名 / 权限模式 / 状态。
+    /// 不比较:配额与已用空间(桶级元数据,变化不应触发协议层重建);
+    /// 也不比较 ACL——快照不再携带聚合 ACL,共享授权完全由认证时
+    /// 按需拉取(CODE_AUTH_QUERY_ACL)维护,对账重建时合并保留旧授权。
     ///
     /// 背景:定期对账(apply_snapshot)会反复 upsert 全部共享;若每次都
     /// remove_share + add_share,库侧 remove_share 会关闭该共享全部活跃
@@ -61,11 +63,6 @@ impl BucketInstance {
             && self.bucket_name == info.bucket_name // 桶显示名
             && self.mode == info.mode // 共享级默认权限
             && self.status == info.status // 桶状态
-            && self.users.len() == info.users.len() // ACL 用户数一致
-            && info.users.iter().all(|u| {
-                // ACL 逐个比对:用户名 + 访问级别必须一致
-                self.users.get(&u.username) == Some(&access_from_str(&u.access))
-            }) // 全部匹配才算未变化
     }
 }
 
@@ -158,6 +155,20 @@ impl BucketRegistry {
             }
         }
 
+        // 合并 ACL:保留旧实例已按需授权的用户(快照 ACL 为空,认证时经
+        // QUERY_ACL 动态授权;重建不清空,否则已认证用户全部失去访问权),
+        // 叠加快照携带的用户(协议兼容)。
+        let legacy_acl: std::collections::HashMap<String, Access> = {
+            let map = self.inner.read().await; // 取读锁查旧实例
+            map.get(&info.share_name)
+                .map(|e| e.users.clone()) // 旧实例 ACL(按需授权结果)
+                .unwrap_or_default() // 无旧实例 = 空
+        };
+        let mut merged_users = legacy_acl; // 以旧授权为基底
+        for u in &info.users { // 叠加快照用户
+            merged_users.insert(u.username.clone(), access_from_str(&u.access));
+        }
+
         let backend = RemoteBackend::new(Arc::clone(conn), info.clone(), self.users.clone()); // 构造远程后端(共享连接 + 桶上下文 + 用户索引)
         let share = build_share(backend, info)?; // 组装协议层共享(带后端)
         let inst = Arc::new(BucketInstance { // 构造桶实例(注册表内部形态)
@@ -165,11 +176,7 @@ impl BucketRegistry {
             bucket_id: info.bucket_id, // 桶主键
             bucket_name: info.bucket_name.clone(), // 桶显示名
             mode: info.mode.clone(), // 共享默认权限模式
-            users: info
-                .users // ACL 用户清单
-                .iter()
-                .map(|u| (u.username.clone(), access_from_str(&u.access))) // 用户名 → 库 Access 枚举
-                .collect(), // 收集为 HashMap
+            users: merged_users.clone(), // 合并后的 ACL(旧授权 + 快照)
             quota: info.quota as u64, // 容量配额
             used_space: info.used_space as u64, // 已用空间
             status: info.status, // 桶状态
@@ -187,15 +194,14 @@ impl BucketRegistry {
             .add_share(share) // 注册新共享(要求用户已注册)
             .await
             .map_err(|e| format!("注册表:注册共享 {} 失败:{:?}", info.share_name, e))?; // 注册失败终止
-        for u in &info.users { // 逐用户授予访问权限
-            let acc = access_from_str(&u.access); // access 字符串 → 库枚举
+        for (username, acc) in &merged_users { // 逐用户授予访问权限(合并后的 ACL)
             config
-                .grant_share_user(&info.share_name, &u.username, acc) // 授权:用户名 → 共享
+                .grant_share_user(&info.share_name, username, *acc) // 授权:用户名 → 共享
                 .await
                 .map_err(|e| {
                     format!( // 授权失败:报错并终止(附用户名/共享名)
                         "registry: grant {} on {}: {:?}",
-                        u.username, info.share_name, e
+                        username, info.share_name, e
                     )
                 })?;
         }

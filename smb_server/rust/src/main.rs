@@ -46,6 +46,7 @@ mod user_cache; // 用户快照缓存(大 key 库,认证按需拉取)
 use std::sync::Arc; // Arc:跨任务共享所有权(连接/注册表等)
 use std::time::Duration; // 时长类型(退避等待/对账周期)
 
+use smb_server::ConfigHandle; // 协议层配置句柄(桥接槽位用)
 use smb_server::SmbServer; // ixr-smb-server 的 SMB 服务端构建器
 
 use crate::core::enter::Config; // 全局配置结构(解析自 SMB.yaml)
@@ -100,29 +101,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .listen
         .parse() // 把配置字符串解析为 SocketAddr
         .map_err(|e| format!("配置:smb.listen {:?}: {e}", cfg.smb.listen))?; // 解析失败:带原文报错终止
+    // 配置句柄延迟桥:builder 注入 resolver 时 handle 尚未创建(build 后才可用),
+    // 认证在运行期发生,届时从槽位取已填充的句柄。
+    let handle_slot: Arc<std::sync::Mutex<Option<ConfigHandle>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let server: SmbServer = SmbServer::builder() // 构建 SMB 服务端
         .listen(listen) // 监听地址(如 0.0.0.0:2445)
         .netbios_name(&cfg.smb.netbios_name) // NetBIOS 显示名
         .user_resolver({
-            // 认证按需解析器:缓存命中直接返回;未命中/过期 → RPC 拉取并回填。
+            // 认证按需解析器(连接用户维度):
+            //   1) 凭据:缓存命中直接返回;未命中/过期 → QUERY_USER 拉取并回填;
+            //   2) 授权:凭据可用后 → QUERY_ACL 拉该用户可见共享并授权
+            //      (注册表 upsert + grant;权限收紧即时 revoke)。
             let registry2 = Arc::clone(&registry);
             let cache2 = user_cache.clone();
             let conn2 = Arc::clone(&conn);
+            let handle2 = Arc::clone(&handle_slot);
             move |username: String| {
                 let registry3 = Arc::clone(&registry2);
                 let cache3 = cache2.clone();
                 let conn3 = Arc::clone(&conn2);
+                let handle3 = Arc::clone(&handle2);
                 Box::pin(async move {
-                    cache3
+                    let Some(cached) = cache3
                         .ensure(&conn3, &registry3.users_index(), &username)
                         .await
-                        .map(|c| c.creds)
+                    else {
+                        return None;
+                    };
+                    // 凭据可用后按需刷新共享授权(失败不阻断认证,下次再试)
+                    // 注意:句柄先克隆出锁作用域再 await(guard 非 Send)
+                    let handle_opt = handle3.lock().unwrap().clone();
+                    if let Some(h) = handle_opt {
+                        cache3
+                            .ensure_user_acl(&conn3, &registry3, &h, &username)
+                            .await;
+                    }
+                    Some(cached.creds)
                 })
             }
         })
         .build() // 完成构建
         .map_err(|e| format!("SMB 服务器构建失败:{e:?}"))?; // 构建失败终止
     let handle = server.config_handle(); // 配置句柄:后续动态注册用户/共享/ACL 都经它
+    *handle_slot.lock().unwrap() = Some(handle.clone()); // 填充桥接槽位(认证时取用)
 
     // ---- 6. 启动同步任务(共享全量对账 + 增量推送;用户按需缓存)----
     let interval = if cfg.gateway.sync_interval_secs > 0 {
