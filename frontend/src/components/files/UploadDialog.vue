@@ -48,9 +48,17 @@ function onPickFolder(e: Event) {
   input.value = ''
 }
 
-async function onDrop(e: DragEvent) {
+/** 拖拽 drop 时解析目录树;文件/文件夹混合;preventDefault 阻止浏览器默认打开文件 */
+function onDrop(e: DragEvent) {
   if (!e.dataTransfer) return
-  uploadItems.value = await collectFromDataTransfer(e.dataTransfer)
+  e.preventDefault()
+  void collectFromDataTransfer(e.dataTransfer).then((items) => {
+    if (items.length === 0) {
+      ElMessage.warning('未解析到文件,请尝试用「选择文件/文件夹」按钮')
+      return
+    }
+    uploadItems.value = [...uploadItems.value, ...items]
+  })
 }
 
 function onDragOver(e: DragEvent) {

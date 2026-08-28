@@ -197,6 +197,12 @@ func (c Config) InitConfig() (*Config, error) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 
+	// 2.1 环境变量覆盖(部署友好:docker compose 注入,无需改配置文件)。
+	// 留空 = 不覆盖。日志输出目录:空 = stdout,非空 = 落盘文件日志。
+	if v := os.Getenv("ORBITCLOUD_LOG_OUTPUT_PATH"); v != "" {
+		c.Log.OutputPath = v
+	}
+
 	// 3. 校验(不兜底,发现即报错,按提示修改后重启)
 	if strings.TrimSpace(c.App.Name) == "" {
 		return nil, errors.New("config: app.name is required")
