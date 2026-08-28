@@ -134,6 +134,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 再按需刷新共享授权(失败不阻断认证,下次再试)。
                     // 注意:句柄先克隆出锁作用域再 await(guard 非 Send)
                     let handle_opt = handle3.lock().unwrap().clone();
+                    infof!(
+                        "缓存:认证解析 {username} 凭据命中(handle_slot={})",
+                        &["SMB"],
+                        handle_opt.is_some()
+                    );
                     if let Some(h) = handle_opt {
                         let hash_hex = hex::encode(cached.creds.nt_hash);
                         if let Err(e) = h.add_user_nt_hash(&username, &hash_hex).await {

@@ -103,19 +103,21 @@ func (a *AuthService) QuerySharesForUser(ctx context.Context, username string) (
 
 // sharesForUser 按用户行计算可见共享(内部;u 已加载)。
 func (a *AuthService) sharesForUser(ctx context.Context, u *model.User) ([]ShareInfo, error) {
-	buckets := []model.Bucket{}
-	// 1. 属主桶(owner_id 索引)
+	// 注意:两次查询必须用独立 slice——GORM Find 是覆盖式填充,
+	// 复用同一 slice 会让第二次查询覆盖第一次的结果。
+	var owned []model.Bucket // 属主桶(owner_id 索引)
 	if err := a.db.WithContext(ctx).
 		Where("status = 1 AND owner_id = ?", u.ID).
-		Order("id ASC").Find(&buckets).Error; err != nil {
+		Order("id ASC").Find(&owned).Error; err != nil {
 		return nil, fmt.Errorf("auth: list owned buckets for %q: %w", u.Username, err)
 	}
-	// 2. 非属主但权限级别达标的桶(permission_level 索引)
+	var accessible []model.Bucket // 非属主但权限级别达标的桶(permission_level 索引)
 	if err := a.db.WithContext(ctx).
 		Where("status = 1 AND permission_level >= ? AND owner_id != ?", u.PermissionLevel, u.ID).
-		Order("id ASC").Find(&buckets).Error; err != nil {
+		Order("id ASC").Find(&accessible).Error; err != nil {
 		return nil, fmt.Errorf("auth: list accessible buckets for %q: %w", u.Username, err)
 	}
+	buckets := append(owned, accessible...)
 	out := make([]ShareInfo, 0, len(buckets)) // 预分配结果切片
 	for i := range buckets {                  // 遍历可见桶
 		b := &buckets[i]             // 取桶行指针

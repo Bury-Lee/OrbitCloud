@@ -126,8 +126,17 @@ impl UserCache {
     ) {
         let shares = match self.fetch_acl(conn, username).await {
             Some(s) => s,
-            None => return, // 拉取失败:保持现状,下次认证再试
+            None => {
+                warnf!("缓存:用户 {username} 拉取 ACL 失败,跳过授权", &["SMB"]);
+                return;
+            }
         };
+        infof!(
+            "缓存:用户 {username} 可见共享 {} 个:{:?}",
+            &["SMB"],
+            shares.len(),
+            shares.iter().map(|s| s.share_name.as_str()).collect::<Vec<_>>()
+        );
         let mut granted: HashSet<String> = HashSet::new();
         for s in &shares {
             granted.insert(s.share_name.to_ascii_lowercase());
